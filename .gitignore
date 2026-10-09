@@ -41,3 +41,13 @@ android/captures/
 *.log
 test-reports/tmp/
 e2e/.tmp/
+
+# 例外：Gate 0 的证据日志是要入库的 —— TEST_REPORT.md 逐条引用它们，
+# 评审得能自己打开看，而不是只能相信报告里的转述。
+# （注意：被忽略的目录里的文件无法用 ! 重新包含，所以上面只忽略 test-reports/tmp/，
+#   没有整目录忽略 test-reports/。）
+!test-reports/typecheck.log
+!test-reports/vitest.log
+!test-reports/e2e.log
+!test-reports/android-build.log
+!test-reports/workerd-not-run.log

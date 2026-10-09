@@ -1,0 +1,70 @@
+# Gate 0 —— "基于真实 workerd 的测试" 为什么是 NOT RUN
+# 这不是转述，是在本机直接执行后原样留下的输出。
+
+## 环境事实
+$ uname -m
+aarch64
+$ ulimit -v
+unlimited
+$ echo $DSHA_ANDROID_RUNTIME
+1
+$ echo $ANDROID_ROOT
+/system
+
+## 证据 1：孤立的 workerd 二进制
+$ node_modules/@cloudflare/workerd-linux-arm64/bin/workerd --version
+26488 external/tcmalloc+/tcmalloc/internal/system_allocator.h:585] MmapAligned() failed - unable to allocate with tag (hint=0x2c1fc0000000, size=1073741824, alignment=1073741824) - is something limiting address placement?
+26488 external/tcmalloc+/tcmalloc/internal/system_allocator.h:592] Note: the allocation may have failed because TCMalloc assumes a 48-bit virtual address space size; you may need to rebuild TCMalloc with TCMALLOC_ADDRESS_BITS defined to your system's virtual address space size
+26488 external/tcmalloc+/tcmalloc/arena.cc:59] CHECK in Alloc: FATAL ERROR: Out of memory trying to allocate internal tcmalloc data (bytes=131072, object-size=16384); is something preventing mmap from succeeding (sandbox, VSS limitations)?
+EXIT=134
+
+## 证据 2：wrangler dev --local
+$ npx wrangler dev --config worker/wrangler.jsonc --local --port 8787
+
+
+ ⛅️ wrangler 4.149.0
+────────────────────
+Your Worker has access to the following bindings:
+Binding                                                                       Resource                  Mode
+env.PHONE_SESSION (PhoneSession)                                              Durable Object            local
+env.MCP_SESSION (McpSession)                                                  Durable Object            local
+env.PHONE_PING_TIMEOUT_MS ("10000")                                           Environment Variable      local
+env.HEARTBEAT_INTERVAL_MS ("30000")                                           Environment Variable      local
+env.MAX_PENDING_REQUESTS ("16")                                               Environment Variable      local
+env.MAX_PHONE_MESSAGE_BYTES ("65536")                                         Environment Variable      local
+env.SUPPORTED_MCP_PROTOCOL_VERSIONS ("2025-06-18,2025-03-26,2024-11-05")      Environment Variable      local
+
+26594 external/tcmalloc+/tcmalloc/internal/system_allocator.h:620] MmapAligned() failed - unable to allocate with tag (hint=0x6ff840000000, size=1073741824, alignment=1073741824) - is something limiting address placement?
+26594 external/tcmalloc+/tcmalloc/internal/system_allocator.h:627] Note: the allocation may have failed because TCMalloc assumes a 48-bit virtual address space size; you may need to rebuild TCMalloc with TCMALLOC_ADDRESS_BITS defined to your system's virtual address space size
+26594 external/tcmalloc+/tcmalloc/arena.cc:115] CHECK in AllocSlow: FATAL ERROR: Out of memory trying to allocate internal tcmalloc data (bytes=131072, object-size=16384); is something preventing mmap from succeeding (sandbox, VSS limitations)?
+
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mwrite EPIPE[0m
+
+
+[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m
+⎔ Starting local server...
+26622 external/tcmalloc+/tcmalloc/internal/system_allocator.h:620] MmapAligned() failed - unable to allocate with tag (hint=0x2c4f40000000, size=1073741824, alignment=1073741824) - is something limiting address placement?
+26622 external/tcmalloc+/tcmalloc/internal/system_allocator.h:627] Note: the allocation may have failed because TCMalloc assumes a 48-bit virtual address space size; you may need to rebuild TCMalloc with TCMALLOC_ADDRESS_BITS defined to your system's virtual address space size
+26622 external/tcmalloc+/tcmalloc/arena.cc:115] CHECK in AllocSlow: FATAL ERROR: Out of memory trying to allocate internal tcmalloc data (bytes=131072, object-size=16384); is something preventing mmap from succeeding (sandbox, VSS limitations)?
+🪵  Logs were written to "/root/.config/.wrangler/logs/wrangler-2026-10-09_14-30-51_173.log"
+EXIT=1
+
+## 结论
+两条路径都以 tcmalloc 的虚拟地址空间分配失败告终（EXIT=134 / Aborted）。
+容器运行在 Android 运行时上，VA 布局与 tcmalloc 的 48 位假设不符；
+`TCMALLOC_ADDRESS_BITS` 是编译期常量，静态链接的 tcmalloc 无法用 LD_PRELOAD 覆盖
+（`ulimit -v` 已 unlimited，所以也不是资源限制能解释的）。因此：
+
+- `wrangler dev --local`            → NOT RUN
+- `@cloudflare/vitest-pool-workers` → NOT RUN
+- 真实 WebSocket Hibernation        → NOT RUN
+- 真实 DO 驱逐后重建                → NOT RUN
+- 真实 alarm 送达                   → NOT RUN
+- 真实计费/限制行为                 → NOT RUN
+
+Gate 0 的 Worker/DO 测试改跑在同仓库的 Node 端运行时替身上
+（`worker/test/harness/`、`e2e/run-local-e2e.ts`）。替身能证伪的东西比真运行时少，
+这一条已写进 TEST_REPORT.md 第 3.1 和第 5 节，不当作等价替代。
+
+（附带结论：wrangler 在这一步**成功解析并打印了** worker/wrangler.jsonc 里的 vars，
+说明那份配置本身是可被 wrangler 读取的，失败点在启动本地运行时那一刻。）

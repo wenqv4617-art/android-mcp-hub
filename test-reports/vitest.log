@@ -1,0 +1,20 @@
+$ npx vitest run --config worker/vitest.config.ts
+
+
+ RUN  v4.1.11 /root/android-mcp-hub
+
+ ✓ worker/test/mcp-session.test.ts (11 tests) 31ms
+ ✓ worker/test/worker-index.test.ts (18 tests) 35ms
+ ✓ worker/test/mcp-http.test.ts (31 tests) 81ms
+ ✓ worker/test/tools.test.ts (19 tests) 152ms
+ ✓ worker/test/security.test.ts (13 tests) 397ms
+ ✓ worker/test/phone-session.test.ts (26 tests) 2390ms
+     ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  413ms
+     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  312ms
+
+ Test Files  6 passed (6)
+      Tests  118 passed (118)
+   Start at  14:29:24
+   Duration  3.26s (transform 1.06s, setup 603ms, import 1.41s, tests 3.09s, environment 1ms)
+
+EXIT=0

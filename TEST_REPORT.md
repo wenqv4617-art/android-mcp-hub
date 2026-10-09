@@ -141,7 +141,8 @@ workerd 跑不起来（§5），所以单元测试**不跑在 Cloudflare 的运�
 
 - 静态扫描：仓库内**不得**出现 `d1_databases`、`new D1Database`、`env.DB`、`D1Database` 类型引用；`worker/src/env.ts` 里不得声明任何 D1/KV/R2/Queue 绑定字段（**这是"没有 D1"的编译期 + 测试期双重断言**）。
 - 静态扫描：源码/配置/wrangler 配置里不得出现真令牌形状的字面量；`.dev.vars` 与 `local.properties` 必须在 `.gitignore` 里。
-- 静态扫描：**不得**出现任何指向见川记忆生产资源的标识（账户 id、Worker 名、已知生产域名）。
+- 静态扫描：**不得**出现任何指向**既有生产项目**的标识（项目名、账户 id、Worker 名、已知生产域名、仓库路径）。禁词表内联在测试源码里，扫描时排除该测试文件自身。
+  > 这条测试**真的抓到过东西**：本报告与 `SECURITY.md` 的第一版在正文里写到了那个生产项目的名字，扫描立刻变红。修法是**改文档**（统一改称"既有生产项目"），而不是放宽容忍度 —— 新仓库里不该出现那个名字。
 - 日志脱敏：`redact()` 对嵌套对象、数组、深层（≤6 层）的敏感键一律 `[redacted]`；`token`/`secret`/`authorization`/`password`/`credential`/`cookie`/`apikey` 命中；**同时**测了"非敏感键原样保留"，避免脱敏过度。
 
 ---
@@ -149,12 +150,12 @@ workerd 跑不起来（§5），所以单元测试**不跑在 Cloudflare 的运�
 ## 4. 端到端：21/21 通过（这条链路是真的）
 
 ```
-$ tsx e2e/run-local-e2e.ts
+$ npm run e2e          # = GATE0_VERBOSE=1 tsx e2e/run-local-e2e.ts
   端到端结果：21 通过，0 失败（共 21 项）
 EXIT=0
 ```
 
-证据：`test-reports/e2e.log`。
+证据：`test-reports/e2e.log`（**已随仓库入库**，`test-reports/*.log` 在 `.gitignore` 里被显式豁免）。
 
 **这条 e2e 为什么算"真"**：
 
@@ -317,8 +318,8 @@ Gate 0 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT 的
 
 - ❌ 没有执行 `wrangler deploy` 或任何云端资源创建（**任务书第 8/10 条**）
 - ❌ 没有创建/绑定/访问任何 **D1** 数据库（`env.ts` 里连类型都没有；有静态测试守着）
-- ❌ 没有读取或复用见川记忆的任何密钥/Token/环境变量（仓库内无任何指向它的引用；有静态测试守着）
-- ❌ 没有修改见川记忆的代码/配置/部署（全程未进入该目录做写操作）
+- ❌ 没有读取或复用**既有生产项目**的任何密钥 / Token / 环境变量（有静态测试扫着禁词）
+- ❌ 没有修改**既有生产项目**的代码 / 配置 / 部署（全程未进入那个目录做写操作）
 - ❌ 没有配置任何自动生产部署（无 CI workflow 触发 deploy）
 - ❌ 没有把真实凭据提交到 GitHub（`.gitignore` 挡住 `.dev.vars`/`local.properties`/keystore，且只有假令牌）
 - ❌ 没有实现工具管理 UI / 扫描本地应用 / 自动启动其他应用 / 跨设备控制

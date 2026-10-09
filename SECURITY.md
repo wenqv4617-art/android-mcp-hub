@@ -16,7 +16,7 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 | --- | --- | --- | --- |
 | MCP 入口用**共享** Bearer token | `worker/src/mcp/http.ts` 的 `verifyMcpAuth`：一个 `MCP_ACCESS_TOKEN`，谁拿到谁能用 | 令牌没法按客户端吊销、没法区分用户、泄漏即全失守 | OAuth 2.1 + PKCE + DCR，见 [docs/OAUTH-DESIGN.md](docs/OAUTH-DESIGN.md) |
 | **没有速率限制** | 无 | 暴力猜令牌、拿 phone_ping 当探针刷 RTT、把 DO 打爆 | 按 IP + 按设备双维度限流；`MAX_PENDING_REQUESTS` 只挡并发不挡频率 |
-| **没有持久化审计** | 只用 `logEvent` 打单行 JSON | 日志随平台保留期消失，事后查不到"谁在什么时候连过" | 阶段 2 引入审计存储（**不是**沿用见川记忆的 D1，要独立资源） |
+| **没有持久化审计** | 只用 `logEvent` 打单行 JSON | 日志随平台保留期消失，事后查不到"谁在什么时候连过" | 阶段 2 引入审计存储（**不得**复用既有生产项目的任何数据库，必须是独立资源） |
 | `/healthz` 公开 | `worker/src/index.ts` 无鉴权返回健康契约 | 暴露部署存在性、绑定名、开关布尔值 | 若要收紧：只回 `status`，细节另开带鉴权的端点 |
 | 401 不带 `resource_metadata` | `worker/src/mcp/http.ts` 故意省略 | 客户端无法自动发现授权服务器；现在**还没有**授权服务器，指过去只会更糟 | 阶段 2 补上，并**反向**那条断言（`worker/test/mcp-http.test.ts:102` 附近） |
 | 手机端是 debug 签名 | `app-debug.apk` | 不能分发给真人用 | 走 release 签名与密钥托管 |
@@ -228,7 +228,7 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 - `worker/.dev.vars.example` **只有占位符**，里面那个 `tokenSha256` 是 64 个 `0`，一眼能看出是假的。
 - **源码里没有任何真实凭据**，并且这一点是**被静态扫描测着的**（`worker/test/security.test.ts`）：
   - 扫描**文本文件**里的 40 位 base62 令牌形状；`package-lock.json` / 锁文件被排除（里面全是 npm integrity 哈希，扫它们只会造假警报）。
-  - 扫描"见川记忆"项目的隔离性（`jianchuan` / `见川` 等词），并**排除这个测试文件自己**。
+  - 扫描与**既有生产项目**的零交叉：项目名、其 GitHub 组织/仓库名等禁词全部内联在测试源码里（写在这里就等于把禁词又抄了一遍），扫描时**排除该测试文件自身**。
   - 扫描 `worker/src/env.ts` 里**不许出现** `D1Database` / KV / R2 / Queue 形状（先 `stripComments`，否则那句"刻意没有任何 D1 字段"的注释会被自己误伤）。
   - 扫描 `redact()` 真的会脱敏（含嵌套键）。
 - 因此仓库里**没有**、也不该有：`.dev.vars`、真实令牌、account id、D1 绑定、路由配置。
