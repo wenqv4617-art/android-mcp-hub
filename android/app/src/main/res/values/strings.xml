@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android MCP Hub</string>
+
+    <!-- 通知渠道 -->
+    <string name="notif_channel_name">设备链路</string>
+    <string name="notif_channel_desc">显示与 MCP 中继的长连接状态</string>
+
+    <!-- 前台服务通知 -->
+    <string name="notif_title">设备链路</string>
+    <string name="notif_connecting">正在连接 %1$s</string>
+    <string name="notif_connected">已连接到 %1$s</string>
+    <string name="notif_reconnecting">正在重连（第 %1$d 次）</string>
+    <string name="notif_auth_failed">认证失败，请检查设备令牌与设备 ID</string>
+    <string name="notif_error">连接出错：%1$s</string>
+    <string name="notif_idle">未连接</string>
+    <string name="action_disconnect">断开</string>
+</resources>

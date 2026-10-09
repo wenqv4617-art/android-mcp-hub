@@ -1,0 +1,31 @@
+{
+  "name": "android-mcp-hub",
+  "version": "0.1.0-gate0",
+  "private": true,
+  "type": "module",
+  "description": "Gate 0 skeleton: MCP Streamable HTTP Worker + PhoneSession Durable Object + Android phone app for the Android MCP Hub.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "wrangler dev --config worker/wrangler.jsonc --local --port 8787",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --config worker/vitest.config.ts",
+    "test:watch": "vitest --config worker/vitest.config.ts",
+    "mock:phone": "tsx tools/mock-phone/main.ts",
+    "e2e": "GATE0_VERBOSE=1 tsx e2e/run-local-e2e.ts",
+    "gate0": "npm run typecheck && npm run test && npm run e2e"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "@cloudflare/workers-types": "5.20261009.1",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@types/node": "24.10.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.149.0",
+    "ws": "^8.18.3"
+  }
+}

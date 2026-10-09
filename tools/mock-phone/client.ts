@@ -1,0 +1,287 @@
+// ============================================================================
+//  模拟手机 WebSocket 客户端
+// ============================================================================
+//
+//  两种用法：
+//    1. 命令行：`npm run mock:phone -- --url ws://127.0.0.1:8787/phone/ws
+//       --device test-phone-1 --token <token> --scenario normal`
+//    2. 被测试引用（worker/test/*.test.ts），此时 socket 由 harness 注入。
+//
+//  `scenario` 是为了把 Gate 0 要求覆盖的那些**恶劣**情况变成一条命令：
+//
+//    normal           收到 phone_ping 就回 phone_pong（默认）
+//    no-response      收到 ping 不回 —— 用来验证服务端超时
+//    wrong-request-id 回一个服务端没发过的 request_id —— 必须被拒绝
+//    duplicate-pong   同一请求回两次 —— 第二次必须被当作 unknown 拒绝
+//    late             延迟 delayMs 再回 —— 用来验证"超时后到达的响应不得完成请求"
+//    drop-after-ping  收到 ping 立刻断开 —— 未完成请求必须显式失败
+//    noisy            穿插未知类型帧 / 非法 JSON / 超大帧 —— 都必须被拒绝且不影响后续
+//    binary           发二进制帧 —— 必须被拒绝
+//    hello-mismatch   hello 里报另一个 deviceId —— 只记账、不崩
+//
+//  ⚠ 这个文件里**没有任何真实凭据**：token 一律从命令行/环境变量传入。
+// ============================================================================
+
+export type PhoneScenario =
+  | "normal"
+  | "no-response"
+  | "wrong-request-id"
+  | "duplicate-pong"
+  | "late"
+  | "drop-after-ping"
+  | "noisy"
+  | "binary"
+  | "hello-mismatch";
+
+export const PHONE_SCENARIOS: PhoneScenario[] = [
+  "normal",
+  "no-response",
+  "wrong-request-id",
+  "duplicate-pong",
+  "late",
+  "drop-after-ping",
+  "noisy",
+  "binary",
+  "hello-mismatch",
+];
+
+/** 只依赖标准 WebSocket 的最小接口，好让测试注入假 socket。 */
+export interface SocketLike {
+  readyState: number;
+  send(data: string | ArrayBuffer): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: string, listener: (event: never) => void): void;
+}
+
+export interface MockPhoneOptions {
+  scenario?: PhoneScenario;
+  /** 只用于 hello 帧的自报字段，不参与鉴权。 */
+  deviceId?: string;
+  appVersion?: string;
+  /** `late` 场景的延迟毫秒数。 */
+  delayMs?: number;
+  /**
+   * 对第 N 个（0 基）phone_ping **故意不回应**，其余的照常回。
+   * 用来构造"并发请求里只有一个超时"的场景，验证请求之间不会串。
+   */
+  skipPingIndexes?: number[];
+  /** 每条收到的原始帧都会先过这里（测试用来做断言）。 */
+  onFrame?: (raw: string) => void;
+  onLog?: (line: string) => void;
+}
+
+export interface SentPong {
+  requestId: string;
+  deviceTimestamp: number;
+  /** 是在哪一帧之后发的（用于断言顺序）。 */
+  afterFrameIndex: number;
+}
+
+/**
+ * 协议状态机本身。与传输无关，因此可以脱离真实 socket 单测。
+ */
+export class MockPhone {
+  readonly received: string[] = [];
+  readonly sentPongs: SentPong[] = [];
+  readonly sentFrames: string[] = [];
+  helloSeen = false;
+  welcomeSeen = false;
+  socketClosed: { code: number; reason: string } | null = null;
+  /** drop-after-ping 场景置位：附着层看到它就把 socket 关掉。 */
+  wantCloseAfterPing = false;
+
+  private readonly scenario: PhoneScenario;
+  private readonly opts: MockPhoneOptions;
+  /** 收到过多少个 phone_ping（0 基索引用）。 */
+  pingCount = 0;
+
+  constructor(opts: MockPhoneOptions = {}) {
+    this.opts = opts;
+    this.scenario = opts.scenario ?? "normal";
+  }
+
+  /** 收到一条服务端帧时的行为。返回需要立刻回发的帧（已编码）。 */
+  handleFrame(raw: string, send: (data: string | ArrayBuffer) => void): void {
+    this.received.push(raw);
+    this.opts.onFrame?.(raw);
+
+    let frame: Record<string, unknown>;
+    try {
+      frame = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      this.log(`收到非法 JSON，忽略：${truncate(raw)}`);
+      return;
+    }
+
+    switch (frame["type"]) {
+      case "welcome":
+        this.welcomeSeen = true;
+        this.log(
+          `welcome: generation=${String(frame["connection_generation"])} ` +
+            `heartbeat=${String(frame["heartbeat_interval_ms"])}ms ping_timeout=${String(frame["ping_timeout_ms"])}ms`,
+        );
+        if (this.scenario === "hello-mismatch") {
+          this.sendJson(send, {
+            type: "hello",
+            device_id: "some-other-phone",
+            app_version: this.opts.appVersion ?? "mock-0.1.0",
+            protocol_version: "phone-link-v1",
+          });
+        } else {
+          this.sendJson(send, {
+            type: "hello",
+            device_id: this.opts.deviceId ?? null,
+            app_version: this.opts.appVersion ?? "mock-0.1.0",
+            protocol_version: "phone-link-v1",
+          });
+        }
+        this.helloSeen = true;
+        return;
+
+      case "heartbeat_ack":
+        this.log("heartbeat_ack");
+        return;
+
+      case "error":
+        this.log(`服务端 error: code=${String(frame["code"])} message=${String(frame["message"])}`);
+        return;
+
+      case "phone_ping": {
+        const requestId = typeof frame["request_id"] === "string" ? frame["request_id"] : "";
+        const index = this.pingCount;
+        this.pingCount += 1;
+        this.log(`phone_ping #${index} request_id=${requestId}`);
+        if (this.scenario === "noisy") this.sendNoise(send);
+        if (this.opts.skipPingIndexes?.includes(index) === true) {
+          this.log(`按配置跳过第 ${index} 个 ping，不回 pong`);
+          return;
+        }
+        this.respondToPing(send, requestId);
+        return;
+      }
+
+      default:
+        this.log(`忽略未知帧类型：${String(frame["type"])}`);
+        return;
+    }
+  }
+
+  private respondToPing(send: (data: string | ArrayBuffer) => void, requestId: string): void {
+    switch (this.scenario) {
+      case "no-response":
+        this.log("scenario=no-response：故意不回 pong");
+        return;
+
+      case "drop-after-ping":
+        this.log("scenario=drop-after-ping：立刻关闭连接");
+        this.wantCloseAfterPing = true;
+        return;
+
+      case "wrong-request-id":
+        this.sendPong(send, `${requestId}-not-a-real-id`);
+        return;
+
+      case "duplicate-pong":
+        this.sendPong(send, requestId);
+        this.sendPong(send, requestId);
+        return;
+
+      case "late":
+        setTimeout(() => this.sendPong(send, requestId), this.opts.delayMs ?? 500);
+        return;
+
+      case "binary": {
+        const buf = new TextEncoder().encode(JSON.stringify({ type: "phone_pong", request_id: requestId })).buffer;
+        this.sentFrames.push("<binary>");
+        this.log("scenario=binary：发二进制帧");
+        send(buf as ArrayBuffer);
+        return;
+      }
+
+      default:
+        this.sendPong(send, requestId);
+        return;
+    }
+  }
+
+  private sendNoise(send: (data: string | ArrayBuffer) => void): void {
+    this.sentFrames.push("{not json");
+    send("{not json");
+    this.sendJson(send, { type: "definitely_not_a_frame_type" });
+    this.sendJson(send, { type: "phone_pong" }); // 缺 request_id → invalid
+  }
+
+  private sendPong(send: (data: string | ArrayBuffer) => void, requestId: string): void {
+    const deviceTimestamp = Date.now();
+    this.sentPongs.push({ requestId, deviceTimestamp, afterFrameIndex: this.received.length });
+    this.sendJson(send, { type: "phone_pong", request_id: requestId, timestamp: deviceTimestamp });
+  }
+
+  private sendJson(send: (data: string | ArrayBuffer) => void, frame: Record<string, unknown>): void {
+    const raw = JSON.stringify(frame);
+    this.sentFrames.push(raw);
+    send(raw);
+  }
+
+  log(line: string): void {
+    this.opts.onLog?.(line);
+  }
+}
+
+function truncate(text: string): string {
+  return text.length <= 120 ? text : `${text.slice(0, 120)}…`;
+}
+
+/**
+ * 把 MockPhone 接到一个真实（或伪造）socket 上。
+ *
+ * @returns `stop()` —— 关闭 socket 并摘掉监听。
+ */
+export function attachMockPhone(
+  phone: MockPhone,
+  socket: SocketLike,
+  opts: { isOpen?: () => boolean } = {},
+): { stop: () => void; whenOpen: Promise<void> } {
+  let openResolve!: () => void;
+  const whenOpen = new Promise<void>((resolve) => {
+    openResolve = resolve;
+  });
+
+  const isOpen = opts.isOpen ?? (() => socket.readyState === 1);
+  if (isOpen()) openResolve();
+  else {
+    socket.addEventListener("open", () => openResolve());
+  }
+
+  socket.addEventListener("message", (event: never) => {
+    const data = (event as unknown as { data: string }).data;
+    phone.handleFrame(typeof data === "string" ? data : "<binary-in>", (out) => {
+      socket.send(out);
+    });
+    if (phone.wantCloseAfterPing) {
+      phone.wantCloseAfterPing = false;
+      try {
+        socket.close(1001, "mock phone going away");
+      } catch {
+        /* 已经关了 */
+      }
+    }
+  });
+
+  socket.addEventListener("close", (event: never) => {
+    const e = event as unknown as { code: number; reason: string };
+    phone.socketClosed = { code: e.code ?? 1006, reason: e.reason ?? "" };
+    phone.log(`连接关闭：code=${e.code} reason=${e.reason ?? ""}`);
+  });
+
+  return {
+    whenOpen,
+    stop: () => {
+      try {
+        socket.close(1000, "client stopping");
+      } catch {
+        /* 已经关了 */
+      }
+    },
+  };
+}

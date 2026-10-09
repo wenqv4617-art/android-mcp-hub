@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  默认禁止明文流量。本应用的协议是 wss://<host>/phone/ws，
+  不需要 cleartext 例外；如果本地联调要用 ws://（http://），
+  请显式修改本文件而不是在代码里加 usesCleartextTraffic。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

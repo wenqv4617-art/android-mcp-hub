@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      只用一个框架内置主题作为窗口底色；真正的配色由 Compose 的
+      MaterialTheme（见 ui/Theme.kt）负责，这里刻意不引 Material Components 的 XML 主题。
+    -->
+    <style name="Theme.AndroidMcpHub" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

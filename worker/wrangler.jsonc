@@ -1,0 +1,64 @@
+// ============================================================================
+//  Android MCP Hub — Wrangler 配置（**仅供人工审核，本阶段不部署**）
+// ============================================================================
+//
+//  Gate 0 约束（逐条对应任务书「二、最高优先级：生产环境隔离」）：
+//    · 没有 account_id —— 部署时必须由操作者显式提供，不会误落到某个既有账户；
+//    · 没有 route / routes / zone_name —— 不申请任何自定义域名，不碰线上流量；
+//    · 没有 d1_databases —— 全程不使用 D1（本阶段唯一的持久化是 DO 自带存储）；
+//    · 没有 kv_namespaces / r2_buckets / queues / hyperdrive —— 无任何额外云资源；
+//    · 没有 [env.*] —— 不存在「生产环境」这个目标，从配置层面杜绝误部署；
+//    · 没有 secrets 明文 —— 全部通过 `wrangler secret put` 注入，见 .dev.vars.example。
+//
+//  ⚠ 本文件的存在不代表已部署。Gate 0 不执行 `wrangler deploy`。
+//     本地验证一律用 `wrangler dev --local`（不产生任何云端资源）。
+//
+//  配置项含义见 README.md「本地构建与测试」与 ARCHITECTURE.md。
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+
+  // Worker 名称。与 GitHub 仓库名一致，便于审计时把「代码」和「资源」对上。
+  "name": "android-mcp-hub",
+
+  // 入口模块（同时导出 PhoneSession / McpSession 两个 Durable Object 类）。
+  "main": "src/index.ts",
+
+  // 兼容性日期：2025-06-18。选这个日期是因为它就是 Gate 0 选定的
+  // MCP 协议版本（见 docs/PROTOCOL.md），语义上对齐，便于日后回溯。
+  "compatibility_date": "2025-06-18",
+
+  // 观测：只开 Workers Logs，不接第三方，不导出到外部账户。
+  "observability": {
+    "enabled": true
+  },
+
+  // 非敏感运行参数。敏感值（MCP_ACCESS_TOKEN / DEVICE_TOKENS）**不在这里**，
+  // 由 `wrangler secret put` 注入 —— 见 SECURITY.md 第 3 节。
+  "vars": {
+    "PHONE_PING_TIMEOUT_MS": "10000",
+    "HEARTBEAT_INTERVAL_MS": "30000",
+    "MAX_PENDING_REQUESTS": "16",
+    "MAX_PHONE_MESSAGE_BYTES": "65536",
+    "SUPPORTED_MCP_PROTOCOL_VERSIONS": "2025-06-18,2025-03-26,2024-11-05"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      // 每台手机一个实例：idFromName(deviceId) → PhoneSession
+      { "name": "PHONE_SESSION", "class_name": "PhoneSession" },
+      // 每个 MCP 会话一个实例：idFromName(sessionId) → McpSession
+      { "name": "MCP_SESSION", "class_name": "McpSession" }
+    ]
+  },
+
+  // Durable Object 迁移。这是 DO 的类注册，**不是**数据库：
+  // 两个类都用 SQLite 存储后端（DO 自带、随对象生命周期存在、无独立数据库实例、
+  // 无 SQL 端点、不能被 SQL 查询）。这一点在 SECURITY.md 第 5 节专门澄清，
+  // 以免与任务书「不使用 D1」的要求混淆。
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PhoneSession", "McpSession"]
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Android MCP Hub — 绝不入库的东西
+# ---------------------------------------------------------------------------
+
+# 依赖
+node_modules/
+
+# Cloudflare 本地状态（含本地模拟的 KV/DO 数据）
+.wrangler/
+worker/.wrangler/
+
+# ★ 真实凭据：本地开发用的明文变量文件。仓库里只有 .dev.vars.example
+.dev.vars
+*.dev.vars
+
+# 构建产物
+dist/
+build/
+coverage/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk
+*.aab
+*.jks
+*.keystore
+!android/app/debug.keystore
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# 日志与临时产物
+*.log
+test-reports/tmp/
+e2e/.tmp/

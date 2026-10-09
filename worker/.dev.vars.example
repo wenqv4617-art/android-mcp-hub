@@ -1,0 +1,24 @@
+# ============================================================================
+#  本地开发变量示例 —— 全部是**占位符**，没有一个真实凭据
+# ============================================================================
+#
+#  用法：
+#    1) cp worker/.dev.vars.example worker/.dev.vars
+#    2) 把下面两个值换成你自己临时生成的测试值
+#    3) worker/.dev.vars 已被 .gitignore 忽略，**永远不会**进入仓库
+#
+#  生成设备凭据的推荐姿势（不要把明文 token 打进命令行历史）：
+#    npm run token:hash -- test-phone-1            # 交互式读入 token 并打印 JSON
+#
+#  ⚠ 这里的东西只用于本地 `wrangler dev --local`。
+#     真实部署时必须用 `wrangler secret put MCP_ACCESS_TOKEN` 等命令注入，
+#     绝不能把本文件提交或复制进任何仓库/聊天记录。
+# ----------------------------------------------------------------------------
+
+# ChatGPT/MCP 入口的访问令牌（Gate 0 的临时方案，后续由 OAuth 2.1 取代）。
+# 与手机设备令牌**完全分离**：这个值不会下发给手机，手机也拿不到。
+MCP_ACCESS_TOKEN="REPLACE-WITH-A-LOCAL-TEST-TOKEN"
+
+# 手机设备凭据表（JSON 数组）。tokenSha256 是设备明文令牌的 SHA-256 十六进制小写。
+# 轮换方式：新增一条 deviceId 相同的记录，并把旧记录的 revokedAt 填上。
+DEVICE_TOKENS=[{"deviceId":"test-phone-1","tokenSha256":"0000000000000000000000000000000000000000000000000000000000000000","label":"local mock phone","createdAt":"2026-01-01T00:00:00Z","revokedAt":null}]

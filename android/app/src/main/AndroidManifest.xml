@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  权限清单：只声明这条长连接真正需要的 5 个权限。
+  没有任何存储 / 位置 / 相机 / 通讯录 / 短信 / 电话 / QUERY_ALL_PACKAGES /
+  RECEIVE_BOOT_COMPLETED / WAKE_LOCK / REQUEST_IGNORE_BATTERY_OPTIMIZATIONS。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 连接用户自己的 MCP 中继（wss://） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 监听网络恢复，网络回来后立刻重连 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 13+ 前台服务通知可见性；用户拒绝也照常连接，只是通知不可见 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 前台服务本身 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- 前台服务类型 specialUse（诚实申报，见 README-ANDROID.md） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <application
+        android:name=".HubApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AndroidMcpHub">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.AndroidMcpHub">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          前台服务：类型是 specialUse —— 协议要求 6 种类型之外的「其它」，
+          唯一诚实的选项。用途说明见 android/README-ANDROID.md。
+
+          android:exported="false"：只有本应用能启动/停止它。
+        -->
+        <service
+            android:name=".service.PhoneLinkService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Persistent user-initiated WebSocket command channel to the user's own Android MCP Hub relay; receives and answers keepalive/ping frames so a paired MCP client can reach this device. No location, media, or file access." />
+        </service>
+    </application>
+
+</manifest>

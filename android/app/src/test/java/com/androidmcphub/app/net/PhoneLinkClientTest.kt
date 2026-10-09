@@ -1,0 +1,200 @@
+package com.androidmcphub.app.net
+
+import com.androidmcphub.app.core.HubConfig
+import com.androidmcphub.app.protocol.LinkState
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+
+/**
+ * 在 JVM 上用 MockWebServer 跑真实 WebSocket 链路。
+ *
+ * 这里验证的是「网络层 ↔ 状态机」的接线：请求头、hello、pong、认证失败。
+ * 纯协议规则（R1–R6）在 [com.androidmcphub.app.protocol.PhoneLinkTest] 里覆盖。
+ */
+class PhoneLinkClientTest {
+
+    private fun awaitState(
+        states: List<LinkState>,
+        timeoutMs: Long = 10_000L,
+        predicate: (LinkState) -> Boolean,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (states.any(predicate)) return true
+            Thread.sleep(20)
+        }
+        return states.any(predicate)
+    }
+
+    @Test
+    fun `真实链路上完成握手并回复 phone_pong`() {
+        val server = MockWebServer()
+        val clientFrames = LinkedBlockingQueue<String>()
+        val serverOpened = CountDownLatch(1)
+
+        val serverListener = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                serverOpened.countDown()
+                val now = System.currentTimeMillis()
+                webSocket.send(
+                    """{"type":"welcome","device_id":"test-phone-1","connection_generation":3,""" +
+                        """"server_time":$now,"heartbeat_interval_ms":30000,"ping_timeout_ms":10000,""" +
+                        """"max_pending_requests":16,"protocol_version":"phone-link-v1"}""",
+                )
+                webSocket.send("""{"type":"phone_ping","request_id":"uuid-1","timestamp":$now}""")
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                clientFrames.add(text)
+            }
+        }
+        server.enqueue(MockResponse().withWebSocketUpgrade(serverListener))
+        server.start()
+
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            tokenProvider = { "test-token-not-a-secret" },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue("服务端应当收到 WebSocket 建连", serverOpened.await(10, TimeUnit.SECONDS))
+
+            // 第一帧必须是 hello
+            val helloRaw = clientFrames.poll(10, TimeUnit.SECONDS)
+            assertNotNull("应当发出 hello 帧", helloRaw)
+            val hello = JSONObject(helloRaw!!)
+            assertEquals("hello", hello.getString("type"))
+            assertEquals("test-phone-1", hello.getString("device_id"))
+            assertEquals("phone-link-v1", hello.getString("protocol_version"))
+            assertEquals("0.1.0", hello.getString("app_version"))
+            assertEquals(35, hello.getInt("android_sdk"))
+
+            // 随后必须用同一个 request_id 回 phone_pong
+            var pong: JSONObject? = null
+            val deadline = System.currentTimeMillis() + 10_000L
+            while (pong == null && System.currentTimeMillis() < deadline) {
+                val raw = clientFrames.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                val obj = JSONObject(raw)
+                if (obj.optString("type") == "phone_pong") pong = obj
+            }
+            assertNotNull("应当回 phone_pong", pong)
+            assertEquals("uuid-1", pong!!.getString("request_id"))
+            assertTrue(
+                "pong 的时间戳应当是本机当前时间",
+                Math.abs(pong.getLong("timestamp") - System.currentTimeMillis()) < 60_000L,
+            )
+
+            // 请求头符合协议契约
+            val request = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull(request)
+            assertEquals("Bearer test-token-not-a-secret", request!!.getHeader("Authorization"))
+            assertEquals("test-phone-1", request.getHeader("X-Device-Id"))
+            assertEquals("android-mcp-hub/0.1.0", request.getHeader("X-Client-Version"))
+            assertEquals("GET", request.method)
+            assertTrue("按契约不带 query", request.path == "/phone/ws")
+
+            // welcome 之后界面必须看到「已连接（代次 3）」
+            assertTrue(
+                "状态应当变为已连接，实际 $states",
+                awaitState(states) { it is LinkState.Connected && it.generation == 3L },
+            )
+            assertNotNull("最近一次 ping 应当有记录", client.lastPing)
+            assertEquals("uuid-1", client.lastPing?.requestId)
+        } finally {
+            client.shutdown()
+            runCatching { server.shutdown() }
+        }
+    }
+
+    @Test
+    fun `服务端返回 401 时进入认证失败且不重连`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(401).setBody("unauthorized"))
+        server.start()
+
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            tokenProvider = { "test-token-not-a-secret" },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue(
+                "应当是认证失败，实际 $states",
+                awaitState(states) { it is LinkState.AuthFailed },
+            )
+        } finally {
+            client.shutdown()
+            runCatching { server.shutdown() }
+        }
+    }
+
+    @Test
+    fun `服务器地址无效时直接进入出错状态且不发起连接`() {
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = "", deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            tokenProvider = { "test-token-not-a-secret" },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue(
+                "应当是出错状态，实际 $states",
+                awaitState(states, timeoutMs = 2_000L) { it is LinkState.Error },
+            )
+            assertEquals(
+                LinkState.Error("服务器地址无效，请在「高级设置」里填写形如 wss://<host>/phone/ws 的地址"),
+                states.first { it is LinkState.Error },
+            )
+        } finally {
+            client.shutdown()
+        }
+    }
+
+    @Test
+    fun `设备令牌为空时拒绝连接`() {
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = "wss://example.test/phone/ws", deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            tokenProvider = { "" },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue(
+                "令牌为空必须拒绝连接，实际 $states",
+                awaitState(states, timeoutMs = 2_000L) { it is LinkState.Error },
+            )
+        } finally {
+            client.shutdown()
+        }
+    }
+}

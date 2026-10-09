@@ -1,0 +1,41 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# aapt2 包装脚本（仅用于 aarch64 主机）
+#
+# 为什么需要它：
+#   1) AGP 默认从 Google Maven 下载的 aapt2 是 **x86_64** ELF，在 aarch64 内核上
+#      无法直接执行，报错：
+#         aapt2: cannot execute: required file not found
+#         > AAPT2 aapt2-8.7.3-12006047-linux Daemon #0: Daemon startup failed
+#      本机是 Android 15 / aarch64，没有 x86_64 运行环境，所以用 qemu-user 在
+#      x86_64 sysroot 下运行 build-tools 自带的 aapt2。
+#   2) 文件名必须**恰好叫 aapt2**：AGP 的 Aapt2FromMaven.create() 会检查
+#         aapt2Override.endsWith(SdkConstants.FN_AAPT2)   // "aapt2"
+#      文件名不符合就直接抛：
+#         Custom AAPT2 location does not point to an AAPT2 executable: <路径>
+#      所以这个文件不能带 .sh 后缀。
+#
+# 依赖（见 README-ANDROID.md「在 aarch64 主机上构建」）：
+#   - /usr/bin/qemu-x86_64-static   （apt install -y --no-install-recommends qemu-user-static）
+#   - /opt/x86_64-root              （amd64 sysroot：libc6 + libstdc++6 + zlib1g）
+#
+# 在真正的 x86_64 主机上构建时不需要本脚本：删掉 gradle.properties 里的
+# android.aapt2FromMavenOverride 那一行即可。
+# ---------------------------------------------------------------------------
+set -e
+
+# 允许用环境变量覆盖，便于换 aapt2 版本或换 sysroot 位置。
+QEMU="${AAPT2_QEMU:-/usr/bin/qemu-x86_64-static}"
+SYSROOT="${AAPT2_SYSROOT:-/opt/x86_64-root}"
+REAL_AAPT2="${AAPT2_REAL:-/opt/android-sdk/build-tools/34.0.0/aapt2}"
+
+if [ ! -x "$QEMU" ]; then
+    echo "找不到 qemu-user：$QEMU（请先 apt-get install -y --no-install-recommends qemu-user-static）" >&2
+    exit 127
+fi
+if [ ! -x "$REAL_AAPT2" ]; then
+    echo "找不到 x86_64 版 aapt2：$REAL_AAPT2" >&2
+    exit 127
+fi
+
+exec "$QEMU" -L "$SYSROOT" "$REAL_AAPT2" "$@"
