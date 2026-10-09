@@ -70,7 +70,7 @@ android.aapt2FromMavenOverride=/root/android-mcp-hub/android/tools/aapt2
 - aapt2 的版本 banner（`Android Asset Packaging Tool (aapt) 2.19-…`）**打在 stderr**，这是它的固有行为。
 
 在真正的 x86_64 主机上构建时，把 `android.aapt2FromMavenOverride` 那一行注释掉即可，
-`tools/aapt2` 可以留着不用。
+`android/tools/aapt2` 可以留着不用（它只在被显式指向时才会被执行）。
 
 ### 1.2 单元测试需要 UTF-8 的 locale（`gradlew` 里已兜底）
 
