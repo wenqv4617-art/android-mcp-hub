@@ -341,6 +341,13 @@ Gate 0 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT 的
 
 ---
 
-## 10. 提交哈希
+## 10. 提交与分支
 
-本报告与代码同一次提交入库。提交哈希见交付说明（`docs/GATE0-DELIVERY.md` 或最终报告），格式 `git rev-parse HEAD`。
+本报告与代码同一次提交入库：**`ad3b510`**，分支 **`gate0`**，新仓库 `wenqv4617-art/android-mcp-hub`（`main` 保持为空，未推送）。
+
+```bash
+$ git log --oneline
+ad3b510 feat(gate0): Worker + Durable Object + Android APK 全链路可测闭环
+```
+
+> 刻意**不**在本文件里写死"当前 HEAD"的哈希：哈希一旦被写进文件，任何后续提交都会让它变成一句假话。要引用最新哈希，请用 `git rev-parse HEAD`。
