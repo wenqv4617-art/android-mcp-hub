@@ -172,6 +172,36 @@ npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc
 
 ---
 
+### 5.1 手机端准备（把 APK 装上、把地址填对）
+
+阶段 C 的验收要**真机**，所以这一步必须由你在手机上完成。本代理不接触你的设备。
+
+**① 装 APK**
+
+仓库里的交付件是 `dist/Android-MCP-Hub-Gate1-debug.apk`，
+SHA-256 `2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b`（10,318,558 字节）。
+Debug 签名，安装时系统会提示"未知来源"，允许即可。装好先**核对一下校验值**，别装到旧的。
+
+**② 在 App 里填三项**
+
+| 字段 | 填什么 | 注意 |
+| --- | --- | --- |
+| 服务器 URL | `wss://<第 5 节 deploy 输出的主机>/phone/ws` | **必须是 `wss://` 且必须带 `/phone/ws` 这一截路径**。`deploy` 打印的是 `https://…workers.dev`（只有主机名），直接粘进去会被 App 拦下并提示要写到 `/phone/ws` —— 这个拦截是刻意加的，因为少写路径会以「握手失败」的形式失败，很难看出原因 |
+| 设备 ID | 与 `DEVICE_TOKENS` 里的 `deviceId` **完全一致** | 例如 `my-android-phone`。它**不是秘密**，写错的表现是 `no_active_credential` |
+| 设备令牌 | 4.1 生成的那个**明文**令牌 | 只填一次；之后由 Android Keystore 加密存放。**令牌与 `deviceId` 要成对**，错配的表现是 `token_mismatch` |
+
+**③ 点「连接」，然后看这三处**
+
+1. 连接状态变成已连接（会显示连接代次）；
+2. 日志里出现 `hello` / `welcome`；
+3. 断开再连一次，代次应该 +1（说明不是复用了旧的连接）。
+
+**④ 两个已知的真机注意事项**
+
+- **通知权限**（Android 13+）：拒绝**不影响**前台服务运行，只是通知抽屉里看不到那条常驻通知；
+- 这个 App **从来没有在真机上跑过**（`TEST_REPORT.md` §6.4 全部标 NOT RUN），
+  所以"装上之后到底顺不顺"这次才算第一次验证。**如果启动就闪退，请把现象告诉我** —— 那属于必须回代码查的问题，不要靠反复重装绕过。
+
 ## 6. 部署后验证（阶段 B）
 
 把 `<WORKER>` 换成第 5 步输出里的地址（例如 `android-mcp-hub.abc.workers.dev`）。
@@ -200,9 +230,11 @@ curl -si "https://<WORKER>/phone/ws" \
   -H 'Authorization: Bearer wrong-token' | head -5
 
 # B5 正确设备令牌 + 手机 App 连上之后，用手机端界面确认状态显示
+#    （手机怎么装、地址怎么填，见 §5.1）
 ```
 
 阶段 B 的完整 10 项见 [GATE1_ACCEPTANCE.md](./GATE1_ACCEPTANCE.md)。
+**B5 之后的所有项都需要 §5.1 里的真机已经在线上**。
 
 ---
 

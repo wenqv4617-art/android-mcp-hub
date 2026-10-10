@@ -18,7 +18,7 @@
 | Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
 | 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
 | Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
-| Android JVM 单测 | 90 | 132（10 个类） | 135（11 个类） | 157（13 个类） | **170**（14 个类，+13） | ✅ 全过 |
+| Android JVM 单测 | 90 | 132（10 个类） | 135（11 个类） | 157（13 个类） | **171**（14 个类，+14） | ✅ 全过 |
 | Android Lint（阻塞式门禁） | — | — | ❌ **被 `abortOnError = false` 静音** | ✅ **会红** | ✅ 保留，未回退 | ✅ 见 **§6.7** |
 | Manifest 组件类名 ↔ 真实 APK 的 dex | — | ❌ **漏了 —— Gate 0.1 启动即闪退** | ✅ **新增（两层检查）** | ✅ 保留，未回退 | ✅ 保留，未回退 | ✅ 见 **§6.6** |
 | Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 不变 | ✅ 不变 | ✅ 不变 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
@@ -381,14 +381,14 @@ VERIFY_EXIT=0
 
 证据：`test-reports/android-build.log`（含上面三段全部输出）。APK 的校验值、大小与元信息见 §11。Gate 0.2 新增的这层检查为什么必须存在，见 **§6.6**。
 
-### 6.2 JVM 单元测试：170/170 通过（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）
+### 6.2 JVM 单元测试：171/171 通过（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）
 
 | 测试类 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | 结果 |
 | --- | --- | --- | --- | --- | --- |
 | `app.ManifestComponentTest` | — | — | 2 | 2 | ✅ 新增（Gate 0.2，§6.6） |
 | `core.BackoffTest` | 9 | 9 | 9 | 9 | ✅ |
 | `core.DeviceTokenStoreTest` | — | 18 | 18 | 18 | ✅ 新增（R4） |
-| `core.HubConfigTest` | 7 | 7 | 7 | 7 | ✅ |
+| `core.HubConfigTest` | 7 | 7 | 7 | 7 | **8** | ✅ +1（§12.11） |
 | `core.HubLogTest` | 4 | 4 | 4 | 4 | ✅ |
 | `core.SocketFailureTest` | — | — | — | **9** | ✅ 新增（Gate 0.3 发现项 ①） |
 | `core.WsUrlTest` | 8 | 8 | 8 | 8 | ✅ |
@@ -399,7 +399,7 @@ VERIFY_EXIT=0
 | `protocol.PingResponderTest` | 9 | 9 | 9 | 9 | ✅ |
 | `service.ConnectGateTest` | — | 21 | 21 | 21 | ✅ 新增（R3） |
 | `service.LinkBusTest` | — | — | — | — | **13** | ✅ 新增（Gate 1，见 §12.10） |
-| **合计** | **90** | **132** | **135** | **157**（13 个类） | **170**（14 个类） | ✅ **0 失败 / 0 错误 / 0 跳过** |
+| **合计** | **90** | **132** | **135** | **157**（13 个类） | **171**（14 个类） | ✅ **0 失败 / 0 错误 / 0 跳过** |
 
 数字来自解析 `android/app/build/test-results/testDebugUnitTest/*.xml`（`tests` / `failures` / `errors` / `skipped` 四个属性求和），不是从控制台肉眼数的。
 
@@ -762,7 +762,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
 | Worker/DO 单元测试 | **200** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
-| Android JVM 单测 | **170** | 0 | 0 | 0 |
+| Android JVM 单测 | **171** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
 | Android Lint 门禁（Gate 0.3 新增，实测会红 + 放行） | **2（注入故障 / 恢复）** | 0 | 0 | 0 |
 | Android 真机行为 | 0 | 0 | 0 | 7（§6.4）+ 9（§6.5） |
@@ -770,7 +770,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11.2） |
 | 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
 | ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
-| **合计（已执行）** | **395** | **0** | **0** | **45+** |
+| **合计（已执行）** | **396** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -827,7 +827,7 @@ $ git log --oneline
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest        # 170/170
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest        # 171/171
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:lintDebug                # Gate 0.3：0 errors
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses    # Manifest 类名 ↔ dex
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug
@@ -924,7 +924,7 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 | 6 | Gate 0.3 遗留 ②：重复 `request_id` 覆盖 pending | `handlePingRequest` 在并发上限检查**之前**加守卫：已在 `pending` 里的同 id 直接 **409 + `duplicate_request_id`**，新增计数器 `pendingRejectedDuplicate` | `phone-session.test.ts` §14 两条 |
 | 7 | Gate 0.3 遗留 ③：DO 重建后遗留 pending | 产品代码**本来就已经正确**（重建时丢弃镜像、累加 `reconstructedPendingFailed`、不产生任何响应）；本轮补上会红的测试 | `phone-session.test.ts` §15 两条 |
 | 8 | 测试替身要能注入"不返回" | `worker/test/harness/runtime.ts` 新增 `hangNext(op, opts)` 与 `neverSettles()`，把 `maybeFail` 重构成 `hit` + `maybeFail` 两级 | 由 §13/§14/§15 六条用例驱动 |
-| 9 | Android 侧保留全部既有保护 | **产品代码只改版本号**（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5），行为一行未改；另外新增了一个**测试类** `LinkBusTest`（§12.10，13 条），不碰产品代码；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条一条没删 + 新增 13 条 = **170** + `verifyManifestClasses` + `lintDebug` |
+| 9 | Android 侧保留全部既有保护 | **产品代码只改了两处**：版本号（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5）与 `HubConfig.validate()` 的一处**新增校验**（§12.11，空路径的地址在连接前就被拦下）；其余行为一行未改；测试侧新增 `LinkBusTest`（§12.10，13 条）与 `HubConfigTest` 的 1 条（§12.11）；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条一条没删 + 新增 14 条 = **171** + `verifyManifestClasses` + `lintDebug` |
 
 ### 12.2 OAuth 面：新增了什么、为什么这么设计
 
@@ -983,7 +983,7 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 | 项 | 值 |
 | --- | --- |
 | 文件 | `dist/Android-MCP-Hub-Gate1-debug.apk`（`dist/SHA256SUMS.txt` 里有同一份断言） |
-| SHA-256 | `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674` |
+| SHA-256 | `2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b` |
 | 大小 | 10,318,558 字节（约 9.84 MiB） |
 | applicationId | `com.androidmcphub.app`（debug 变体后缀见 `android/app/build.gradle.kts`） |
 | versionName / versionCode | `0.1.4-gate1` / `5` |
@@ -1068,8 +1068,45 @@ echo        "$DEVICE_TOKEN" | sha256sum   → cd38083…0d737   ← 多了一个
 | `log.clear()` → `logs` 立刻变空 | 界面「清空日志」按钮 |
 
 实测：`ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest`
-→ `BUILD SUCCESSFUL`，`TOTAL tests=170 failures=0 errors=0 skipped=0`（14 个类）。
+→ `BUILD SUCCESSFUL`，`TOTAL tests=170 failures=0 errors=0 skipped=0`（14 个类）。**§12.11 又加了一条，现在是 171**。
 
 **边界（不要读多）**：它证明的是**状态总线自己的规则**，不是真机上界面真的把字画出来了 ——
 Compose 的渲染、`HubViewModel` 的订阅、`PhoneLinkService` 往总线上写的**时机**，仍然全部 NOT RUN（§6.4）。
 所以 §6.4 里"收到 ping 并返回 pong（真机）"那一行**照旧是 NOT RUN**，只是它背后的"值传对了没有"这一层不再是空白。
+
+---
+
+### 12.11 部署前的又一处实测发现：只填主机名的地址会「通过校验、连不上」
+
+`wrangler deploy` 成功后会打印一个**只有主机名**的地址：
+
+```
+https://android-mcp-hub.<你的子域>.workers.dev
+```
+
+而手机要连的是 `wss://<主机>/phone/ws`。原来的 `HubConfig.validate()` 只检查 scheme 与主机名，
+所以把 `wrangler` 打印的那个地址原样粘进 App 再点「连接」，表现是：
+**校验通过 → 前台服务起来 → 握手失败**，而报错内容与「地址少写了一截」完全看不出关系
+（Worker 在 `/` 上返回的是 `handleRoot()` 的文本，不是 WebSocket 升级）。
+
+修法（`android/app/src/main/java/com/androidmcphub/app/core/HubConfig.kt:31-40`）：规范化之后如果
+**没有路径、或路径恰好是 `/`**，直接返回 `服务器 URL 要写到路径 /phone/ws（例如 wss://<主机>/phone/ws）`。
+这是**新增**的一条拦截 —— 只填主机名在原实现里 100% 连不上，拦住它不会产生任何误报，
+也没有收紧任何原本能用的地址。
+
+**门禁实测（先证明它会红）**：把新增的这几行删掉再跑，新用例立刻失败：
+
+```
+HubConfigTest > 只填主机名会被拦下，并告诉用户要写到 phone-ws 路径 FAILED
+8 tests completed, 1 failed
+> Task :app:testDebugUnitTest FAILED
+BUILD FAILED in 41s
+```
+
+恢复源码（`sha256sum` 与备份逐字节一致 `8bf1e84d037587e64eae59cf7339022ecdc3af7fe0144cc529b38121d97ba739`）后全绿。
+
+**这条同样不是从审计清单里来的**，是「照着部署文档把地址填一遍」这个动作逼出来的（§12.8 是同一类）。
+
+**代价**：交付 APK 因此重建，SHA-256 由 `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674`
+变成 **`2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b`**（大小不变，仍是 10,318,558 字节，
+两次构建 SHA 一致 `REPRODUCIBLE=YES`）；旧 APK 作废，§12.6 的表已更新。Android 单测 170 → **171**（14 个类）。

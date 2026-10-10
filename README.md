@@ -167,7 +167,7 @@ npm run mock:phone -- \
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 170 个 JVM 单测
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 171 个 JVM 单测
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses # Manifest 类名 ↔ 真实 dex
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:lintDebug            # Lint 门禁（abortOnError = true）
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 产出 Debug APK

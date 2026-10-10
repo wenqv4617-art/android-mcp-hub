@@ -28,8 +28,16 @@ data class HubConfig(
     fun validate(): String? {
         val url = serverUrl.trim()
         if (url.isEmpty()) return "服务器 URL 不能为空"
-        if (normalizeWebSocketUrl(url) == null) {
-            return "服务器 URL 必须以 wss://、ws://、https:// 或 http:// 开头"
+        val normalized = normalizeWebSocketUrl(url)
+            ?: return "服务器 URL 必须以 wss://、ws://、https:// 或 http:// 开头"
+
+        // 只填主机名 —— 也就是 `wrangler deploy` 直接打印出来的那个地址 —— 是最常见的错法。
+        // 它本来会通过校验，然后客户端去连根路径 `/`：Worker 在 `/` 上返回的是文本、
+        // 不是 WebSocket 升级，握手必然失败，而用户看到的是一个和"地址少写了一段"完全
+        // 看不出关系的错误。所以在**发起连接之前**就拦下来，并把该写成什么样直接告诉他。
+        val pathStart = normalized.indexOf('/', normalized.indexOf("://") + 3)
+        if (pathStart < 0 || normalized.substring(pathStart) == "/") {
+            return "服务器 URL 要写到路径 /phone/ws（例如 wss://<主机>/phone/ws）"
         }
         if (deviceId.isBlank()) return "设备 ID 不能为空"
         if (heartbeatIntervalMs <= 0L) return "心跳周期必须大于 0"

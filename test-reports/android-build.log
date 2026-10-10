@@ -1,6 +1,6 @@
 ############################################################
 # Gate 1 · Android 构建与测试证据
-# 生成时间（UTC）：2026-10-10T06:22:36Z
+# 生成时间（UTC）：2026-10-10T06:30:38Z
 # 环境：aarch64，JDK 17.0.20.1，ANDROID_HOME=/opt/android-sdk
 # 注意顺序：先跑单测并统计（计数必须在 clean 之前 —— clean 会删掉 test-results/，
 #           先 clean 再统计会得到 tests=0 这种假的零）
@@ -30,28 +30,28 @@ WARNING: The option setting 'android.aapt2FromMavenOverride=/root/android-mcp-hu
 > Task :app:processDebugManifest UP-TO-DATE
 > Task :app:processDebugManifestForPackage UP-TO-DATE
 > Task :app:processDebugResources UP-TO-DATE
-> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin FROM-CACHE
 > Task :app:javaPreCompileDebug UP-TO-DATE
 > Task :app:compileDebugJavaWithJavac UP-TO-DATE
-> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
-> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
-> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
 > Task :app:preDebugUnitTestBuild UP-TO-DATE
 > Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
-> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
 > Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar
+> Task :app:bundleDebugClassesToRuntimeJar
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
 > Task :app:processDebugUnitTestJavaRes UP-TO-DATE
-> Task :app:testDebugUnitTest UP-TO-DATE
+> Task :app:testDebugUnitTest FROM-CACHE
 
-BUILD SUCCESSFUL in 24s
-24 actionable tasks: 24 up-to-date
+BUILD SUCCESSFUL in 25s
+24 actionable tasks: 2 executed, 2 from cache, 20 up-to-date
 UNITTEST_EXIT=0
 
 ===== 1b. 逐类统计（解析 build/test-results/testDebugUnitTest/*.xml）=====
   BackoffTest              tests=9 failures=0 errors=0 skipped=0
   ConnectGateTest          tests=21 failures=0 errors=0 skipped=0
   DeviceTokenStoreTest     tests=18 failures=0 errors=0 skipped=0
-  HubConfigTest            tests=7 failures=0 errors=0 skipped=0
+  HubConfigTest            tests=8 failures=0 errors=0 skipped=0
   HubLogTest               tests=4 failures=0 errors=0 skipped=0
   LinkBusTest              tests=13 failures=0 errors=0 skipped=0
   LogRedactionTest         tests=13 failures=0 errors=0 skipped=0
@@ -62,7 +62,7 @@ UNITTEST_EXIT=0
   PingResponderTest        tests=9 failures=0 errors=0 skipped=0
   SocketFailureTest        tests=9 failures=0 errors=0 skipped=0
   WsUrlTest                tests=8 failures=0 errors=0 skipped=0
-TOTAL tests=170 failures=0 errors=0 skipped=0
+TOTAL tests=171 failures=0 errors=0 skipped=0
 
 ===== 2. Manifest 组件类名 ↔ 真实 APK 的 dex =====
 To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.11.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
@@ -98,27 +98,27 @@ WARNING: The option setting 'android.aapt2FromMavenOverride=/root/android-mcp-hu
 > Task :app:mergeDebugAssets UP-TO-DATE
 > Task :app:compressDebugAssets UP-TO-DATE
 > Task :app:desugarDebugFileDependencies UP-TO-DATE
-> Task :app:dexBuilderDebug UP-TO-DATE
+> Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
 > Task :app:processDebugJavaRes UP-TO-DATE
 > Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:checkDebugDuplicateClasses UP-TO-DATE
 > Task :app:mergeExtDexDebug UP-TO-DATE
 > Task :app:mergeLibDexDebug UP-TO-DATE
-> Task :app:mergeProjectDexDebug UP-TO-DATE
 > Task :app:mergeDebugJniLibFolders UP-TO-DATE
 > Task :app:mergeDebugNativeLibs UP-TO-DATE
 > Task :app:stripDebugDebugSymbols UP-TO-DATE
 > Task :app:validateSigningDebug UP-TO-DATE
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
-> Task :app:packageDebug UP-TO-DATE
+> Task :app:mergeProjectDexDebug
+> Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect UP-TO-DATE
-> Task :app:assembleDebug UP-TO-DATE
+> Task :app:assembleDebug
 
 > Task :app:verifyManifestClasses
 检查对象：app/build/outputs/apk/debug/app-debug.apk
-  APK 大小 10318558 字节
+  APK 大小 10401394 字节
   manifest package = 
   Manifest 里声明的组件类共 6 个
   dex 共 6 个：classes.dex, classes2.dex, classes3.dex, classes4.dex, classes5.dex, classes6.dex
@@ -133,8 +133,8 @@ WARNING: The option setting 'android.aapt2FromMavenOverride=/root/android-mcp-hu
 
 ✅ 全部对得上：Manifest 里每个组件类都能在 dex 里找到。
 
-BUILD SUCCESSFUL in 26s
-38 actionable tasks: 1 executed, 37 up-to-date
+BUILD SUCCESSFUL in 30s
+38 actionable tasks: 4 executed, 34 up-to-date
 VERIFY_EXIT=0
 
 ===== 3. 干净重建 Debug APK =====
@@ -198,12 +198,12 @@ BUILD SUCCESSFUL in 31s
 ASSEMBLE_EXIT=0
 
 ===== 4. 产物校验值 =====
--rw-------. 1 root root 10318558 Oct 10 06:24 app/build/outputs/apk/debug/app-debug.apk
-c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674  app/build/outputs/apk/debug/app-debug.apk
+-rw-------. 1 root root 10318558 Oct 10 06:32 app/build/outputs/apk/debug/app-debug.apk
+2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b  app/build/outputs/apk/debug/app-debug.apk
 
 ===== 5. 可复现性：再 clean 重建一次并比对 =====
-第一次 SHA-256 = c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674
-第二次 SHA-256 = c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674
+第一次 SHA-256 = 2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b
+第二次 SHA-256 = 2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b
 REPRODUCIBLE=YES
 
 ===== 6. APK 元信息（从 APK 本体读，不是从源码推断）=====
@@ -239,9 +239,9 @@ Signer #1 certificate SHA-256 digest: b73f783c579622944c969d1cc5689daf789589ac8f
   pattern=mcp_at_ → 命中文件数=0
 
 ===== 9. 交付到 dist/ =====
-c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674  Android-MCP-Hub-Gate1-debug.apk
+2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b  Android-MCP-Hub-Gate1-debug.apk
 total 10092
--rw-------. 1 root root 10318558 Oct 10 06:24 Android-MCP-Hub-Gate1-debug.apk
--rw-------. 1 root root       98 Oct 10 06:24 SHA256SUMS.txt
+-rw-------. 1 root root 10318558 Oct 10 06:32 Android-MCP-Hub-Gate1-debug.apk
+-rw-------. 1 root root       98 Oct 10 06:32 SHA256SUMS.txt
 
 全部完成（本文件由 /tmp/gen-evidence-gate1.sh 生成，命令与输出都是原始抓取）

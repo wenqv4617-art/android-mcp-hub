@@ -392,7 +392,7 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 覆盖内容：
 
 - `BackoffTest`：退避第 0/1/2/3 次的递增、封顶、抖动区间（固定 seed）、边界（负数、jitter 越界、initial=0）。
-- `HubConfigTest`：默认值、`toMap`/`fromMap` 往返、忽略令牌键、非法值回落、`validate()`、表单草稿解析。
+- `HubConfigTest`（8 条）：默认值、`toMap`/`fromMap` 往返、忽略令牌键、非法值回落、`validate()`、表单草稿解析。其中 Gate 1 新增的一条是：**只填主机名的地址（`wrangler deploy` 打印出来的就是这种形状）会被拦下**，并提示要写到 `/phone/ws` —— 否则它会通过校验，然后在连接时以「握手失败」的形式失败（见 `../TEST_REPORT.md` §12.11）。
 - `HubLogTest`：环形容量、最新在上、监听器快照。
 - `WsUrlTest`：scheme 映射、去 query/fragment、非法输入。
 - `PhoneLinkProtocolTest`：welcome / phone_ping / heartbeat_ack / error / 未知 type / 非法 JSON / 缺 type / 缺 request_id；`encodePong` 的 `request_id` 逐字符相同与转义。
@@ -407,7 +407,7 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - `SocketFailureTest`（**9 条，Gate 0.3**）：`SocketFailure` 的类别闭集恰好 10 个且值形状固定、常见异常类名映射到预期类别、9 种垃圾输入（含完整 URL、令牌形状的串）**一律落在闭集里且不原样返回**、每个类别都有非空且两两不同的中文描述、`normalize()` 只放行闭集、500 次随机 fuzz 不抛。
 - `LogRedactionTest`（**13 条，Gate 0.3**）：9 条**行为**测试（把带假令牌的地址真的喂进 `PhoneLink`，断言日志里只有主机名、令牌的**每 8 字符片段**都不出现、异常原文只变成固定类别、错误帧的 `message` 与未知帧的 `type` 都不记）+ 4 条**静态扫描**（源码里没有 `printStackTrace`/`stackTraceToString`；没有 `<异常变量>.message` 拼字符串；日志调用窗口里不出现 `${config.serverUrl}`/`${url}`/`${frame.*}`/`${raw}`；所有 `SocketFailure.classify(` 都只传 `javaClass.simpleName`）。
 
-合计 **170** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
+合计 **171** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >

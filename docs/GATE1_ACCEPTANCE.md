@@ -46,7 +46,7 @@
 | A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
 | A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 200 passed (200)` | `test-reports/vitest.log` |
 | A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
-| A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=170 failures=0 errors=0 skipped=0`（14 个测试类） | `test-reports/android-build.log` |
+| A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=171 failures=0 errors=0 skipped=0`（14 个测试类） | `test-reports/android-build.log` |
 | A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
 | A6 | Android Lint 门禁（`abortOnError = true`） | `./gradlew --no-daemon :app:lintDebug` | **PASS** — `0 errors / 29 warnings`；注入故障时 `BUILD FAILED`（证明门禁真的会红） | `test-reports/lint-gate.log` |
 | A7 | Debug APK 构建 | `./gradlew --no-daemon clean :app:assembleDebug` | **PASS**（`ASSEMBLE_EXIT=0`，两次重建 `REPRODUCIBLE=YES`） | `test-reports/android-build.log` |
@@ -69,7 +69,7 @@
 
 > 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+20+19+15+12+11 = **200**，与 vitest 自报的 `200 passed` 逐条吻合。
 
-### A4 明细（Android 14 个类，170 条）
+### A4 明细（Android 14 个类，171 条）
 
 `PhoneLinkTest` 35 / `ConnectGateTest` 21 / `DeviceTokenStoreTest` 18 / `PhoneLinkProtocolTest` 15 / `LogRedactionTest` 13 / `BackoffTest` 9 / `PingResponderTest` 9 / `SocketFailureTest` 9 / `WsUrlTest` 8 / `HubConfigTest` 7 / `PhoneLinkClientTest` 7 / `HubLogTest` 4 / `ManifestComponentTest` 2
 
@@ -78,7 +78,7 @@
 | 项 | 值 |
 | --- | --- |
 | 文件 | `dist/Android-MCP-Hub-Gate1-debug.apk` |
-| SHA-256 | `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674` |
+| SHA-256 | `2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b` |
 | 大小 | 10 318 558 字节 |
 | `versionName` / `versionCode` | `0.1.4-gate1` / `5` |
 | `minSdk` / `targetSdk` / `compileSdk` | 26 / 35 / 35 |
@@ -164,7 +164,7 @@
 | 1 | Gate 1 源代码 | ✅ | 本仓库 `gate0` 分支 |
 | 2 | Git commit SHA | ✅ | 见 `TEST_REPORT.md` §11 |
 | 3 | 测试 APK | ✅ | `dist/Android-MCP-Hub-Gate1-debug.apk` |
-| 4 | APK SHA-256 | ✅ | `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674` |
+| 4 | APK SHA-256 | ✅ | `2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b` |
 | 5 | Cloudflare 部署配置 | ✅（**未部署**） | `worker/wrangler.jsonc` + `docs/GATE1_DEPLOYMENT.md` |
 | 6 | 部署操作说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` |
 | 7 | ChatGPT MCP 接入说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` 第 6 节 + 本文件第 6 节 |

@@ -87,6 +87,26 @@ class HubConfigTest {
     }
 
     @Test
+    fun `只填主机名会被拦下，并告诉用户要写到 phone-ws 路径`() {
+        // `wrangler deploy` 打印出来的就是这种形状（只有主机名）。它既能通过 scheme 检查，
+        // 又会在真正建连时连到根路径 `/` 从而握手失败 —— 所以必须在连接前拦下，且文案要能直接照做。
+        val bare = HubConfig(serverUrl = "wss://android-mcp-hub.example.workers.dev")
+        val bareProblem = bare.validate()
+        assertNotNull("只填主机名不该通过校验", bareProblem)
+        assertTrue("文案里要出现正确的路径", bareProblem!!.contains("/phone/ws"))
+
+        // 末尾只多一个斜杠同样是"没有路径"
+        assertNotNull(HubConfig(serverUrl = "wss://android-mcp-hub.example.workers.dev/").validate())
+        assertNotNull(HubConfig(serverUrl = "https://android-mcp-hub.example.workers.dev").validate())
+        assertNotNull(HubConfig(serverUrl = "ws://10.0.2.2:8787").validate())
+
+        // 写全了就该通过
+        assertNull(HubConfig(serverUrl = "wss://android-mcp-hub.example.workers.dev/phone/ws").validate())
+        // 带 query 的地址在规范化时会去掉 query，等价于写全
+        assertNull(HubConfig(serverUrl = "wss://android-mcp-hub.example.workers.dev/phone/ws?x=1").validate())
+    }
+
+    @Test
     fun `表单草稿解析失败时回落默认值`() {
         val draft = HubDraft(
             serverUrl = "  wss://example.test/phone/ws  ",

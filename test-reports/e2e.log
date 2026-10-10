@@ -4,7 +4,7 @@
 ══════════════════════════════════════════════════════════════════════════════
   ⚠ Worker / DO 跑在 Node shim 上，不是 workerd —— 见 TEST_REPORT.md
 
-  本地网关已启动：http://127.0.0.1:39891
+  本地网关已启动：http://127.0.0.1:39771
 
 ① /healthz 健康契约
   ✅ PASS  healthz 返回 200  —— status=200
@@ -17,8 +17,6 @@
   ✅ PASS  401 带 WWW-Authenticate 头
 
 ③ 官方 MCP SDK 客户端 initialize
-{"ts":"2026-10-10T06:15:33.223Z","level":"info","event":"mcp.initialize","requestedProtocolVersion":"2025-11-25","negotiatedProtocolVersion":"2025-06-18"}
-{"ts":"2026-10-10T06:15:33.240Z","level":"debug","event":"mcp.notification","method":"notifications/initialized"}
   ✅ PASS  initialize 成功并拿到服务端信息  —— server=android-mcp-hub@0.1.0-gate1
 
 ④ tools/list
@@ -29,42 +27,36 @@
   ✅ PASS  错误码是 phone_offline（而不是伪造一个 pong）  —— error={"code":"phone_offline","message":"该设备当前没有已建立的连接"}
 
 ⑥ 起一个真实的模拟手机进程（scenario=normal），再 ping
-     [phone] [phone] 连接 ws://127.0.0.1:39891/phone/ws
+     [phone] [phone] 连接 ws://127.0.0.1:39771/phone/ws
      [phone] [phone] device=test-phone-1 scenario=normal
-{"ts":"2026-10-10T06:15:33.772Z","level":"info","event":"phone.upgrade_forwarding","deviceId":"test-phone-1","contract":"local mock phone"}
-{"ts":"2026-10-10T06:15:33.773Z","level":"info","event":"phone_session.connected","deviceId":"test-phone-1","generation":1,"replaced":0,"discarded":0}
      [phone] [phone] WebSocket 已打开
-     [phone] [phone] phone_ping #0 request_id=a7dbe9de-a978-48cf-abcd-7c9efaa8539b
+     [phone] [phone] phone_ping #0 request_id=3fd95d58-fb86-436d-8e73-468249659b4b
   ✅ PASS  phone_ping 成功（真的过了 Worker → DO → WebSocket → 手机进程）
-  ✅ PASS  RTT 由服务端测量且是数字  —— rtt_ms=6
-  ✅ PASS  返回的 request_id 与手机收到的 ping 一致  —— request_id=a7dbe9de-a978-48cf-abcd-7c9efaa8539b
+  ✅ PASS  RTT 由服务端测量且是数字  —— rtt_ms=7
+  ✅ PASS  返回的 request_id 与手机收到的 ping 一致  —— request_id=3fd95d58-fb86-436d-8e73-468249659b4b
   ✅ PASS  连接代次 ≥ 1
   ✅ PASS  echo 原样回传  —— （见下一步）
-     [phone] [phone] phone_ping #1 request_id=869c83eb-4e3e-4edb-8de9-ae6c79d9ead2
+     [phone] [phone] phone_ping #1 request_id=098a8a9b-7a5d-428e-9b1d-66b35eb46466
   ✅ PASS  带 echo 的 ping 成功且 echo 原样返回  —— echo=hello-from-e2e
 
 ⑦ 第二台手机收到 ping 不回（scenario=no-response）→ 必须超时失败
-     [phone] [phone] 连接 ws://127.0.0.1:39891/phone/ws
+     [phone] [phone] 连接 ws://127.0.0.1:39771/phone/ws
      [phone] [phone] device=test-phone-2 scenario=no-response
-{"ts":"2026-10-10T06:15:34.384Z","level":"info","event":"phone.upgrade_forwarding","deviceId":"test-phone-2","contract":"local mock phone 2"}
-{"ts":"2026-10-10T06:15:34.385Z","level":"info","event":"phone_session.connected","deviceId":"test-phone-2","generation":1,"replaced":0,"discarded":0}
      [phone] [phone] WebSocket 已打开
-     [phone] [phone] phone_ping #0 request_id=d1bacba9-d4c7-46ee-8563-2aef5e8f84e2
+     [phone] [phone] phone_ping #0 request_id=c93b7e01-20be-4134-abe5-a38d60498ce8
      [phone] [phone] scenario=no-response：故意不回 pong
-     [phone] [phone] phone_ping #1 request_id=ebfad81a-65ad-44f2-b0a8-dfd7efd2f0f4
+     [phone] [phone] phone_ping #1 request_id=96970b8d-d758-4609-9919-d7b14d87f103
      [phone] [phone] scenario=no-response：故意不回 pong
   ✅ PASS  不回应 → isError=true
   ✅ PASS  错误码是 phone_timeout（服务端测量超时，不是本地说谎）  —— code=phone_timeout
-  ✅ PASS  确实等了配置的超时时间（≥250ms）  —— elapsed=317ms
-     [phone] [phone] phone_ping #2 request_id=f4c5469e-fbe3-4868-9271-e9e4b3cb3d10
+  ✅ PASS  确实等了配置的超时时间（≥250ms）  —— elapsed=309ms
+     [phone] [phone] phone_ping #2 request_id=739f19df-d1f5-4e1e-b575-f46517cd4a73
      [phone] [phone] scenario=no-response：故意不回 pong
   ✅ PASS  连续超时仍然是 phone_timeout（连接没被误关，状态没被写坏）  —— code=phone_timeout
 
 ⑧ 会话与协议头
   ✅ PASS  同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）
 
-{"ts":"2026-10-10T06:15:35.355Z","level":"info","event":"phone_session.socket_gone","cause":"close","closeCode":1000,"socketGeneration":1,"currentGeneration":1}
-{"ts":"2026-10-10T06:15:35.371Z","level":"info","event":"phone_session.socket_gone","cause":"close","closeCode":1000,"socketGeneration":1,"currentGeneration":1}
 ══════════════════════════════════════════════════════════════════════════════
   端到端结果：21 通过，0 失败（共 21 项）
 ══════════════════════════════════════════════════════════════════════════════
