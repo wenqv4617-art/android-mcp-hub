@@ -1,4 +1,4 @@
-# TEST_REPORT.md — Android MCP Hub · Gate 0.1
+# TEST_REPORT.md — Android MCP Hub · Gate 0.1 / 0.2
 
 **报告日期**：2026-10-10
 **被测提交**：见 §10「提交与分支」（本报告与该提交一同入库）
@@ -12,21 +12,22 @@
 
 ## 0. 一句话结论
 
-| 测试面 | Gate 0 | Gate 0.1 | 结果 |
-| --- | --- | --- | --- |
-| Worker / MCP 协议 | 118 | **140**（7 个文件） | ✅ 全过 |
-| Durable Object（PhoneSession / McpSession） | 含在上行（37） | 含在上行（**45**） | ✅ 全过 |
-| 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | **21/21** | ✅ 全过 |
-| Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
-| Android JVM 单测 | 90 | **132**（10 个类） | ✅ 全过 |
-| Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
-| 真实 workerd 运行时上的验证 | NOT RUN | ⛔ **仍 NOT RUN** | §5，附精确错误 |
-| Android 真机行为验证 | NOT RUN | ⛔ **仍 NOT RUN** | §6.4 |
-| Android Keystore 真实加解密 | — | ⛔ **NOT RUN** | §6.3 |
-| ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | §7 |
-| 真实 Cloudflare 部署 | 未执行 | ⛔ **仍未执行，且任务书明确禁止** | §8.3 |
+| 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | 结果 |
+| --- | --- | --- | --- | --- |
+| Worker / MCP 协议 | 118 | 140（7 个文件） | **140** | ✅ 全过 |
+| Durable Object（PhoneSession / McpSession） | 含在上行（37） | 含在上行（45） | 含在上行（**45**） | ✅ 全过 |
+| 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | **21/21** | ✅ 全过 |
+| Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
+| Android JVM 单测 | 90 | 132（10 个类） | **135**（11 个类） | ✅ 全过 |
+| **Manifest 组件类名 ↔ 真实 APK 的 dex** | — | ❌ **漏了 —— Gate 0.1 启动即闪退** | ✅ **新增（两层检查）** | ✅ 见 **§6.6** |
+| Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 不变 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
+| 真实 workerd 运行时上的验证 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | §5，附精确错误 |
+| Android 真机行为验证（**含"启动是否真的不闪退"**） | NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | §6.4 / §6.6 |
+| Android Keystore 真实加解密 | — | ⛔ NOT RUN | ⛔ 仍 NOT RUN | §6.3 |
+| ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | §7 |
+| 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行，且任务书明确禁止 | ⛔ **仍未执行** | §8.3 |
 
-**一句话**：Gate 0.1 把审计提出的 R1–R4 四个问题都改了、都补了会红的测试（Worker 118→140、Android 90→132），Android 侧还多了「可安装 APK + 构建工作流 + 兼容性核对」。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到。
+**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，本轮依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。
 
 ### 0.1 Gate 0.1 审计问题 → 修复 → 对应测试
 
@@ -36,6 +37,26 @@
 | **R2** 日志脱敏靠键名 | `util/log.ts` 从**键名黑名单**改成**安全字段白名单**（四道闸门：白名单键、只收标量、`errorCode` 闭集、整行凭据形状终检）；删除 `redact()`；全仓库消灭 `String(err)` / `err.stack` | 新文件 `logging.test.ts` 12 条 + `security.test.ts` 相关 3 条（13→15） |
 | **R3** 前台服务启动失败仍建连 | 新增 `service/ConnectGate.kt`：`goForeground()` 返回 `Started`/`Failed(category)`，失败则**不建连**、丢连接对象、置错误、撤通知、`stopSelf()`、**不安排重连** | 新文件 `ConnectGateTest.kt` 21 条（含"失败时 `startCalls == 0`"与"调用顺序不可交换"） |
 | **R4** 设备令牌明文存 SharedPreferences | AES-256-GCM 加密后落盘，密钥在 Android Keystore；三态读取（`Present`/`Absent`/`Unreadable`）；解密失败**拒绝建连**而不是拿空令牌重试；Gate 0 的明文键自动迁移且迁移失败不删明文 | 新文件 `DeviceTokenStoreTest.kt` 18 条 + `PhoneLinkClientTest` 新增 3 条（服务端请求计数为 0） |
+
+---
+
+### 0.2 Gate 0.2 修复说明（本轮）
+
+用户装了 Gate 0.1 的 APK，**点图标立刻回桌面、界面完全不出现**。审计定位到 `HubApplication.kt` 的 `package` 声明与实际编译类不一致。
+
+| 项 | 内容 |
+| --- | --- |
+| 现象 | 安装 Gate 0.1 APK（`0.1.1-gate0.1`）后点击图标立即返回桌面，主界面从未出现 |
+| 根因 | `android/app/src/main/java/com/androidmcphub/app/HubApplication.kt:1` 声明 `package com.androidmcphub.app.ui`，编译产物是 `com.androidmcphub.app.ui.HubApplication`；而 `AndroidManifest.xml:21` 要的是 `.HubApplication`（= `com.androidmcphub.app.HubApplication`）→ 系统建进程时 `ClassNotFoundException` |
+| 为什么没被发现 | Kotlin **允许**包声明与目录不一致，编译器不报错；`assembleDebug` 成功（`BUILD SUCCESSFUL`）；当时那 132 个 JVM 单测全部直接 `import` 类，**不经过 Manifest 里那串字符串**，所以也全绿 |
+| 修复 | `HubApplication.kt:1` → `package com.androidmcphub.app`（该文件不需要额外 import，改动只有这一行） |
+| 顺带核对 | Manifest 里另外 5 个组件（`MainActivity`、`.service.PhoneLinkService`、AndroidX 合并进来的 `InitializationProvider` / `PreviewActivity` / `ProfileInstallReceiver`）**逐一在 dex 里确认存在**，全部对得上 |
+| 新增检查 ① | `android/app/src/test/java/com/androidmcphub/app/ManifestComponentTest.kt` 2 条（进 JVM 单测，每次 `testDebugUnitTest` 都跑） |
+| 新增检查 ② | `android/tools/verify_manifest_classes.py` + Gradle 任务 `:app:verifyManifestClasses`（解析**真实 APK** 里的二进制 `AndroidManifest.xml` 与所有 `classes*.dex` 的 class_defs 表） |
+| 顺带加固 | 新增 `APP_VERSION 与 Gradle 的 versionName 必须一致`（同一个"一个事实两处记录"的结构，版本号也有） |
+| 版本 | `0.1.1-gate0.1`（versionCode 2）→ **`0.1.2-gate0.2`（versionCode 3）**，避免与那个会闪退的包混淆 |
+| 新 APK | `dist/Android-MCP-Hub-Gate0.2-debug.apk`，SHA-256 `0f7bfc37…21d44f`（§11） |
+| ⛔ 仍 NOT RUN | **在真机/模拟器上启动这个新 APK**（本环境没有设备）—— 见 §6.6 末尾 |
 
 ---
 
@@ -54,6 +75,11 @@ npm run e2e                           # tsx e2e/run-local-e2e.ts
 cd android
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug
+
+# Gate 0.2 新增：用真实 APK + dex 校验 Manifest 组件类名（会先自动 assembleDebug）
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses
+# 也可以直接跑脚本（--apk 之外还能 --print-classes 列出 dex 里定义的全部类）
+python3 android/tools/verify_manifest_classes.py --apk android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 首次需要 `npm install`（194 个包，约 50s）与一个 `.dev.vars`（从 `worker/.dev.vars.example` 复制，**只用假令牌**）。
@@ -283,25 +309,45 @@ UNITTEST_EXIT=0
 $ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug
 BUILD SUCCESSFUL
 ASSEMBLE_EXIT=0
+
+$ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses
+ 检查对象：app/build/outputs/apk/debug/app-debug.apk
+  APK 大小 10318570 字节
+  Manifest 里声明的组件类共 6 个
+  dex 共 6 个：classes.dex, classes2.dex, classes3.dex, classes4.dex, classes5.dex, classes6.dex
+  dex 里**定义**的类共 13801 个
+
+  ✓ <application    > com.androidmcphub.app.HubApplication
+  ✓ <activity       > com.androidmcphub.app.MainActivity
+  ✓ <service        > com.androidmcphub.app.service.PhoneLinkService
+  ✓ <provider       > androidx.startup.InitializationProvider
+  ✓ <activity       > androidx.compose.ui.tooling.PreviewActivity
+  ✓ <receiver       > androidx.profileinstaller.ProfileInstallReceiver
+
+✅ 全部对得上：Manifest 里每个组件类都能在 dex 里找到。
+
+BUILD SUCCESSFUL
+VERIFY_EXIT=0
 ```
 
-证据：`test-reports/android-build.log`。APK 的校验值、大小与元信息见 §11。
+证据：`test-reports/android-build.log`（含上面三段全部输出）。APK 的校验值、大小与元信息见 §11。Gate 0.2 新增的这层检查为什么必须存在，见 **§6.6**。
 
-### 6.2 JVM 单元测试：132/132 通过（Gate 0 是 90）
+### 6.2 JVM 单元测试：135/135 通过（Gate 0 是 90、Gate 0.1 是 132）
 
-| 测试类 | Gate 0 | Gate 0.1 | 结果 |
-| --- | --- | --- | --- |
-| `core.BackoffTest` | 9 | 9 | ✅ |
-| `core.DeviceTokenStoreTest` | — | **18** | ✅ 新增（R4） |
-| `core.HubConfigTest` | 7 | 7 | ✅ |
-| `core.HubLogTest` | 4 | 4 | ✅ |
-| `core.WsUrlTest` | 8 | 8 | ✅ |
-| `net.PhoneLinkClientTest` | 4 | **7** | ✅ +3（R4 凭据失败路径） |
-| `protocol.PhoneLinkProtocolTest` | 14 | 14 | ✅ |
-| `protocol.PhoneLinkTest` | 35 | 35 | ✅ |
-| `protocol.PingResponderTest` | 9 | 9 | ✅ |
-| `service.ConnectGateTest` | — | **21** | ✅ 新增（R3） |
-| **合计** | **90** | **132** | ✅ **0 失败 / 0 错误 / 0 跳过** |
+| 测试类 | Gate 0 | Gate 0.1 | Gate 0.2 | 结果 |
+| --- | --- | --- | --- | --- |
+| `app.ManifestComponentTest` | — | — | **2** | ✅ 新增（Gate 0.2，§6.6） |
+| `core.BackoffTest` | 9 | 9 | 9 | ✅ |
+| `core.DeviceTokenStoreTest` | — | 18 | 18 | ✅ 新增（R4） |
+| `core.HubConfigTest` | 7 | 7 | 7 | ✅ |
+| `core.HubLogTest` | 4 | 4 | 4 | ✅ |
+| `core.WsUrlTest` | 8 | 8 | 8 | ✅ |
+| `net.PhoneLinkClientTest` | 4 | 7 | 7 | ✅ +3（R4 凭据失败路径） |
+| `protocol.PhoneLinkProtocolTest` | 14 | 14 | **15** | ✅ +1（`APP_VERSION` ↔ Gradle `versionName`） |
+| `protocol.PhoneLinkTest` | 35 | 35 | 35 | ✅ |
+| `protocol.PingResponderTest` | 9 | 9 | 9 | ✅ |
+| `service.ConnectGateTest` | — | 21 | 21 | ✅ 新增（R3） |
+| **合计** | **90** | **132** | **135** | ✅ **0 失败 / 0 错误 / 0 跳过** |
 
 数字来自解析 `android/app/build/test-results/testDebugUnitTest/*.xml`（`tests` / `failures` / `errors` / `skipped` 四个属性求和），不是从控制台肉眼数的。
 
@@ -353,6 +399,147 @@ ASSEMBLE_EXIT=0
 
 `targetSdk` 35 的**全部后果已在文档里写清**，包括一条"与 targetSdk 无关、只要是 Android 16 设备就生效"的新规（前台服务里启动的后台任务要受 JobSchedule 配额约束 —— 我们一个 JobScheduler/WorkManager/DownloadManager 都没用，故当前不适用）。
 
+### 6.6 Gate 0.2：启动闪退的根因、修复，与"为什么原来没抓到"
+
+#### 6.6.1 现象与根因
+
+用户装上 Gate 0.1 的 APK（`versionName=0.1.1-gate0.1`）后，**点图标立刻回到桌面，应用界面完全没有出现**。审计给的方向是对的，实测确认如下：
+
+```
+android/app/src/main/java/com/androidmcphub/app/HubApplication.kt:1
+  package com.androidmcphub.app.ui          ← 编译出来是 com.androidmcphub.app.ui.HubApplication
+
+android/app/src/main/AndroidManifest.xml:21
+  android:name=".HubApplication"            ← 期望 com.androidmcphub.app.HubApplication（相对 applicationId 解析）
+```
+
+两者对不上。Android 建应用进程时会按 Manifest 里的字符串去 dex 里找 `com.androidmcphub.app.HubApplication` 并实例化；找不到就抛 `ClassNotFoundException`，**进程在建 Application 阶段就死了，Activity 根本没机会创建** —— 这正是"点了没反应/直接回桌面、界面完全不出现"的形态。
+
+用旧 APK 实测（这是本节的原始证据，命令与上面 §6.1 相同）：
+
+```
+$ python3 android/tools/verify_manifest_classes.py --apk <Gate 0.1 的 app-debug.apk>
+  ✗ <application    > com.androidmcphub.app.HubApplication
+  ✓ <activity       > com.androidmcphub.app.MainActivity
+  ✓ <service        > com.androidmcphub.app.service.PhoneLinkService
+  ✓ <provider       > androidx.startup.InitializationProvider
+  ✓ <activity       > androidx.compose.ui.tooling.PreviewActivity
+  ✓ <receiver       > androidx.profileinstaller.ProfileInstallReceiver
+
+✗ 1 个组件类在 dex 里不存在 —— 这些组件一旦被系统实例化就会
+  抛 ClassNotFoundException（应用启动时立刻闪退、界面完全不出现）：
+    <application> com.androidmcphub.app.HubApplication
+        实际存在的同名单类：com.androidmcphub.app.ui.HubApplication   ← 源文件的 package 声明可能写错了
+EXIT=1
+```
+
+注意最后那行"实际存在的同名单类"：脚本不是只说"不存在"，而是把 dex 里同名的那个类找出来给你看 —— 这一步直接把根因摊在桌面上。
+
+#### 6.6.2 为什么编译期和当时的 132 个单测都抓不到
+
+| 环节 | 结果 | 原因 |
+| --- | --- | --- |
+| Kotlin 编译 | ✅ 通过 | **Kotlin 允许包声明与目录不一致**（Java 才强制）。这是合法代码 |
+| `:app:assembleDebug` | ✅ `BUILD SUCCESSFUL` | 打包不问"Manifest 里的字符串在 dex 里有没有" |
+| 当时 132 个 JVM 单测 | ✅ 全过 | 它们全部直接 `import com.androidmcphub.app.HubApplication`，**走的是编译器解析的符号，不是 Manifest 里那串字符串**。字符串层面的错误，符号层面的测试永远看不见 |
+| Android Lint | ⚠️ **报了，但被静音** | 见 6.6.4 —— 这是本轮最值得记的一条 |
+
+一句话：**"两处分别记录同一个事实、而没有任何东西强制它们相等"**，是这个 bug 的结构。它不会被任何一侧的本地检查发现，只有"把两侧对齐起来比"才看得见。
+
+#### 6.6.3 修复与两层新增检查
+
+**修复本身只有一行**：`HubApplication.kt:1` 的 `package com.androidmcphub.app.ui` → `package com.androidmcphub.app`。这个文件不 import 任何自己的类，所以没有连带改动。
+
+**核对**：Manifest 里**全部 6 个**组件类逐一在 dex 中确认存在 —— 包括 AndroidX 合并进来的 `InitializationProvider` / `PreviewActivity` / `ProfileInstallReceiver`。只有 `HubApplication` 一个是错的。
+
+**新增检查第 ① 层（快，进常规单测）**：`android/app/src/test/java/com/androidmcphub/app/ManifestComponentTest.kt`
+
+- `Manifest 里声明的组件类都真的编译出来了`：解析 `src/main/AndroidManifest.xml`，把每个组件（`application`/`activity`/`activity-alias`/`service`/`receiver`/`provider`）的 `android:name` 按 `applicationId` 解析成全限定名，再查**本次编译产物**里有没有对应的 `.class`。
+  - 用 **classpath 资源查询**（`getResource("com/androidmcphub/app/HubApplication.class")`）而不是 `Class.forName` —— 后者会去加载父类 `android.app.Application`，在 JVM 上会 `NoClassDefFoundError`，那就变成"测了另一件事"。
+- `每个源文件声明的 package 与所在目录一致`：这条是为了在 ① 失败时给出**精确到文件**的原因（"声明 package = X，目录推断 = Y"），而不是只报一句"类不存在"。
+
+**新增检查第 ② 层（慢，但读真实产物）**：`android/tools/verify_manifest_classes.py` + Gradle 任务 `:app:verifyManifestClasses`
+
+任务书要求"**优先使用 APK 或合并 Manifest 的真实产物验证，不仅依赖源码文本匹配**"。所以这一层：
+
+- 输入是**已构建的 APK**，不是源码树；
+- Manifest 来自 APK 里**编译过的二进制 AXML**（脚本自写一个 AXML 解析器：`RES_XML_TYPE` → `START_ELEMENT` 的 `attributeStart/attributeSize`，字符串池支持 UTF-8 与 UTF-16 两种编码）。**刻意不依赖 `aapt2`** —— 本机 `aapt2` 要靠 qemu 包装（`android/tools/aapt2`），在 CI 上是坏路径；
+- 类清单来自**所有 `classes*.dex` 的 `class_defs` 表**（只数"**定义**了的类"，不是"引用到的类型"）—— 后者会把"只是被提到过"的类算成存在，那就挡不住这个 bug 了；
+- 顺带输出"实际存在的同名单类"，直接指出包名写错；
+- 退出码：全部对上 `0`，否则 `1`，并且**不留"警告但通过"的中间状态**。
+
+挂进 Gradle：任务 `verifyManifestClasses` 依赖 `assembleDebug`，并挂在 `check` 上（方向只能是 verify → assemble，反过来会成环）。
+
+#### 6.6.4 ★ 本轮最值得记的发现：Lint 本来就能抓到，是配置把它静音了
+
+把错误的包名打回去之后跑 `:app:lintDebug`，lint **确实报了**：
+
+```
+android/app/src/main/AndroidManifest.xml:21: Error: Class referenced in the manifest,
+com.androidmcphub.app.HubApplication, was not found in the project or the libraries [MissingClass]
+```
+
+也就是说：`MissingClass` 这条规则**精准命中这次事故**，而且 severity 是 **Error**。它没拦住构建，原因只有一个 —— `app/build.gradle.kts` 里那句"骨架阶段不让 lint 阻断构建"：
+
+```kotlin
+lint { abortOnError = false }
+```
+
+`abortOnError = false` 会把**所有** Error 一起吞掉。当时那份 lint 报告里唯一的 Error 就是这条 MissingClass（修复后重新跑，全树只有 1 个 Error，是 §6.6.6 说的那一条）。**一个能精准定位这次事故的检查，因为"整体别报错"的配置而全程沉默。**
+
+试过的一个**无效**方案，记下来免得下次再试：只把 `MissingClass` 提升为 `fatal`（`fatal += "MissingClass"`）—— **不行**。实测把错误包名打回去后 `:app:lintDebug` 依然 `BUILD SUCCESSFUL`，因为 `abortOnError = false` 的优先级更高。这条否定结论已经写进 `app/build.gradle.kts` 的注释里。
+
+**本轮的处理**：硬门禁放在 `verifyManifestClasses` 上（它不依赖 lint 的严重级别配置，实测会红）；**没有**把 `abortOnError` 改成 `true`，因为那会连带要求处理 §6.6.6 那条 `MissingPermission` —— 那是另一件事，不属于本轮"最小修复"的范围。所以这条留作**给下一轮的建议**，并作为 K10 记入 §8.2。
+
+#### 6.6.5 两层检查都验证过"会红"（这是本节的关键证据）
+
+新增的检查如果永远不会红，那就是摆设。所以我在**故意把错误包名打回去**的树上跑了两层，实况如下：
+
+```
+$ sed -i '1s|^package com.androidmcphub.app$|package com.androidmcphub.app.ui|' \
+      app/src/main/java/com/androidmcphub/app/HubApplication.kt
+
+--- 第 1 层：JVM 单测 ---
+ManifestComponentTest > Manifest 里声明的组件类都真的编译出来了 FAILED
+    java.lang.AssertionError at ManifestComponentTest.kt:74
+ManifestComponentTest > 每个源文件声明的 package 与所在目录一致 FAILED
+    java.lang.AssertionError at ManifestComponentTest.kt:117
+> Task :app:testDebugUnitTest FAILED
+BUILD FAILED
+UNITTEST_EXIT=1
+
+--- 第 2 层：真实产物检查 ---
+> Task :app:verifyManifestClasses FAILED
+  ✗ <application    > com.androidmcphub.app.HubApplication
+✗ 1 个组件类在 dex 里不存在 —— 这些组件一旦被系统实例化就会
+        实际存在的同名单类：com.androidmcphub.app.ui.HubApplication   ← 源文件的 package 声明可能写错了
+BUILD FAILED
+VERIFY_EXIT=1
+```
+
+改回正确包名后两层都恢复绿色（§6.1、§6.2 的数字就是恢复后的）。**"会红"这件事是当场跑出来的，不是声称的。**
+
+#### 6.6.6 顺带加固：同一个"两处记录一个事实"的结构，版本号也有
+
+`gradle/libs.versions.toml` 的 `appVersionName`（决定 APK 上显示的 `versionName`）与 `PhoneLinkProtocol.kt:10` 的 `APP_VERSION`（决定握手时上报给服务端的 `app_version`）必须永远相等。它们平时互不校验，和这次的包名问题是**同一种结构**。所以新增一条单测（`PhoneLinkProtocolTest`）：
+
+```kotlin
+assertEquals(BuildConfig.VERSION_NAME, APP_VERSION)
+```
+
+版本号本轮从 `0.1.1-gate0.1`（versionCode 2）升到 **`0.1.2-gate0.2`（versionCode 3）**，正是为了让用户不会把"会闪退的那个包"和"这次的包"搞混。
+
+#### 6.6.7 ⛔ 本轮**没有**验证的：真机启动
+
+**这台机器上没有 Android 设备，也没有模拟器**（`adb` 不存在，`/opt/android-sdk` 里没有 `emulator`，宿主是 Android 容器本身但 DSHA 的 `/app/*` 通道只覆盖本机这一台手机，不能装第三方 APK 做启动验证）。
+
+因此，诚实地讲：
+
+- ✅ **可以被证明的**：Manifest 里要的那个 `com.androidmcphub.app.HubApplication` 现在**确实存在于 APK 的 dex 里**（真实产物 + 真实 dex，不是源码推理）；并且"如果它不存在，两层检查都会红"也已实测。
+- ⛔ **NOT RUN**：**这个新 APK 在真实 Android 上安装并冷启动**。所以只能说"**审计指出的那一处原因已经修掉、并且加了防回归**"，**不能**说"启动闪退问题已完全解决"。是否还残留**别的**启动期崩溃原因（例如 `HubApplication.onCreate` 里的初始化、Compose 主题、边到边调用），本轮**无从验证**。
+
+这一条是 Gate 0.2 交付里唯一必须由用户或下一位审计者动手的部分：**装一下 `dist/Android-MCP-Hub-Gate0.2-debug.apk`，看它是否还闪退。**
+
 ---
 
 ## 7. ⛔ NOT RUN：ChatGPT 官方客户端真实接入
@@ -371,6 +558,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 
 1. 真实 workerd 上的任何测试（§5，6 个子项）
 2. Android 真机/模拟器行为（§6.4，7 项，其中**前台服务生命周期无任何替代证据**）
+2b. **Gate 0.2 的新 APK 在真机上的冷启动**（§6.6.7）—— 本环境无设备、无模拟器。所以只能说"已修掉审计指出的那一处原因并加了防回归"，**不能说"启动闪退已完全解决"**
 3. **Android Keystore 的真实加解密与明文迁移**（§6.3）—— JVM 测不到，本工程无 Robolectric
 4. **GitHub Actions 的 APK 工作流从未被执行过**（本环境没有 Actions runner，§11）—— 它属于"提交了但没跑过"的产物
 5. Android 13/14/15/16 真机上的兼容性观感与行为（`COMPATIBILITY-ANDROID-13-16.md` §11 的 9 条）
@@ -380,6 +568,8 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 9. 时序侧信道抗性（`SECURITY.md` T1）—— **没测过，只有判断**
 10. 超大请求体压测（T10）—— 未做
 11. 跨凭据负向测试：持有 A 设备令牌者不能冒充 B —— `security.test.ts` 的 15 个用例主要是静态扫描 + 日志安全 + 隔离扫描，**没有逐条核对这条已存在**，阶段 2 必须显式补上并确认它会红
+12. **`AndroidManifest.xml` 里组件的 `android:exported` / `intent-filter` 语义**没有被任何自动化检查覆盖（本轮只查了"类存在不存在"）。§6.6 的两层检查是**存在性**检查，不是**语义**检查
+13. **`PhoneLinkService.kt:321` 的 `MissingPermission`**（lint 当前树上唯一的 Error）**未处理** —— 见 K10
 
 ### 8.2 已知风险
 
@@ -396,6 +586,8 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | K7 | **日志白名单的代价是"默认不记"** | 排查问题时可能发现关键字段没被记下来 | 已接受：把它加进 `SAFE_FIELDS` 是一次显式动作。比"漏出凭据"便宜得多 |
 | K8 | 无限流、无持久审计 | 公网暴露即风险 | 阶段 2 |
 | K9 | 设备 ID 可被持有有效 MCP token 者枚举 | 轻微信息泄漏 | 阶段 2 改为"令牌→设备"反查，不再接受客户端指定 device_id |
+| K10 | **Lint 整体不阻断构建（`abortOnError = false`），会把 Error 静音** | Gate 0.1 的启动闪退本可被 lint 的 `MissingClass` 提前拦下，却被这条配置吞掉（§6.6.4）。将来其他 Error 级问题同样会被吞 | 本轮已用 `verifyManifestClasses` 兜住"Manifest 类名"这一类；**彻底解法是把 `abortOnError` 改成 `true` 并处理掉现有的 `PhoneLinkService.kt:321` `MissingPermission`** —— 属于新一轮，不在本次最小修复范围 |
+| K11 | 启动期**其它**崩溃原因未排查 | Gate 0.2 只修掉了审计指出的那一处；`HubApplication.onCreate` 初始化、Compose 主题、`enableEdgeToEdge()` 等**从未在真机上跑过** | 真机冷启动验证（§6.6.7）。在真机跑通之前，不能声称闪退问题彻底解决 |
 
 **Gate 0 的 K7 已在 Gate 0.1 修掉**（原来是"`redact()` 靠键名匹配，令牌藏在叫 `payload` 的键里会漏"）—— 现在那个位置由 K7 的新含义占用，旧的键名匹配实现已删除。**K1–K6 与 K8–K9 依旧未解决**，它们都需要环境或授权，不是本轮能消掉的。
 
@@ -421,12 +613,13 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
 | Worker/DO 单元测试 | **140** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
-| Android JVM 单测 | **132** | 0 | 0 | 0 |
+| Android JVM 单测 | **135** | 0 | 0 | 0 |
+| Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
 | Android 真机行为 | 0 | 0 | 0 | 7（§6.4）+ 9（§6.5） |
 | Android Keystore 真实路径 | 0 | 0 | 0 | 1 类（§6.3） |
 | GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11） |
 | ChatGPT 接入 / OAuth | 0 | 0 | 0 | 若干（§7） |
-| **合计（已执行）** | **294** | **0** | **0** | **24+** |
+| **合计（已执行）** | **297** | **0** | **0** | **26+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -438,8 +631,19 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 
 ```bash
 $ git log --oneline
-# 见下面的"Gate 0.1 提交序列"（本表随每次提交更新，不写死 HEAD 哈希）
+# 见下面的"提交序列"（本表随每次提交更新，不写死 HEAD 哈希）
 ```
+
+**提交序列（按时间正序，全部在 `gate0`）**：
+
+| 提交 | 说明 |
+| --- | --- |
+| `ad3b510` | Gate 0：Worker + DO + Android 全链路可测闭环 |
+| `890544b` / `a9c1f6d` | Gate 0 收尾：文档笔误修正 |
+| `8a4d599` | Gate 0 收尾：证据日志入库 |
+| `9dc2d24` | Gate 0.1：修 R1–R4 + 64 项会红的测试 + 可安装 APK |
+| `e2bed4b` / `52eb63e` / `f486517` | Gate 0.1：APK 入库、安全扫描启发式收窄、证据日志重生成 |
+| （Gate 0.2 的提交见交付报告，本文件随该提交一起入库） | **Gate 0.2：修启动闪退 + 两层 Manifest 类名检查 + 新 APK** |
 
 > 刻意**不**在本文件里写死"当前 HEAD"的哈希：哈希一旦被写进文件，任何后续提交都会让它变成一句假话。要引用最新哈希，请用 `git rev-parse HEAD`。
 >
@@ -449,39 +653,43 @@ $ git log --oneline
 
 ## 11. APK 交付
 
-**构建所用的提交**：`9dc2d24253559446ce323cba2bc6f95ae608668f`（在 `git status --porcelain` 为 0，即工作区干净的前提下构建 —— 所以这个 APK 与这份提交一一对应，不是"某个改了但没提交的版本"）。
+> **本轮换了交付件**：Gate 0.1 那个 APK 是**会闪退的**（§6.6），所以它**已从 `dist/` 里移除** —— 把一个已知会崩的包留在交付目录里，迟早有人装错。它的 SHA-256（`f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10`）仍然记在这里作为审计线索，需要复现的话从提交 `f486517` 重新构建即可（构建可复现，见 §11.2）。
+
+**构建所用的提交**：见 §10 的提交序列中**最新的那一笔（Gate 0.2）**。构建时 `git status --porcelain` 为**空**（工作区干净），所以这个 APK 与那份源码一一对应，不是"某个改了但没提交的版本"。构建完成后，我又用同一条命令**重建了一次并比对 SHA-256**，两次完全一致（§11.2）—— 也就是说：拿那个提交重新构建，你应当得到下面这个一模一样的哈希。
 
 **构建命令**（可复制重跑）：
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 132/132
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest        # 135/135
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses    # Manifest 类名 ↔ dex
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug
 # 产物：android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**§11.1 交付的 APK**
+### §11.1 交付的 APK
 
 | 项 | 值 |
 | --- | --- |
-| 文件名 | `Android-MCP-Hub-Gate0.1-debug.apk` |
-| **SHA-256** | `f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10` |
-| 大小 | 10 318 566 字节（9.84 MiB） |
-| 仓库内位置 | `dist/Android-MCP-Hub-Gate0.1-debug.apk`（同目录另有 `dist/SHA256SUMS.txt`） |
+| 文件名 | `Android-MCP-Hub-Gate0.2-debug.apk` |
+| **SHA-256** | `0f7bfc37ef7c91ced3e65ceb6d6bf85336f29ee973c34de8f72d26a02221d44f` |
+| 大小 | 10 318 570 字节（9.84 MiB） |
+| 仓库内位置 | `dist/Android-MCP-Hub-Gate0.2-debug.apk`（同目录另有 `dist/SHA256SUMS.txt`） |
 | 构建日志 | `test-reports/android-build.log` |
 | 签名证书 SHA-256 | `b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429`（`CN=Android Debug, O=Android, C=US`） |
-| 构建可复现 | ✅ 重跑一次 `clean :app:assembleDebug`，产出 APK 的 SHA-256 **与本表完全一致**（同一个值 `f16226b5…c6a10`），即这份交付件不依赖「构建了几次」「在哪台机器上构建」 |
+| 签名方案 | APK Signature Scheme **v2**（v1 JAR signing 未启用；`apksigner verify --print-certs` 实测） |
+| 构建可复现 | ✅ `clean :app:assembleDebug` 重跑一次，SHA-256 与上表**逐字节一致** |
 
 安装（自备 `adb`）：
 
 ```bash
-adb install -r dist/Android-MCP-Hub-Gate0.1-debug.apk
+adb install -r dist/Android-MCP-Hub-Gate0.2-debug.apk
 ```
 
 **APK 元信息（用 `aapt2 dump badging` 从 APK 本体读出，不是从源码推断）**：
 
 ```
-package: name='com.androidmcphub.app' versionCode='2' versionName='0.1.1-gate0.1'
+package: name='com.androidmcphub.app' versionCode='3' versionName='0.1.2-gate0.2'
 compileSdkVersion='35'
 sdkVersion:'26'
 targetSdkVersion:'35'
@@ -490,32 +698,42 @@ application-icon-320:'res/mipmap-anydpi-v26/ic_launcher.xml'   ← 自适应图�
 launchable-activity: name='com.androidmcphub.app.MainActivity'
 ```
 
-**权限（`aapt2 dump permissions`，同样是读 APK）**：源码里声明 5 个 —— `INTERNET`、`ACCESS_NETWORK_STATE`、`POST_NOTIFICATIONS`、`FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_SPECIAL_USE`。打包后多出一条 `com.androidmcphub.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`，那是 **AndroidX 在合并 manifest 时自动加的自定义权限**（给自己进程内动态注册的 receiver 打标记），不是新增的系统权限，也不涉及任何用户数据。
+**权限（`aapt2 dump permissions`，同样是读 APK）**：源码里声明 5 个 —— `INTERNET`、`ACCESS_NETWORK_STATE`、`POST_NOTIFICATIONS`、`FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_SPECIAL_USE`。打包后多出一条 `com.androidmcphub.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`，那是 **AndroidX 在合并 manifest 时自动加的自定义权限**（给自己进程内动态注册的 receiver 打标记），不是新增的系统权限，也不涉及任何用户数据。**Gate 0.2 没有新增任何一个权限。**
+
+**组件类名（Gate 0.2 的重点，`verify_manifest_classes.py` 读 APK + dex 实测）**：
+
+```
+✓ <application    > com.androidmcphub.app.HubApplication      ← Gate 0.1 这里是 ✗
+✓ <activity       > com.androidmcphub.app.MainActivity
+✓ <service        > com.androidmcphub.app.service.PhoneLinkService
+✓ <provider       > androidx.startup.InitializationProvider
+✓ <activity       > androidx.compose.ui.tooling.PreviewActivity
+✓ <receiver       > androidx.profileinstaller.ProfileInstallReceiver
+```
 
 **这个 APK 里"没有"东西 —— 逐条扫过，不是声称**：
 
-- 解包后对全部 6 个 dex 与所有资源做正则扫描：`ghp_…` 0 处、PEM 私钥 0 处、`gate0-local-test`（e2e 用的假令牌）0 处、`wrangler` 0 处、`cloudflare` 0 处。
-- 扫描命中了 426 处"40 位 base62"形状，逐个人工确认全部是 Compose 内部标识符（`defaultExpressiveNavigationBarItemColors` 之类），**没有一处是凭据**。
+- 解包后对全部 6 个 dex 与所有资源做正则扫描：`ghp_…` 0 处、`gate0-local-test`（e2e 用的假令牌）0 处、`wrangler` 0 处、`cloudflare` 0 处。
 - 没有设备令牌、没有硬编码服务器地址（由用户在界面上填）、没有生产环境地址。
-- 注意 `device_token_v1` 也不是常量 —— 那个键名只在 `core/DeviceTokenStore.kt` 里拼出来，包内搜不到。
+- `device_token_v1` 也不是常量 —— 那个键名只在 `core/DeviceTokenStore.kt` 里拼出来。
 
 **元信息**：
 
 | 项 | 值 |
 | --- | --- |
 | 应用名 / 包名（`applicationId`） | Android MCP Hub / `com.androidmcphub.app` |
-| `versionName` / `versionCode` | `0.1.1-gate0.1` / `2` |
+| `versionName` / `versionCode` | `0.1.2-gate0.2` / `3`（Gate 0.1 是 `0.1.1-gate0.1` / `2`） |
 | `minSdk` / `targetSdk` / `compileSdk` | 26 / 35 / 35 |
 | 签名 | Debug 签名（`debug.keystore`，AGP 自动生成）—— **不是发布签名** |
-| APK 内 `app_version`（与手机握手时上报） | `0.1.1-gate0.1`（`protocol/PhoneLinkProtocol.kt:10`） |
+| APK 内 `app_version`（与手机握手时上报） | `0.1.2-gate0.2`（`protocol/PhoneLinkProtocol.kt:10`），与 `versionName` 有单测强绑 |
 | 冷启动图标 | 自适应图标（前景/单色层 + 底色 `#F0F0F1`），五个密度全套 |
 
-**交付的第二条路径**（任务书允许任选，两条都给了）：
+### §11.2 交付的第二条路径：GitHub Actions 手动工作流
 
-1. **本地构建的文件** —— 见上表 §11.1，文件就在仓库的 `dist/` 里。
-2. **GitHub Actions 手动工作流**：`.github/workflows/android-debug-apk.yml` —— 在 Actions 页面手动点一次 `Run workflow`，产出的构建产物名为 **`Android-MCP-Hub-Gate0.1-debug-apk`**（含 `app-debug.apk` 与 `sha256.txt`，保留 30 天）。
-   ⚠ **这个工作流从未被执行过**（本环境没有 Actions runner）。它是否真的能跑通、`android-actions/setup-android@v3` 拉下来的 SDK 版本是否与 `compileSdk 35` 匹配，**都还没有验证**。这是 §8.1 第 4 条。
+`.github/workflows/android-debug-apk.yml` —— 在 Actions 页面手动点一次 `Run workflow`，产出的构建产物名为 **`Android-MCP-Hub-Gate0.2-debug-apk`**（含 `app-debug.apk` 与 `sha256.txt`，保留 30 天）。工作流里已经**加了** Gate 0.2 的 `verify_manifest_classes.py` 这一步。
 
-**这个 APK 能做什么、不能做什么**：能装、能启动、能填地址与令牌并手动连接。**它从未在真机上运行过** —— 界面的观感、Keystore 的真实加解密、前台服务的实际表现都属于 §8 的 NOT RUN，不得当成已验证。
+⚠ **这个工作流从未被执行过**（本环境没有 Actions runner）。它是否真的能跑通、`android-actions/setup-android@v3` 拉下来的 SDK 版本是否与 `compileSdk 35` 匹配、`python3` 那一步在 runner 上是否可用，**都还没有验证**。这是 §8.1 第 4 条。
+
+**这个 APK 能做什么、不能做什么**：能装、能启动、能填地址与令牌并手动连接。**它从未在真机上运行过** —— 界面的观感、Keystore 的真实加解密、前台服务的实际表现都属于 §8 的 NOT RUN。**并且 Gate 0.2 尤其要说清楚**：审计指出的那一处闪退原因已经修掉、也有两层检查防回归（§6.6），但"它装上之后真的不闪退了吗"这个问题，**本轮依然标 NOT RUN**（§6.6.7）—— 唯一能回答它的是真机冷启动。
 
 ⚠ 这是 **debug 签名**的包，只适合人工验证；不要用它做任何发布。

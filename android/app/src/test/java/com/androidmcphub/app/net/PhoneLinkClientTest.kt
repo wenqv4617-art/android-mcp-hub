@@ -86,7 +86,7 @@ class PhoneLinkClientTest {
             assertEquals("hello", hello.getString("type"))
             assertEquals("test-phone-1", hello.getString("device_id"))
             assertEquals("phone-link-v1", hello.getString("protocol_version"))
-            assertEquals("0.1.1-gate0.1", hello.getString("app_version"))
+            assertEquals("0.1.2-gate0.2", hello.getString("app_version"))
             assertEquals(35, hello.getInt("android_sdk"))
 
             // 随后必须用同一个 request_id 回 phone_pong
@@ -109,7 +109,7 @@ class PhoneLinkClientTest {
             assertNotNull(request)
             assertEquals("Bearer test-token-not-a-secret", request!!.getHeader("Authorization"))
             assertEquals("test-phone-1", request.getHeader("X-Device-Id"))
-            assertEquals("android-mcp-hub/0.1.1-gate0.1", request.getHeader("X-Client-Version"))
+            assertEquals("android-mcp-hub/0.1.2-gate0.2", request.getHeader("X-Client-Version"))
             assertEquals("GET", request.method)
             assertTrue("按契约不带 query", request.path == "/phone/ws")
 

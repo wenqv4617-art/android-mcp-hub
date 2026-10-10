@@ -1,5 +1,6 @@
 package com.androidmcphub.app.protocol
 
+import com.androidmcphub.app.BuildConfig
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -143,7 +144,7 @@ class PhoneLinkProtocolTest {
         assertEquals("hello", hello.getString("type"))
         assertEquals("test-phone-1", hello.getString("device_id"))
         assertEquals("phone-link-v1", hello.getString("protocol_version"))
-        assertEquals("0.1.1-gate0.1", hello.getString("app_version"))
+        assertEquals("0.1.2-gate0.2", hello.getString("app_version"))
         assertEquals(35, hello.getInt("android_sdk"))
     }
 
@@ -164,8 +165,29 @@ class PhoneLinkProtocolTest {
     @Test
     fun `常量与契约一致`() {
         assertEquals("phone-link-v1", PROTOCOL_VERSION)
-        assertEquals("0.1.1-gate0.1", APP_VERSION)
-        assertEquals("android-mcp-hub/0.1.1-gate0.1", CLIENT_VERSION)
+        assertEquals("0.1.2-gate0.2", APP_VERSION)
+        assertEquals("android-mcp-hub/0.1.2-gate0.2", CLIENT_VERSION)
         assertEquals(256, PING_DEDUP_CAPACITY)
+    }
+
+    /**
+     * Gate 0.2：加入这道检查，是因为本轮踩了一个"同一个东西有两个身份、而两边会各自漂移"的坑 ——
+     * `HubApplication.kt` 的 package 与 AndroidManifest 的 `android:name` 就是两处记录同一个事实，
+     * 写歪了编译器不管，只有真机启动才炸。
+     *
+     * 应用版本号也是同一种结构：`gradle/libs.versions.toml` 的 `appVersionName` 决定 APK 上显示的
+     * versionName，`PhoneLinkProtocol.APP_VERSION` 决定握手时上报给服务端的 `app_version`。
+     * 这两个值必须永远相等，否则审计时"APK 显示 0.1.2-gate0.2"和"日志里上报 0.1.1-gate0.1"会对不上，
+     * 而两条链路（构建脚本 / 运行时代码）平时根本不会互相校验。
+     */
+    @Test
+    fun `APP_VERSION 与 Gradle 的 versionName 必须一致`() {
+        assertEquals(
+            "版本号有两处来源：gradle/libs.versions.toml 的 appVersionName 与 " +
+                "PhoneLinkProtocol.APP_VERSION。改了其中一个就必须改另一个。",
+            BuildConfig.VERSION_NAME,
+            APP_VERSION,
+        )
+        assertEquals("android-mcp-hub/$APP_VERSION", CLIENT_VERSION)
     }
 }

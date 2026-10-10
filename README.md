@@ -2,12 +2,17 @@
 
 让 **ChatGPT 官方客户端**通过 MCP 直接指挥一台 **Android 手机**。
 
-> **状态：Gate 0.1（已修复第一轮审计的 R1–R4；仍然只验证链路，不接任何本地 MCP 应用）**
+> **状态：Gate 0.2（修掉 Gate 0.1 交付件里的启动闪退；仍然只验证链路，不接任何本地 MCP 应用）**
 > 本仓库目前**没有**部署到任何 Cloudflare 账户，也**没有**创建任何云端资源。
 > Gate 0 的目标只有一个：证明 `ChatGPT → Cloudflare Worker → Durable Object → 手机上的 App` 这条链路的每一环都真的能通、而且不会说谎。
 >
-> Gate 0.1 在这个基础上做了三件事：①修掉审计提出的重连竞态（R1）、日志安全（R2）、前台服务启动失败（R3）、设备令牌保护（R4）；②把 Home 界面补成可用的配置/状态/日志面板；③交付一个可安装的 Debug APK 并逐条核对 Android 13–16 的官方规范。
-> **没做的**：workerd 上的验证、真机验证、ChatGPT 的真实 OAuth 接入 —— 这三项在 [TEST_REPORT.md](TEST_REPORT.md) 里明确标着 **NOT RUN**。
+> **Gate 0.1** 在此基础上做了三件事：①修掉审计提出的重连竞态（R1）、日志安全（R2）、前台服务启动失败（R3）、设备令牌保护（R4）；②把 Home 界面补成可用的配置/状态/日志面板；③交付一个可安装的 Debug APK 并逐条核对 Android 13–16 的官方规范。
+>
+> **Gate 0.2** 修掉的是 Gate 0.1 交付件里一个**真实存在、用户已经踩到**的问题：APK 装上后**点图标立刻闪退**。
+> 根因是 `HubApplication.kt` 的 `package` 声明与 `AndroidManifest.xml` 里的 `android:name` 对不上 —— 编译期全绿、当时 132 个单测也全绿，却导致系统建进程时 `ClassNotFoundException`。
+> 除了修这一行，还补了**两层**自动化检查防它再来：一层进 JVM 单测，一层解析**真实 APK** 里的二进制 Manifest 与 dex 的 class_defs 表（`:app:verifyManifestClasses`）。详见 [TEST_REPORT.md](TEST_REPORT.md) §6.6。
+>
+> **没做的**：workerd 上的验证、真机验证（**包括"这个新 APK 装上之后到底还会不会闪退"**）、ChatGPT 的真实 OAuth 接入 —— 这些在 [TEST_REPORT.md](TEST_REPORT.md) 里明确标着 **NOT RUN**。
 
 ---
 
@@ -134,11 +139,13 @@ npm run mock:phone -- \
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 132 个 JVM 单测
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 135 个 JVM 单测
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses # Manifest 类名 ↔ 真实 dex
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 产出 Debug APK
 ```
 
-产物：`android/app/build/outputs/apk/debug/app-debug.apk`（`versionName 0.1.1-gate0.1`，`applicationId com.androidmcphub.app`，`minSdk 26 / targetSdk 35`）。
+产物：`android/app/build/outputs/apk/debug/app-debug.apk`（`versionName 0.1.2-gate0.2`，`applicationId com.androidmcphub.app`，`minSdk 26 / targetSdk 35`）。
+现成的交付件在 `dist/Android-MCP-Hub-Gate0.2-debug.apk`（SHA-256 见 [TEST_REPORT.md](TEST_REPORT.md) §11）。
 手机端配置（网关地址、设备 ID、令牌）在 App 界面上填，**不写在源码里**；设备令牌用 Android Keystore 里的密钥加密后存本机私有存储（**不留明文**）。
 
 > 想拿到一个现成的 APK，也可以用手动触发的 GitHub Actions 工作流：`.github/workflows/android-debug-apk.yml`（**只用 `workflow_dispatch`**，不部署、不读任何密钥）。⚠ 它在本仓库里**从未被执行过**。
@@ -194,5 +201,5 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 
 
 ## 8. 下一步（交给 G 老师复审后再动）
 
-**Gate 0.1 完成即停。** 没有用户明确确认，不做任何云端操作、不配置 OAuth、不连真机。
+**Gate 0.2 完成即停。** 没有用户明确确认，不做任何云端操作、不配置 OAuth、不连真机。
 下一阶段建议见 [TEST_REPORT.md](TEST_REPORT.md) 的 §8 与 §11 —— 按优先级是：①**在正常 Linux 主机上跑真实 workerd**（消掉最大的 NOT RUN）；②**真机跑一遍人工验证清单**（`android/README-ANDROID.md` §8）；③在那之后才谈 OAuth 与公网暴露。

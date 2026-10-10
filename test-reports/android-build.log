@@ -1,35 +1,302 @@
-=== Gate 0.1 Android 最终验证 2026-10-10T03:07:36Z ===
-提交: 52eb63e420b1039d66ed47503d88cd2243192783
-工作区改动（不含本日志）: 0 项
+############################################################
+# Gate 0.2 · Android 构建与测试证据
+# 生成时间（UTC）：2026-10-10T04:16:01Z
+# 环境：aarch64，JDK 17.0.20.1，ANDROID_HOME=/opt/android-sdk
+# 注意顺序：先跑单测并统计（计数必须在 clean 之前 —— clean 会删掉 test-results/，
+#           先 clean 再统计会得到 tests=0 这种假的零）
+############################################################
 
-$ cd android && ./gradlew --no-daemon :app:testDebugUnitTest
+===== 1. JVM 单元测试 =====
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.11.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :app
+WARNING: The option setting 'android.aapt2FromMavenOverride=/root/android-mcp-hub/android/tools/aapt2' is experimental.
+
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest FROM-CACHE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar
+> Task :app:bundleDebugClassesToRuntimeJar
+> Task :app:compileDebugUnitTestKotlin FROM-CACHE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugUnitTestJavaRes
 > Task :app:testDebugUnitTest FROM-CACHE
 
-BUILD SUCCESSFUL in 26s
+BUILD SUCCESSFUL in 23s
 24 actionable tasks: 3 executed, 3 from cache, 18 up-to-date
 UNITTEST_EXIT=0
 
-=== 逐类单测计数（解析 app/build/test-results/testDebugUnitTest/*.xml） ===
+===== 1b. 逐类统计（解析 build/test-results/testDebugUnitTest/*.xml）=====
+  ManifestComponentTest    tests=2 failures=0 errors=0 skipped=0
   BackoffTest              tests=9 failures=0 errors=0 skipped=0
   DeviceTokenStoreTest     tests=18 failures=0 errors=0 skipped=0
   HubConfigTest            tests=7 failures=0 errors=0 skipped=0
   HubLogTest               tests=4 failures=0 errors=0 skipped=0
   WsUrlTest                tests=8 failures=0 errors=0 skipped=0
   PhoneLinkClientTest      tests=7 failures=0 errors=0 skipped=0
-  PhoneLinkProtocolTest    tests=14 failures=0 errors=0 skipped=0
+  PhoneLinkProtocolTest    tests=15 failures=0 errors=0 skipped=0
   PhoneLinkTest            tests=35 failures=0 errors=0 skipped=0
   PingResponderTest        tests=9 failures=0 errors=0 skipped=0
   ConnectGateTest          tests=21 failures=0 errors=0 skipped=0
-TOTAL tests=132 failures=0 errors=0 skipped=0
+TOTAL tests=135 failures=0 errors=0 skipped=0
 
-$ cd android && ./gradlew --no-daemon clean :app:assembleDebug
+===== 2. Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增）=====
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.11.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :app
+WARNING: The option setting 'android.aapt2FromMavenOverride=/root/android-mcp-hub/android/tools/aapt2' is experimental.
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:mergeDebugShaders UP-TO-DATE
+> Task :app:compileDebugShaders NO-SOURCE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:compressDebugAssets UP-TO-DATE
+> Task :app:desugarDebugFileDependencies UP-TO-DATE
+> Task :app:dexBuilderDebug UP-TO-DATE
+> Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:checkDebugDuplicateClasses UP-TO-DATE
+> Task :app:mergeExtDexDebug UP-TO-DATE
+> Task :app:mergeLibDexDebug UP-TO-DATE
+> Task :app:mergeProjectDexDebug UP-TO-DATE
+> Task :app:mergeDebugJniLibFolders UP-TO-DATE
+> Task :app:mergeDebugNativeLibs UP-TO-DATE
+> Task :app:stripDebugDebugSymbols UP-TO-DATE
+> Task :app:validateSigningDebug UP-TO-DATE
+> Task :app:writeDebugAppMetadata UP-TO-DATE
+> Task :app:writeDebugSigningConfigVersions UP-TO-DATE
+> Task :app:packageDebug UP-TO-DATE
+> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
+> Task :app:assembleDebug UP-TO-DATE
+
+> Task :app:verifyManifestClasses
+检查对象：app/build/outputs/apk/debug/app-debug.apk
+  APK 大小 10318570 字节
+  manifest package = 
+  Manifest 里声明的组件类共 6 个
+  dex 共 6 个：classes.dex, classes2.dex, classes3.dex, classes4.dex, classes5.dex, classes6.dex
+  dex 里**定义**的类共 13801 个
+
+  ✓ <application    > com.androidmcphub.app.HubApplication
+  ✓ <activity       > com.androidmcphub.app.MainActivity
+  ✓ <service        > com.androidmcphub.app.service.PhoneLinkService
+  ✓ <provider       > androidx.startup.InitializationProvider
+  ✓ <activity       > androidx.compose.ui.tooling.PreviewActivity
+  ✓ <receiver       > androidx.profileinstaller.ProfileInstallReceiver
+
+✅ 全部对得上：Manifest 里每个组件类都能在 dex 里找到。
+
+BUILD SUCCESSFUL in 26s
+38 actionable tasks: 1 executed, 37 up-to-date
+VERIFY_EXIT=0
+
+===== 3. 干净重建 Debug APK =====
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.11.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :app
+WARNING: The option setting 'android.aapt2FromMavenOverride=/root/android-mcp-hub/android/tools/aapt2' is experimental.
+
+> Task :app:clean
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateDebugBuildConfig FROM-CACHE
+> Task :app:generateDebugResValues FROM-CACHE
+> Task :app:checkDebugAarMetadata
+> Task :app:mapDebugSourceSetPaths
+> Task :app:generateDebugResources FROM-CACHE
+> Task :app:mergeDebugResources FROM-CACHE
+> Task :app:packageDebugResources FROM-CACHE
+> Task :app:parseDebugLocalResources FROM-CACHE
+> Task :app:createDebugCompatibleScreenManifests
+> Task :app:extractDeepLinksDebug FROM-CACHE
+> Task :app:processDebugMainManifest FROM-CACHE
+> Task :app:processDebugManifest FROM-CACHE
+> Task :app:processDebugManifestForPackage FROM-CACHE
+> Task :app:processDebugResources FROM-CACHE
+> Task :app:compileDebugKotlin FROM-CACHE
+> Task :app:javaPreCompileDebug FROM-CACHE
+> Task :app:compileDebugJavaWithJavac FROM-CACHE
+> Task :app:mergeDebugShaders
+> Task :app:compileDebugShaders NO-SOURCE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets
+> Task :app:compressDebugAssets FROM-CACHE
+> Task :app:desugarDebugFileDependencies FROM-CACHE
+> Task :app:dexBuilderDebug FROM-CACHE
+> Task :app:mergeDebugGlobalSynthetics FROM-CACHE
+> Task :app:processDebugJavaRes
+> Task :app:mergeDebugJniLibFolders
+> Task :app:checkDebugDuplicateClasses
+> Task :app:mergeDebugNativeLibs
+> Task :app:mergeExtDexDebug FROM-CACHE
+> Task :app:mergeLibDexDebug FROM-CACHE
+> Task :app:mergeProjectDexDebug FROM-CACHE
+
+> Task :app:stripDebugDebugSymbols
+Unable to strip the following libraries, packaging them as they are: libandroidx.graphics.path.so.
+
+> Task :app:validateSigningDebug
+> Task :app:writeDebugAppMetadata
+> Task :app:writeDebugSigningConfigVersions
+> Task :app:mergeDebugJavaResource
+> Task :app:packageDebug
+> Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 32s
+BUILD SUCCESSFUL in 31s
 38 actionable tasks: 17 executed, 21 from cache
 ASSEMBLE_EXIT=0
 
-=== 构建可复现性：本次重新构建的 APK 与 dist/ 里交付的那个比较 ===
-f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10  app/build/outputs/apk/debug/app-debug.apk
-f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10  ../dist/Android-MCP-Hub-Gate0.1-debug.apk
-✅ 字节完全一致：换台机器/重跑一次 clean build 得到同一个 APK
+===== 4. 产物校验值 =====
+-rw-------. 1 root root 10318570 Oct 10 04:17 app/build/outputs/apk/debug/app-debug.apk
+0f7bfc37ef7c91ced3e65ceb6d6bf85336f29ee973c34de8f72d26a02221d44f  app/build/outputs/apk/debug/app-debug.apk
+
+===== 5. 可复现性：再 clean 重建一次并比对 =====
+第一次 SHA-256 = 0f7bfc37ef7c91ced3e65ceb6d6bf85336f29ee973c34de8f72d26a02221d44f
+第二次 SHA-256 = 0f7bfc37ef7c91ced3e65ceb6d6bf85336f29ee973c34de8f72d26a02221d44f
+REPRODUCIBLE=YES
+
+===== 6. APK 元信息（从 APK 本体读）=====
+package: name='com.androidmcphub.app' versionCode='3' versionName='0.1.2-gate0.2' platformBuildVersionName='15' platformBuildVersionCode='35' compileSdkVersion='35' compileSdkVersionCodename='15'
+sdkVersion:'26'
+targetSdkVersion:'35'
+application-label:'Android MCP Hub'
+application-label-af:'Android MCP Hub'
+application-label-am:'Android MCP Hub'
+application-label-ar:'Android MCP Hub'
+application-label-as:'Android MCP Hub'
+application-label-az:'Android MCP Hub'
+application-label-be:'Android MCP Hub'
+application-label-bg:'Android MCP Hub'
+application-label-bn:'Android MCP Hub'
+application-label-bs:'Android MCP Hub'
+application-label-ca:'Android MCP Hub'
+application-label-cs:'Android MCP Hub'
+application-label-da:'Android MCP Hub'
+application-label-de:'Android MCP Hub'
+application-label-el:'Android MCP Hub'
+application-label-en-AU:'Android MCP Hub'
+application-label-en-CA:'Android MCP Hub'
+application-label-en-GB:'Android MCP Hub'
+application-label-en-IN:'Android MCP Hub'
+application-label-en-XC:'Android MCP Hub'
+application-label-es:'Android MCP Hub'
+application-label-es-US:'Android MCP Hub'
+application-label-et:'Android MCP Hub'
+application-label-eu:'Android MCP Hub'
+application-label-fa:'Android MCP Hub'
+application-label-fi:'Android MCP Hub'
+application-label-fr:'Android MCP Hub'
+application-label-fr-CA:'Android MCP Hub'
+application-label-gl:'Android MCP Hub'
+application-label-gu:'Android MCP Hub'
+application-label-hi:'Android MCP Hub'
+application-label-hr:'Android MCP Hub'
+application-label-hu:'Android MCP Hub'
+application-label-hy:'Android MCP Hub'
+application-label-in:'Android MCP Hub'
+application-label-is:'Android MCP Hub'
+application-label-it:'Android MCP Hub'
+application-label-iw:'Android MCP Hub'
+application-label-ja:'Android MCP Hub'
+application-label-ka:'Android MCP Hub'
+application-label-kk:'Android MCP Hub'
+application-label-km:'Android MCP Hub'
+application-label-kn:'Android MCP Hub'
+application-label-ko:'Android MCP Hub'
+application-label-ky:'Android MCP Hub'
+application-label-lo:'Android MCP Hub'
+application-label-lt:'Android MCP Hub'
+application-label-lv:'Android MCP Hub'
+application-label-mk:'Android MCP Hub'
+application-label-ml:'Android MCP Hub'
+application-label-mn:'Android MCP Hub'
+application-label-mr:'Android MCP Hub'
+application-label-ms:'Android MCP Hub'
+application-label-my:'Android MCP Hub'
+application-label-nb:'Android MCP Hub'
+application-label-ne:'Android MCP Hub'
+application-label-nl:'Android MCP Hub'
+application-label-or:'Android MCP Hub'
+application-label-pa:'Android MCP Hub'
+application-label-pl:'Android MCP Hub'
+application-label-pt:'Android MCP Hub'
+application-label-pt-BR:'Android MCP Hub'
+application-label-pt-PT:'Android MCP Hub'
+application-label-ro:'Android MCP Hub'
+application-label-ru:'Android MCP Hub'
+application-label-si:'Android MCP Hub'
+application-label-sk:'Android MCP Hub'
+application-label-sl:'Android MCP Hub'
+application-label-sq:'Android MCP Hub'
+application-label-sr:'Android MCP Hub'
+application-label-sr-Latn:'Android MCP Hub'
+application-label-sv:'Android MCP Hub'
+application-label-sw:'Android MCP Hub'
+application-label-ta:'Android MCP Hub'
+application-label-te:'Android MCP Hub'
+application-label-th:'Android MCP Hub'
+application-label-tl:'Android MCP Hub'
+application-label-tr:'Android MCP Hub'
+application-label-uk:'Android MCP Hub'
+application-label-ur:'Android MCP Hub'
+application-label-uz:'Android MCP Hub'
+application-label-vi:'Android MCP Hub'
+application-label-zh-CN:'Android MCP Hub'
+application-label-zh-HK:'Android MCP Hub'
+application-label-zh-TW:'Android MCP Hub'
+application-label-zu:'Android MCP Hub'
+launchable-activity: name='com.androidmcphub.app.MainActivity'  label='' icon=''
+
+===== 7. 签名 =====
+Signer #1 certificate DN: C=US, O=Android, CN=Android Debug
+Signer #1 certificate SHA-256 digest: b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429
+
+全部完成（本文件由 /tmp/gen-evidence.sh 生成，命令与输出都是原始抓取）

@@ -1,4 +1,4 @@
-$ npm run e2e
+$ npm run e2e   # = GATE0_VERBOSE=1 tsx e2e/run-local-e2e.ts
 
 > android-mcp-hub@0.1.0-gate0 e2e
 > GATE0_VERBOSE=1 tsx e2e/run-local-e2e.ts
@@ -9,7 +9,7 @@ $ npm run e2e
 ══════════════════════════════════════════════════════════════════════════════
   ⚠ Worker / DO 跑在 Node shim 上，不是 workerd —— 见 TEST_REPORT.md
 
-  本地网关已启动：http://127.0.0.1:44075
+  本地网关已启动：http://127.0.0.1:40023
 
 ① /healthz 健康契约
   ✅ PASS  healthz 返回 200  —— status=200
@@ -22,8 +22,8 @@ $ npm run e2e
   ✅ PASS  401 带 WWW-Authenticate 头
 
 ③ 官方 MCP SDK 客户端 initialize
-{"ts":"2026-10-10T02:56:40.303Z","level":"info","event":"mcp.initialize","requestedProtocolVersion":"2025-11-25","negotiatedProtocolVersion":"2025-06-18"}
-{"ts":"2026-10-10T02:56:40.317Z","level":"debug","event":"mcp.notification","method":"notifications/initialized"}
+{"ts":"2026-10-10T04:18:24.307Z","level":"info","event":"mcp.initialize","requestedProtocolVersion":"2025-11-25","negotiatedProtocolVersion":"2025-06-18"}
+{"ts":"2026-10-10T04:18:24.321Z","level":"debug","event":"mcp.notification","method":"notifications/initialized"}
   ✅ PASS  initialize 成功并拿到服务端信息  —— server=android-mcp-hub@0.1.0-gate0
 
 ④ tools/list
@@ -34,42 +34,42 @@ $ npm run e2e
   ✅ PASS  错误码是 phone_offline（而不是伪造一个 pong）  —— error={"code":"phone_offline","message":"该设备当前没有已建立的连接"}
 
 ⑥ 起一个真实的模拟手机进程（scenario=normal），再 ping
-     [phone] [phone] 连接 ws://127.0.0.1:44075/phone/ws
+     [phone] [phone] 连接 ws://127.0.0.1:40023/phone/ws
      [phone] [phone] device=test-phone-1 scenario=normal
-{"ts":"2026-10-10T02:56:41.085Z","level":"info","event":"phone.upgrade_forwarding","deviceId":"test-phone-1","contract":"local mock phone"}
-{"ts":"2026-10-10T02:56:41.086Z","level":"info","event":"phone_session.connected","deviceId":"test-phone-1","generation":1,"replaced":0,"discarded":0}
+{"ts":"2026-10-10T04:18:24.834Z","level":"info","event":"phone.upgrade_forwarding","deviceId":"test-phone-1","contract":"local mock phone"}
+{"ts":"2026-10-10T04:18:24.835Z","level":"info","event":"phone_session.connected","deviceId":"test-phone-1","generation":1,"replaced":0,"discarded":0}
      [phone] [phone] WebSocket 已打开
-     [phone] [phone] phone_ping #0 request_id=cdab9ff4-b431-4183-888f-4b9b3e4c370f
+     [phone] [phone] phone_ping #0 request_id=8723da97-0b12-4582-b2b5-d54cc7ef1a81
   ✅ PASS  phone_ping 成功（真的过了 Worker → DO → WebSocket → 手机进程）
-  ✅ PASS  RTT 由服务端测量且是数字  —— rtt_ms=7
-  ✅ PASS  返回的 request_id 与手机收到的 ping 一致  —— request_id=cdab9ff4-b431-4183-888f-4b9b3e4c370f
+  ✅ PASS  RTT 由服务端测量且是数字  —— rtt_ms=10
+  ✅ PASS  返回的 request_id 与手机收到的 ping 一致  —— request_id=8723da97-0b12-4582-b2b5-d54cc7ef1a81
   ✅ PASS  连接代次 ≥ 1
   ✅ PASS  echo 原样回传  —— （见下一步）
-     [phone] [phone] phone_ping #1 request_id=a79248a2-e9e7-4cbe-ab66-5c3e1b4e6b1d
+     [phone] [phone] phone_ping #1 request_id=3ececdc2-3194-4958-9318-8470644177df
   ✅ PASS  带 echo 的 ping 成功且 echo 原样返回  —— echo=hello-from-e2e
 
 ⑦ 第二台手机收到 ping 不回（scenario=no-response）→ 必须超时失败
-     [phone] [phone] 连接 ws://127.0.0.1:44075/phone/ws
+     [phone] [phone] 连接 ws://127.0.0.1:40023/phone/ws
      [phone] [phone] device=test-phone-2 scenario=no-response
-{"ts":"2026-10-10T02:56:41.825Z","level":"info","event":"phone.upgrade_forwarding","deviceId":"test-phone-2","contract":"local mock phone 2"}
-{"ts":"2026-10-10T02:56:41.825Z","level":"info","event":"phone_session.connected","deviceId":"test-phone-2","generation":1,"replaced":0,"discarded":0}
+{"ts":"2026-10-10T04:18:27.118Z","level":"info","event":"phone.upgrade_forwarding","deviceId":"test-phone-2","contract":"local mock phone 2"}
+{"ts":"2026-10-10T04:18:27.118Z","level":"info","event":"phone_session.connected","deviceId":"test-phone-2","generation":1,"replaced":0,"discarded":0}
      [phone] [phone] WebSocket 已打开
-     [phone] [phone] phone_ping #0 request_id=66d7131d-faa8-47b5-8d04-ca5ed8a85397
+     [phone] [phone] phone_ping #0 request_id=bed013ee-ae52-466f-991a-31263379f2ca
      [phone] [phone] scenario=no-response：故意不回 pong
-     [phone] [phone] phone_ping #1 request_id=cceb2caa-2cfb-4a35-ab70-bda7dd468bec
+     [phone] [phone] phone_ping #1 request_id=526fc538-8c85-4806-a9d7-8d0c3c60d6e8
      [phone] [phone] scenario=no-response：故意不回 pong
   ✅ PASS  不回应 → isError=true
   ✅ PASS  错误码是 phone_timeout（服务端测量超时，不是本地说谎）  —— code=phone_timeout
-  ✅ PASS  确实等了配置的超时时间（≥250ms）  —— elapsed=306ms
-     [phone] [phone] phone_ping #2 request_id=fabaccbb-0989-425c-970e-1799f2100a4a
+  ✅ PASS  确实等了配置的超时时间（≥250ms）  —— elapsed=316ms
+     [phone] [phone] phone_ping #2 request_id=4309dbc7-1e90-40bc-b8be-0728e4bf4ed5
      [phone] [phone] scenario=no-response：故意不回 pong
   ✅ PASS  连续超时仍然是 phone_timeout（连接没被误关，状态没被写坏）  —— code=phone_timeout
 
 ⑧ 会话与协议头
   ✅ PASS  同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）
 
-{"ts":"2026-10-10T02:56:42.799Z","level":"info","event":"phone_session.socket_gone","cause":"close","closeCode":1000,"socketGeneration":1,"currentGeneration":1}
-{"ts":"2026-10-10T02:56:42.812Z","level":"info","event":"phone_session.socket_gone","cause":"close","closeCode":1000,"socketGeneration":1,"currentGeneration":1}
+{"ts":"2026-10-10T04:18:28.181Z","level":"info","event":"phone_session.socket_gone","cause":"close","closeCode":1000,"socketGeneration":1,"currentGeneration":1}
+{"ts":"2026-10-10T04:18:28.213Z","level":"info","event":"phone_session.socket_gone","cause":"close","closeCode":1000,"socketGeneration":1,"currentGeneration":1}
 ══════════════════════════════════════════════════════════════════════════════
   端到端结果：21 通过，0 失败（共 21 项）
 ══════════════════════════════════════════════════════════════════════════════

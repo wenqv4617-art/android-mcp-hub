@@ -18,9 +18,42 @@
 cd android
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
+# Gate 0.2 新增：用真实 APK + dex 校验 Manifest 里的组件类名（会先自动 assembleDebug）
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses
 ```
 
 产物：`android/app/build/outputs/apk/debug/app-debug.apk`
+
+### 1.0 为什么会有 `verifyManifestClasses` 这个任务（Gate 0.2 的由来）
+
+Gate 0.1 交付的 APK **装上之后点图标立刻闪退**。根因是 `app/src/main/java/com/androidmcphub/app/HubApplication.kt:1`
+写的是 `package com.androidmcphub.app.ui`（文件却在 `app/` 目录下），编译产物是
+`com.androidmcphub.app.ui.HubApplication`，而 `AndroidManifest.xml:21` 要的是 `.HubApplication`
+= `com.androidmcphub.app.HubApplication`。
+
+系统的建进程流程是"照 Manifest 里那串**字符串**去 dex 里找类"，找不到就 `ClassNotFoundException`，
+进程在建 Application 阶段就死了 —— Activity 根本没机会创建，所以表现是"界面完全不出现"。
+
+**为什么以前没人发现**：Kotlin **允许**包声明与目录不一致（Java 才强制），所以这不是编译错误；
+`assembleDebug` 成功；当时那 132 个 JVM 单测全部直接 `import` 类，走的是编译器解析的符号，
+**而不经过 Manifest 里那串字符串**。字符串层面的错误，符号层面的测试永远看不见。
+
+所以现在有两层检查（细节见 `../TEST_REPORT.md` §6.6）：
+
+| 层 | 位置 | 何时跑 | 看的东西 |
+| --- | --- | --- | --- |
+| ① | `app/src/test/java/com/androidmcphub/app/ManifestComponentTest.kt`（2 条） | 每次 `:app:testDebugUnitTest` | `src/main/AndroidManifest.xml` 里的组件名 → 本次编译产物的 `.class` 资源 |
+| ② | `tools/verify_manifest_classes.py` + Gradle 任务 `verifyManifestClasses` | 手动 / `check` / CI | **真实 APK** 里的二进制 AXML + 所有 `classes*.dex` 的 class_defs 表 |
+
+第 ② 层刻意**不依赖 `aapt2`**（本机的 aapt2 要靠 §1.1 那个 qemu 包装脚本，在 CI 上是坏路径），
+脚本自己解析 AXML；而且它数的是 dex 里**定义**的类，不是"被引用到的类型"—— 后者会把
+"只是被提到过"的类算成存在，那就挡不住这个 bug 了。失败时它会额外打印"实际存在的同名单类"，
+直接把写错的包名指出来。
+
+> ⚠️ 顺带记一条本轮踩到的坑：Android Lint 的 `MissingClass` 规则**本来就能抓到这个问题**
+> （severity 还是 Error），但 `app/build.gradle.kts` 里的 `abortOnError = false` 把它一起吞了。
+> 试过只把 `MissingClass` 设为 `fatal`：**无效**（`abortOnError = false` 优先级更高，实测仍然
+> `BUILD SUCCESSFUL`）。所以硬门禁放在第 ② 层上，而不是 lint 上。详见 `../TEST_REPORT.md` §6.6.4。
 
 `local.properties` 里写的是 `sdk.dir=/opt/android-sdk`，该文件已被仓库根目录的 `.gitignore` 忽略，不要提交。
 
@@ -363,8 +396,10 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - `PhoneLinkClientTest`：用 **MockWebServer** 在 JVM 上跑**真实 WebSocket 链路**，验证请求头、hello、pong 的回包、401 认证失败、地址无效与令牌为空时的拒绝连接；另有 3 条覆盖 R4：令牌从未配置 / 令牌解不开时**拒绝建连且服务端收不到任何请求**，以及"每次建连都重新读凭据"。
 - `ConnectGateTest`（21 条，R3）：失败类别闭集与"只按类名分类"、每个类别都有中文文案、`Started→建连` / `Failed→终止`、**前台失败时 `startLink` 一次都没被调用**、调用顺序不可交换、终止路径不安排重连、错误要活过 `resetLink()`。
 - `DeviceTokenStoreTest`（18 条，R4）：三态区分、落盘的是密文且明文片段不出现、畸形密文/解密失败/非 UTF-8/空白各自归到固定类别、加密或落盘失败返回 `Failed` 且**什么都不写**、编码器对任意输入只返回 `null` 不抛异常（含 500 次随机字符串 fuzz）。
+- `ManifestComponentTest`（**2 条，Gate 0.2**）：Manifest 里每个组件类都能在**本次编译产物**里找到；每个 `.kt` 的 `package` 声明与所在目录一致。这两条就是 Gate 0.1 闪退的防回归 —— 故意把错误包名打回去时它们会红（`../TEST_REPORT.md` §6.6.5 有实测输出）。
+- `PhoneLinkProtocolTest` 里的 `APP_VERSION 与 Gradle 的 versionName 必须一致`（**Gate 0.2 新增的 1 条**）：版本号也是"一个事实两处记录"（`gradle/libs.versions.toml` 的 `appVersionName` 与 `PhoneLinkProtocol.kt:10` 的 `APP_VERSION`），它们平时互不校验。
 
-合计 **132** 条（Gate 0 是 90 条）。
+合计 **135** 条（Gate 0 是 90、Gate 0.1 是 132）。
 
 之所以能在 JVM 上跑 org.json 与 WebSocket：`org.json` 在 Android 运行时是自带的，但在 JVM 单测里是抛异常的 stub，
 所以 `testImplementation` 里额外引了 `org.json:json:20240303`（真实现）与 `okhttp3:mockwebserver:4.12.0`。
@@ -383,6 +418,7 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 
 | # | 要验证的事 | 期望结果 | 为什么自动化覆盖不到 |
 | --- | --- | --- | --- |
+| **0** | **安装 Gate 0.2 的 APK 后冷启动**（**Gate 0.2 本轮最需要的一步**） | 点图标进入主界面，**不再立刻回桌面**。若仍闪退，请抓 `adb logcat -b crash` 与 `adb shell dumpsys package com.androidmcphub.app` 回传 | 本环境没有真机/模拟器。已经证明的只是"Manifest 要的那个类现在确实在 dex 里"（真实 APK + 真实 dex），**不等于**"启动不会因别的原因崩" |
 | 1 | 安装后首次点「连接」，通知栏出现前台服务通知 | 通知存在、文案为「正在连接…」→「已连接到 <host>」，有「断开」按钮 | 通知渲染与前台服务提升要真实系统 |
 | 2 | Android 13+ 首次点「连接」弹权限询问 | 允许 → 通知可见；**拒绝 → 依然能连接成功**，不崩溃、不弹错误 | 运行时权限对话框是系统 UI |
 | 3 | 点通知上的「断开」 | 连接断开、服务停止、通知消失（`STOP_FOREGROUND_REMOVE`） | `PendingIntent` → Service 的真实投递 |
@@ -409,5 +445,6 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 ## 9. 已知限制
 
 - 没有 `androidTest`/仪器测试（环境里没有模拟器）。第 8 节是真机验证的替代方案。
+- `:app:lintDebug` **可以跑通**（本环境实测 `BUILD SUCCESSFUL`），但因为 `app/build.gradle.kts` 里 `abortOnError = false`，它**不会**让构建失败。当前树上唯一的 Error 是 `service/PhoneLinkService.kt:321` 的 `MissingPermission`（未处理，记录在 `../TEST_REPORT.md` 的 K10 与 §8.1 第 13 条）。Manifest 类名这一类问题已由 §1.0 的第 ② 层硬门禁接管。
 - 界面只做了单屏，没有历史图表、没有多设备管理（按任务要求，不做工具管理与跨设备控制）。
 - 服务被系统杀掉的极端情况下，只有用户重新点「连接」才会恢复 —— 这是刻意的取舍，不做任何后台自启。
