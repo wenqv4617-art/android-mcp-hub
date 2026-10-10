@@ -4,6 +4,7 @@ import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.core.hostOf
+import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.normalizeWebSocketUrl
 import com.androidmcphub.app.protocol.CLIENT_VERSION
 import com.androidmcphub.app.protocol.LinkAction
@@ -223,7 +224,9 @@ class PhoneLinkClient(
 
         val myEpoch = epochCounter.incrementAndGet()
         currentEpoch = myEpoch
-        log(LogLevel.INFO, "发起 WebSocket 连接：$url（host=${hostOf(url)}，设备 ID=${cfg.deviceId}）")
+        // Gate 0.3 审计发现项 1：只记主机名。`$url` 里带着 path，而且用户从别处
+        // 复制来的地址可能带查询参数；主机名足够定位问题，且不承载任何凭据。
+        log(LogLevel.INFO, "发起 WebSocket 连接 host=${hostOf(url)} deviceId=${cfg.deviceId}")
 
         val ws = httpClient.newWebSocket(request, Listener(myEpoch))
         synchronized(socketLock) { socket = ws }
@@ -286,7 +289,9 @@ class PhoneLinkClient(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (!isCurrent(epoch)) return
-            execute(link.onSocketFailure(describe(t), response?.code))
+            // Gate 0.3 审计发现项 1：**不把 `t.message` 往下传**。
+            // 只按异常类名给一个闭集里的类别（见 SocketFailure.classify）。
+            execute(link.onSocketFailure(SocketFailure.classify(t.javaClass.simpleName), response?.code))
         }
     }
 
@@ -296,9 +301,6 @@ class PhoneLinkClient(
 
         /** 调度器节拍：1 秒。 */
         private const val TICK_MS = 1_000L
-
-        private fun describe(t: Throwable): String =
-            "${t.javaClass.simpleName}: ${t.message ?: "无详情"}"
 
         /** 界面状态的中文描述，同时用于日志。 */
         fun describeState(state: LinkState): String = when (state) {

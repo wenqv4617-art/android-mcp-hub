@@ -1,5 +1,6 @@
 package com.androidmcphub.app.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -17,12 +19,14 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.androidmcphub.app.MainActivity
 import com.androidmcphub.app.R
 import com.androidmcphub.app.core.HubLog
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.LogEntry
 import com.androidmcphub.app.core.LogLevel
+import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.hostOf
 import com.androidmcphub.app.net.PhoneLinkClient
 import com.androidmcphub.app.protocol.LinkState
@@ -249,7 +253,11 @@ class PhoneLinkService : Service() {
         }
         networkCallback = callback
         runCatching { cm.registerDefaultNetworkCallback(callback) }
-            .onFailure { LinkBus.log.warn("注册网络回调失败：${it.message}") }
+            // Gate 0.3 审计发现项 1：不记 `it.message`（未经处理的异常字符串），
+            // 只记 SocketFailure 闭集里的类别。
+            .onFailure {
+                LinkBus.log.warn("注册网络回调失败 category=${SocketFailure.classify(it.javaClass.simpleName)}")
+            }
     }
 
     private fun unregisterNetworkCallback() {
@@ -315,10 +323,34 @@ class PhoneLinkService : Service() {
         ForegroundResult.Failed(ForegroundFailure.classify(error))
     }
 
+    /**
+     * 更新前台服务通知。
+     *
+     * Gate 0.3 审计发现项 2：这里原来只有 `runCatching` —— 它能吞掉 Android 13+ 因缺少
+     * POST_NOTIFICATIONS 抛出的 `SecurityException`，但 lint 的 `MissingPermission` **不认**
+     * "被 catch 住了"这件事，所以它一直报 Error；而当时 `abortOnError = false` 又把这条
+     * Error 静音了。现在补一个 lint 认得的守卫，于是 `abortOnError` 可以改回 true。
+     *
+     * **权限检查必须内联在这里**：一开始我把它抽成了独立的 `canPostNotifications()`，
+     * lint 的流分析不跟踪这种间接守卫，`:app:lintDebug` 照样报同一条 Error
+     * （实测报在 PhoneLinkService.kt:340）。所以这里写成内联判断 + 显式 catch 双保险。
+     *
+     * 行为不变：用户拒绝通知权限时，这次 notify 不显示，但服务与连接照常工作
+     * （前台服务本身不依赖通知权限）。
+     */
     private fun updateNotification(state: LinkState) {
-        // 用户拒绝 POST_NOTIFICATIONS 时这次 notify 不会显示，但服务与连接照常工作
-        runCatching {
+        // Android 13（API 33）以下没有 POST_NOTIFICATIONS，一律按"可以发"处理。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        try {
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification(state))
+        } catch (e: SecurityException) {
+            // 权限在两次判断之间被撤销的竞态窗口。不记异常原文。
+            LinkBus.log.warn("更新通知失败 category=permission_denied")
         }
     }
 

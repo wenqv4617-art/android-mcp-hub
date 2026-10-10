@@ -106,6 +106,9 @@ export const ERROR_CATEGORIES: ReadonlySet<string> = new Set([
   "unknown_request_id",
   "phone_replaced",
   "phone_disconnected",
+  // Gate 0.3：DO 记账路径的 alarm 调度失败。与 storage_failure 分开，
+  // 因为两者的处置不同：存储坏了要换存储，alarm 调度坏了要重排。
+  "alarm_schedule_failed",
 ]);
 
 /** 闸 3 的兜底值：类别不在上表里就记这个。 */

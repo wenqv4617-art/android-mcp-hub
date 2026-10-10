@@ -31,6 +31,7 @@ import {
   TEST_DEVICE_ID,
   TEST_DEVICE_ID_2,
 } from "./harness/env";
+import type { FakeDurableObjectStorage } from "./harness/runtime";
 
 const DEVICE = TEST_DEVICE_ID;
 
@@ -834,5 +835,195 @@ describe("PhoneSession / 多设备隔离", () => {
     expect(a.socket.receivedFrames.some((f) => f.includes("req-dev-b"))).toBe(false);
     expect(b.socket.receivedFrames.some((f) => f.includes("req-dev-a"))).toBe(false);
     expect(rig.phone.liveCount()).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Gate 0.3 审计发现项 3：结算路径的故障注入
+// ---------------------------------------------------------------------------
+//
+//  要证明三件事：
+//    1. **不永久挂起** —— 存储写失败 / 指标落盘失败 / alarm 调度失败时，
+//       调用方仍然会拿到一个明确结果；
+//    2. **不泄漏、不重复结算** —— 失败不会留下"登记了但没人管"的表项，
+//       结算过的请求不会被再结算一次；
+//    3. **不伪造成功** —— 手机一次 pong 都没回时，无论记账怎么失败，
+//       都不可能得到 `ok: true`。
+// ---------------------------------------------------------------------------
+
+describe("PhoneSession / 12. 结算路径的故障注入（Gate 0.3 审计发现项 3）", () => {
+  /** 拿到这台设备那个 DO 实例的假存储，用来注入故障。 */
+  function storageOf(rig: Awaited<ReturnType<typeof makeRig>>): FakeDurableObjectStorage {
+    return rig.phone.ctxOf(DEVICE).storage as FakeDurableObjectStorage;
+  }
+
+  it("结算时存储写、指标落盘、alarm 调度全部失败，调用方仍然拿到 phone_timeout", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "120" } });
+    const { socket } = await connectMockPhone(rig, DEVICE, "no-response");
+    const storage = storageOf(rig);
+
+    // 把结算路径上每一处记账都打坏。
+    const pendingFail = storage.failNext("put", { key: "pending", times: 10 });
+    const metricsFail = storage.failNext("put", { key: "metrics", times: 10 });
+    storage.failNext("setAlarm", { times: 10 });
+    storage.failNext("deleteAlarm", { times: 10 });
+
+    const started = Date.now();
+    const outcome = await pingPhoneDirect(rig, DEVICE, { requestId: "req-fi-1" });
+    const elapsed = Date.now() - started;
+
+    // ⚠ 这一条就是 Gate 0.3 的核心。加固之前，`settlePending` 里裸 await 的
+    //   `storage.put` 一抛，`entry.settle()` 就永远不会执行，这里会**永远挂着**。
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("phone_timeout");
+
+    // 而且它确实是"等满超时"才返回的，不是被某条捷径提前完成的。
+    expect(elapsed).toBeGreaterThanOrEqual(100);
+
+    // 故障注入真的生效了（否则这个测试会变成空过）。
+    expect(pendingFail.hits).toBeGreaterThanOrEqual(1);
+    expect(metricsFail.hits).toBeGreaterThanOrEqual(1);
+
+    const status = await phoneStatus(rig, DEVICE);
+    // 表项没有泄漏：内存表与落盘镜像都干净了。
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+    expect(status["connected"]).toBe(true);
+
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["timeouts"]).toBe(1);
+    // 手机一个 pong 都没回 —— 记账再糟也不能变出一次成功。
+    expect(metrics["pongsMatched"]).toBe(0);
+    expect(metrics["pingsSent"]).toBe(1);
+    // 三类记账失败被分开计数，而不是被静默吞掉。
+    expect(metrics["settleStorageFailures"]).toBeGreaterThanOrEqual(1);
+    expect(metrics["settleMetricFailures"]).toBeGreaterThanOrEqual(1);
+    expect(metrics["settleAlarmFailures"]).toBeGreaterThanOrEqual(1);
+
+    expect(framesOfType(socket, "phone_ping").length).toBe(1);
+  });
+
+  it("并发超时叠加记账失败：8 个请求各自拿到结果，一个都不会被结算两次", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "100", MAX_PENDING_REQUESTS: "16" } });
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const storage = storageOf(rig);
+
+    storage.failNext("put", { key: "pending", times: 100 });
+    storage.failNext("put", { key: "metrics", times: 100 });
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => pingPhoneDirect(rig, DEVICE, { requestId: `req-conc-${i}` })),
+    );
+
+    expect(outcomes.length).toBe(8);
+    for (const outcome of outcomes) {
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.error.code).toBe("phone_timeout");
+    }
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["pending_requests"]).toBe(0);
+    const metrics = status["metrics"] as Record<string, number>;
+    // 8 个请求 = 恰好 8 次超时。多一次就是重复结算，少一次就是漏结算。
+    expect(metrics["timeouts"]).toBe(8);
+    expect(metrics["pongsMatched"]).toBe(0);
+    expect(metrics["pingsSent"]).toBe(8);
+  });
+
+  it("已经结算过的请求：再跑两次 alarm 不会重复结算，也不会多记一次超时", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "80" } });
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const state = rig.phone.ctxOf(DEVICE);
+
+    const outcome = await pingPhoneDirect(rig, DEVICE, { requestId: "req-dup-settle-1" });
+    expect(outcome.ok).toBe(false);
+
+    const before = ((await phoneStatus(rig, DEVICE))["metrics"]) as Record<string, number>;
+    expect(before["timeouts"]).toBe(1);
+
+    // 手动把 alarm 跑两遍。镜像里已经没有这个请求了，所以两次都应该是空转。
+    await state.runAlarm();
+    await state.runAlarm();
+
+    const after = ((await phoneStatus(rig, DEVICE))["metrics"]) as Record<string, number>;
+    expect(after["timeouts"]).toBe(1);
+    expect(after["pongsMatched"]).toBe(0);
+    // alarm 空转不应该被算成"记账失败"。
+    expect(after["settleStorageFailures"]).toBe(0);
+    expect(after["settleAlarmFailures"]).toBe(0);
+  });
+
+  it("alarm 处理器自己的记账失败不会向外抛，指标照常记一笔", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "300" } });
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const state = rig.phone.ctxOf(DEVICE);
+    const storage = storageOf(rig);
+
+    // 起一个还没到期的请求（不 await，稍后再收）。
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-alarm-fi-1" });
+    await settle();
+
+    // 让 alarm 末尾那次 rescheduleAlarm 失败（它先 getAlarm，再决定是否 setAlarm）。
+    const alarmFail = storage.failNext("getAlarm", { times: 5 });
+
+    await expect(state.runAlarm()).resolves.toBeUndefined();
+    expect(alarmFail.hits).toBeGreaterThanOrEqual(1);
+
+    const outcome = await pending;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error.code).toBe("phone_timeout");
+
+    const metrics = ((await phoneStatus(rig, DEVICE))["metrics"]) as Record<string, number>;
+    expect(metrics["settleAlarmFailures"]).toBeGreaterThanOrEqual(1);
+    expect(metrics["timeouts"]).toBe(1);
+  });
+
+  it("手机离线是纯决策路径：存储全坏也不影响 phone_offline 的判定", async () => {
+    const rig = await makeRig();
+
+    // ⚠ 先让 DO 实例被构造出来。构造期要读 generation / metrics / pending，
+    //   在那之前注入 get 故障会让**状态装载**失败 —— 那是"对象装载不了"，
+    //   不是本条要测的"决策路径不依赖存储"，两者不能混在一个断言里。
+    await phoneStatus(rig, DEVICE);
+
+    const storage = storageOf(rig);
+
+    // 存储的每一个方法都失败。
+    storage.failNext("get", { times: 10 });
+    storage.failNext("put", { times: 10 });
+    storage.failNext("getAlarm", { times: 10 });
+    storage.failNext("setAlarm", { times: 10 });
+
+    const outcome = await pingPhoneDirect(rig, DEVICE, { requestId: "req-offline-fi-1" });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("phone_offline");
+  });
+
+  it("存储恢复正常后记账照旧：结算过的请求不会在镜像里留下残影", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "90" } });
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const storage = storageOf(rig);
+
+    // 第一次：只让那一次 pending 镜像写失败。
+    storage.failNext("put", { key: "pending", times: 1 });
+    const first = await pingPhoneDirect(rig, DEVICE, { requestId: "req-recover-1" });
+    expect(first.ok).toBe(false);
+
+    // 第二次：存储已恢复，正常路径必须仍然是"超时→结算→拿到结果"。
+    const second = await pingPhoneDirect(rig, DEVICE, { requestId: "req-recover-2" });
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.error.code).toBe("phone_timeout");
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["timeouts"]).toBe(2);
+    expect(metrics["pongsMatched"]).toBe(0);
+    // 落盘镜像里最终不该再有这两个请求。
+    const mirrored = await storage.get<Record<string, unknown>>("pending");
+    expect(Object.keys(mirrored ?? {})).toEqual([]);
   });
 });

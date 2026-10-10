@@ -53,7 +53,12 @@ Gate 0.1 交付的 APK **装上之后点图标立刻闪退**。根因是 `app/sr
 > ⚠️ 顺带记一条本轮踩到的坑：Android Lint 的 `MissingClass` 规则**本来就能抓到这个问题**
 > （severity 还是 Error），但 `app/build.gradle.kts` 里的 `abortOnError = false` 把它一起吞了。
 > 试过只把 `MissingClass` 设为 `fatal`：**无效**（`abortOnError = false` 优先级更高，实测仍然
-> `BUILD SUCCESSFUL`）。所以硬门禁放在第 ② 层上，而不是 lint 上。详见 `../TEST_REPORT.md` §6.6.4。
+> `BUILD SUCCESSFUL`）。详见 `../TEST_REPORT.md` §6.6.4。
+>
+> ✅ **Gate 0.3 已把这一条彻底修掉**：`abortOnError` 改回 `true`，并处理掉被它抓出来的
+> `MissingPermission`。"门禁真的会红"是实测的（见 §9 与 `../test-reports/lint-gate.log`）。
+> 第 ② 层硬门禁**保留不动** —— 两层守的是不同的东西：lint 守"Manifest 要的类在不在"，
+> 脚本守"真实 APK 的 dex 里到底有没有那个类"（lint 是静态分析，不看产物）。
 
 `local.properties` 里写的是 `sdk.dir=/opt/android-sdk`，该文件已被仓库根目录的 `.gitignore` 忽略，不要提交。
 
@@ -398,8 +403,14 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - `DeviceTokenStoreTest`（18 条，R4）：三态区分、落盘的是密文且明文片段不出现、畸形密文/解密失败/非 UTF-8/空白各自归到固定类别、加密或落盘失败返回 `Failed` 且**什么都不写**、编码器对任意输入只返回 `null` 不抛异常（含 500 次随机字符串 fuzz）。
 - `ManifestComponentTest`（**2 条，Gate 0.2**）：Manifest 里每个组件类都能在**本次编译产物**里找到；每个 `.kt` 的 `package` 声明与所在目录一致。这两条就是 Gate 0.1 闪退的防回归 —— 故意把错误包名打回去时它们会红（`../TEST_REPORT.md` §6.6.5 有实测输出）。
 - `PhoneLinkProtocolTest` 里的 `APP_VERSION 与 Gradle 的 versionName 必须一致`（**Gate 0.2 新增的 1 条**）：版本号也是"一个事实两处记录"（`gradle/libs.versions.toml` 的 `appVersionName` 与 `PhoneLinkProtocol.kt:10` 的 `APP_VERSION`），它们平时互不校验。
+- `SocketFailureTest`（**9 条，Gate 0.3**）：`SocketFailure` 的类别闭集恰好 10 个且值形状固定、常见异常类名映射到预期类别、9 种垃圾输入（含完整 URL、令牌形状的串）**一律落在闭集里且不原样返回**、每个类别都有非空且两两不同的中文描述、`normalize()` 只放行闭集、500 次随机 fuzz 不抛。
+- `LogRedactionTest`（**13 条，Gate 0.3**）：9 条**行为**测试（把带假令牌的地址真的喂进 `PhoneLink`，断言日志里只有主机名、令牌的**每 8 字符片段**都不出现、异常原文只变成固定类别、错误帧的 `message` 与未知帧的 `type` 都不记）+ 4 条**静态扫描**（源码里没有 `printStackTrace`/`stackTraceToString`；没有 `<异常变量>.message` 拼字符串；日志调用窗口里不出现 `${config.serverUrl}`/`${url}`/`${frame.*}`/`${raw}`；所有 `SocketFailure.classify(` 都只传 `javaClass.simpleName`）。
 
-合计 **135** 条（Gate 0 是 90、Gate 0.1 是 132）。
+合计 **157** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135）。
+
+> **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
+>
+> ⚠ 一个真实的坑：新写的 `SocketFailureTest` 里放了**字面量**的 `ghp_` + 32 个 `A` 作为垃圾输入，`worker/test/security.test.ts` 的「没有 GitHub 令牌形状的字符串」当场变红（第四次被自家扫描抓到）。处置是**改被扫的内容**（`"ghp_" + "A".repeat(32)`），不是给文件开白名单。`service/ConnectGateTest.kt:15` 早就留了注释讲这个坑。
 
 之所以能在 JVM 上跑 org.json 与 WebSocket：`org.json` 在 Android 运行时是自带的，但在 JVM 单测里是抛异常的 stub，
 所以 `testImplementation` 里额外引了 `org.json:json:20240303`（真实现）与 `okhttp3:mockwebserver:4.12.0`。
@@ -445,6 +456,8 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 ## 9. 已知限制
 
 - 没有 `androidTest`/仪器测试（环境里没有模拟器）。第 8 节是真机验证的替代方案。
-- `:app:lintDebug` **可以跑通**（本环境实测 `BUILD SUCCESSFUL`），但因为 `app/build.gradle.kts` 里 `abortOnError = false`，它**不会**让构建失败。当前树上唯一的 Error 是 `service/PhoneLinkService.kt:321` 的 `MissingPermission`（未处理，记录在 `../TEST_REPORT.md` 的 K10 与 §8.1 第 13 条）。Manifest 类名这一类问题已由 §1.0 的第 ② 层硬门禁接管。
+- **Lint 现在是硬门禁（Gate 0.3 改的）**：`app/build.gradle.kts` 里 `lint { abortOnError = true }`，`:app:lintDebug` 出现任何 Error 都会让构建失败；`./gradlew check` 的依赖图里包含 `:app:lintDebug`，所以 `check` 也会被拦下。被它抓出来的 `service/PhoneLinkService.kt` 的 `MissingPermission` 已经修好（同一方法内**内联** `ContextCompat.checkSelfPermission(...)` + 显式 `catch (e: SecurityException)`）——注意**不能在调用点所在方法之外抽一个 `canPostNotifications()` 之类的布尔守卫**，实测 lint 的流分析不跟踪间接守卫，照样报红。
+  证据（含"故意注入故障 → `BUILD FAILED in 1m 12s` → 恢复 → `BUILD SUCCESSFUL`"两段原始输出）在 `../test-reports/lint-gate.log`。
+  当前树上还剩 **29 条 warning**（本轮没有逐条处理）。**残余风险**：本仓库没有任何会自动跑的 CI，那个手动 Actions 工作流也只构建 APK、不跑 lint —— 所以将来有人把 `abortOnError` 改回 `false`，**不会有东西自动变红**（`../TEST_REPORT.md` 的 K12）。Manifest 类名这一类问题仍由 §1.0 的第 ② 层硬门禁独立把守。
 - 界面只做了单屏，没有历史图表、没有多设备管理（按任务要求，不做工具管理与跨设备控制）。
 - 服务被系统杀掉的极端情况下，只有用户重新点「连接」才会恢复 —— 这是刻意的取舍，不做任何后台自启。

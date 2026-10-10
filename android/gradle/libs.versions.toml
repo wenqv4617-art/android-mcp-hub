@@ -37,8 +37,8 @@ json = "20240303"
 mockwebserver = "4.12.0"
 
 # ---- 本项目自身 -----------------------------------------------------------
-appVersionName = "0.1.2-gate0.2"
-appVersionCode = "3"
+appVersionName = "0.1.3-gate0.3"
+appVersionCode = "4"
 
 [libraries]
 # ---- AndroidX 基础 --------------------------------------------------------

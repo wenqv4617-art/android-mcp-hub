@@ -1,0 +1,113 @@
+===================================================================
+Gate 0.3 审计发现项 2 —— Lint 门禁实测
+仓库：android-mcp-hub  分支：gate0
+时间：2026-10-10T04:55:21Z
+Java：openjdk version "17.0.20.1" 2026-08-18
+Gradle：Gradle 8.11.1
+ANDROID_HOME=/opt/android-sdk
+
+改动点：app/build.gradle.kts 的 lint { abortOnError = true }（Gate 0.2 时是 false）
+===================================================================
+
+### 前置检查：:app:check 是否包含 lint
+  :app:lintAnalyzeDebug SKIPPED
+  :app:lintAnalyzeDebugAndroidTest SKIPPED
+  :app:lintAnalyzeDebugUnitTest SKIPPED
+  :app:lintReportDebug SKIPPED
+  :app:lintDebug SKIPPED
+  :app:lint SKIPPED
+
+===================================================================
+### 第一段：故意把权限检查去掉，验证门禁真的会红
+（把 updateNotification() 改成直接调用 notify()，不带 checkSelfPermission、不 catch SecurityException）
+===================================================================
+  fault injection applied
+  
+  Fix the issues identified by lint, or create a baseline to see only new errors.
+  To create a baseline, run `gradlew updateLintBaseline` after adding the following to the module's build.gradle file:
+  ```
+  android {
+      lint {
+          baseline = file("lint-baseline.xml")
+      }
+  }
+  ```
+  For more details, see https://developer.android.com/studio/write/lint#snapshot
+  
+  Lint found 1 errors, 29 warnings. First failure:
+  
+  /root/android-mcp-hub/android/app/src/main/java/com/androidmcphub/app/service/PhoneLinkService.kt:343: Error: Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with checkPermission) or explicitly handle a potential SecurityException [MissingPermission]
+          NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification(state))
+          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  
+     Explanation for issues of type "MissingPermission":
+     This check scans through your code and libraries and looks at the APIs
+     being used, and checks this against the set of permissions required to
+     access those APIs. If the code using those APIs is called at runtime, then
+     the program will crash.
+  
+     Furthermore, for permissions that are revocable (with targetSdkVersion 23),
+     client code must also be prepared to handle the calls throwing an exception
+     if the user rejects the request for permission at runtime.
+  
+  
+  The full lint text report is located at:
+    /root/android-mcp-hub/android/app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 29s
+28 actionable tasks: 6 executed, 5 from cache, 17 up-to-date
+
+FAULT_INJECTION_EXIT=1   （非 0 = 门禁确实拦住了）
+
+--- lint 文本报告里的 Error 行（去掉上面 tail 的截断，直接把原始错误行抄在这里）---
+  1:/root/android-mcp-hub/android/app/src/main/java/com/androidmcphub/app/service/PhoneLinkService.kt:343: Error: Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with checkPermission) or explicitly handle a potential SecurityException [MissingPermission]
+  177:1 errors, 29 warnings
+
+### 恢复源代码
+  已恢复（与备份逐字节一致）
+
+===================================================================
+### 第二段：恢复修复后的代码，验证门禁放行
+===================================================================
+> Task :app:generateDebugLintReportModel
+> Task :app:generateDebugAndroidTestLintModel
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:generateDebugUnitTestLintModel
+> Task :app:lintAnalyzeDebug FROM-CACHE
+> Task :app:lintAnalyzeDebugAndroidTest FROM-CACHE
+> Task :app:lintAnalyzeDebugUnitTest FROM-CACHE
+
+> Task :app:lintReportDebug
+Wrote HTML report to file:///root/android-mcp-hub/android/app/build/reports/lint-results-debug.html
+
+> Task :app:lintDebug
+
+BUILD SUCCESSFUL in 26s
+28 actionable tasks: 6 executed, 5 from cache, 17 up-to-date
+
+FIXED_EXIT=0   （0 = 0 errors 放行）
+
+### 事后确认源码确实被恢复
+  源码与备份逐字节一致 ✓
+
+### 确认没有任何 lint 抑制手段
+  disable/baseline/@SuppressLint 命中数：1
+  59:    //  但当时这里写的是 abortOnError = false，这条 Error 被一起吞了，构建照样 SUCCESSFUL。
+  61:    //  abortOnError = false 的优先级更高，把错误包名打回去之后 :app:lintDebug 依然成功。
+  71:    //  lint { disable += … } / baseline / @SuppressLint。
+  76:    lint {
+  77:        abortOnError = true
+
+### 结尾：源码树状态
+   M android/app/src/main/java/com/androidmcphub/app/net/PhoneLinkClient.kt
+   M android/app/src/main/java/com/androidmcphub/app/protocol/PhoneLink.kt
+   M android/app/src/main/java/com/androidmcphub/app/protocol/PhoneLinkProtocol.kt
+   M android/app/src/main/java/com/androidmcphub/app/service/PhoneLinkService.kt
+  ?? android/app/src/main/java/com/androidmcphub/app/core/SocketFailure.kt
+  （上面若为空，说明第一段的故障注入已经完全还原）

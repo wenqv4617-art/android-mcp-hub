@@ -2,7 +2,7 @@
 
 让 **ChatGPT 官方客户端**通过 MCP 直接指挥一台 **Android 手机**。
 
-> **状态：Gate 0.2（修掉 Gate 0.1 交付件里的启动闪退；仍然只验证链路，不接任何本地 MCP 应用）**
+> **状态：Gate 0.3（按独立审计的三项发现做最小修复；仍然只验证链路，不接任何本地 MCP 应用）**
 > 本仓库目前**没有**部署到任何 Cloudflare 账户，也**没有**创建任何云端资源。
 > Gate 0 的目标只有一个：证明 `ChatGPT → Cloudflare Worker → Durable Object → 手机上的 App` 这条链路的每一环都真的能通、而且不会说谎。
 >
@@ -11,6 +11,11 @@
 > **Gate 0.2** 修掉的是 Gate 0.1 交付件里一个**真实存在、用户已经踩到**的问题：APK 装上后**点图标立刻闪退**。
 > 根因是 `HubApplication.kt` 的 `package` 声明与 `AndroidManifest.xml` 里的 `android:name` 对不上 —— 编译期全绿、当时 132 个单测也全绿，却导致系统建进程时 `ClassNotFoundException`。
 > 除了修这一行，还补了**两层**自动化检查防它再来：一层进 JVM 单测，一层解析**真实 APK** 里的二进制 Manifest 与 dex 的 class_defs 表（`:app:verifyManifestClasses`）。详见 [TEST_REPORT.md](TEST_REPORT.md) §6.6。
+>
+> **Gate 0.3** 按独立审计的三项发现做**最小修复**，不回退 Gate 0.2 的启动修复与 Manifest 类名校验：
+> ①**Android 日志脱敏** —— 手机端日志不再出现完整 URL / 令牌 / 敏感查询参数 / 未处理的异常消息，只留主机名（`hostOf()`）与 `SocketFailure` 闭集里的**固定错误类别**（`SocketFailure.kt`）；服务端错误帧的 `message` 与未知帧的 `type` 原文一概不记（只记 `ServerErrorCode.normalize()` 的结果与 `typeLen`）。
+> ②**Lint 门禁** —— `android/app/build.gradle.kts` 的 `abortOnError` 从 `false` 改回 `true`，并修掉被它抓出来的 `MissingPermission`；**没有**加任何 `disable` / baseline / `@SuppressLint`。证据（含"故意注入故障 → 门禁变红 → 恢复 → 放行"的原始输出）在 [test-reports/lint-gate.log](test-reports/lint-gate.log)。
+> ③**DO 结算路径加固** —— `PhoneSession` 的 `settlePending()` 原来在三行裸 `await`（落盘 / 指标 / alarm）之后才 resolve，任一抛错就是**请求永久挂起**；现在记账失败被 `bestEffort()` 兜住并计数（`settleStorageFailures` / `settleMetricFailures` / `settleAlarmFailures`），`handlePingRequest` 也把定时器提到落盘之前。故障注入测试在 `worker/test/phone-session.test.ts` 的 `describe("12. 结算路径的故障注入")` 6 条。
 >
 > **没做的**：workerd 上的验证、真机验证（**包括"这个新 APK 装上之后到底还会不会闪退"**）、ChatGPT 的真实 OAuth 接入 —— 这些在 [TEST_REPORT.md](TEST_REPORT.md) 里明确标着 **NOT RUN**。
 
@@ -144,8 +149,8 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses #
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 产出 Debug APK
 ```
 
-产物：`android/app/build/outputs/apk/debug/app-debug.apk`（`versionName 0.1.2-gate0.2`，`applicationId com.androidmcphub.app`，`minSdk 26 / targetSdk 35`）。
-现成的交付件在 `dist/Android-MCP-Hub-Gate0.2-debug.apk`（SHA-256 见 [TEST_REPORT.md](TEST_REPORT.md) §11）。
+产物：`android/app/build/outputs/apk/debug/app-debug.apk`（`versionName 0.1.3-gate0.3`，`applicationId com.androidmcphub.app`，`minSdk 26 / targetSdk 35`）。
+现成的交付件在 `dist/Android-MCP-Hub-Gate0.3-debug.apk`（SHA-256 见 [TEST_REPORT.md](TEST_REPORT.md) §11）。
 手机端配置（网关地址、设备 ID、令牌）在 App 界面上填，**不写在源码里**；设备令牌用 Android Keystore 里的密钥加密后存本机私有存储（**不留明文**）。
 
 > 想拿到一个现成的 APK，也可以用手动触发的 GitHub Actions 工作流：`.github/workflows/android-debug-apk.yml`（**只用 `workflow_dispatch`**，不部署、不读任何密钥）。⚠ 它在本仓库里**从未被执行过**。

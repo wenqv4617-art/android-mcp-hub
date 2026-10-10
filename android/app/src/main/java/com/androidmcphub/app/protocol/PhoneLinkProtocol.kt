@@ -7,7 +7,7 @@ import org.json.JSONObject
 const val PROTOCOL_VERSION = "phone-link-v1"
 
 /** 应用版本，进入 hello 帧；与 build.gradle.kts 的 versionName 保持一致。 */
-const val APP_VERSION = "0.1.2-gate0.2"
+const val APP_VERSION = "0.1.3-gate0.3"
 
 /** 握手时上报的客户端标识：`android-mcp-hub/<version>`。 */
 const val CLIENT_VERSION = "android-mcp-hub/$APP_VERSION"
@@ -56,6 +56,28 @@ sealed interface IncomingFrame {
         val type: String,
         val reason: String,
     ) : IncomingFrame
+}
+
+/**
+ * [IncomingFrame.ServerError.code] 的**已知**取值。
+ *
+ * 为什么要有这个闭集（Gate 0.3 审计发现项 1）：`code` 与 `message` 都是**对端**给的
+ * 自由文本，一台被改造过的手机可以把令牌塞在里面喂给我们的日志。所以日志里只允许出现
+ * 这个闭集里的值（认识的）或 [UNRECOGNIZED]（不认识的），`message` 一律不记。
+ */
+object ServerErrorCode {
+    const val MESSAGE_TOO_LARGE = "message_too_large"
+    const val MALFORMED_MESSAGE = "malformed_message"
+    const val UNSUPPORTED_TYPE = "unsupported_type"
+    const val UNKNOWN_REQUEST_ID = "unknown_request_id"
+
+    /** 认不出来的 code —— 只记这个，不记原文。 */
+    const val UNRECOGNIZED = "unrecognized_error_code"
+
+    val ALL: Set<String> = setOf(MESSAGE_TOO_LARGE, MALFORMED_MESSAGE, UNSUPPORTED_TYPE, UNKNOWN_REQUEST_ID)
+
+    /** 认识的 code 原样返回，其余一律收敛成 [UNRECOGNIZED]。 */
+    fun normalize(code: String): String = if (code in ALL) code else UNRECOGNIZED
 }
 
 /** [IncomingFrame.Unknown.reason] 的取值。 */

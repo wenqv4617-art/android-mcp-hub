@@ -84,6 +84,20 @@ export interface PhoneSessionMetrics {
   reconstructedPendingFailed: number;
   /** Gate 0.1 / R1：新连接替换旧连接时，被**主动**终结的旧代次待处理请求数。 */
   pendingReplacedOnConnect: number;
+  /**
+   * Gate 0.3：结算路径上"尽力而为"的记账动作失败了几次。
+   *
+   * 三个分开计数，是因为它们的后果不同：
+   *  - 存储失败 → 对象被驱逐后超时账会丢；
+   *  - 指标落盘失败 → 指标只在内存里；
+   *  - alarm 调度失败 → 只能靠对象还活着时的那只内存定时器兜底。
+   * 任何一种都不影响"调用方一定拿到结果"这个保证。
+   */
+  settleStorageFailures: number;
+  settleMetricFailures: number;
+  settleAlarmFailures: number;
+  /** Gate 0.3：请求在"落盘/排 alarm"期间就被结算（几乎只可能是超时），因而没发帧。 */
+  pingsSettledBeforeSend: number;
   lastRttMs: number | null;
   lastPingAt: number | null;
   lastPongAt: number | null;
@@ -106,6 +120,10 @@ function emptyMetrics(): PhoneSessionMetrics {
     messagesRejected: 0,
     reconstructedPendingFailed: 0,
     pendingReplacedOnConnect: 0,
+    settleStorageFailures: 0,
+    settleMetricFailures: 0,
+    settleAlarmFailures: 0,
+    pingsSettledBeforeSend: 0,
     lastRttMs: null,
     lastPingAt: null,
     lastPongAt: null,
@@ -414,11 +432,10 @@ export class PhoneSession implements DurableObject {
     // ⚠ 顺序很重要：先把请求登记进表，再发帧。反过来会出现"pong 比登记还快"的窗口。
     this.pending.set(requestId, entry);
 
-    // 落盘镜像 + alarm 兜底。即使对象随后被驱逐，超时账也不会丢。
-    this.storedPending[requestId] = record;
-    await this.ctx.storage.put(STORAGE_KEY_PENDING, this.storedPending);
-    await this.rescheduleAlarm();
-
+    // ── Gate 0.3 审计发现项 3：**先武装定时器，再做记账** ──────────────────
+    // 原来的顺序是"落盘 → 排 alarm → 定时器"。落盘或 alarm 一抛错，这个已经登记
+    // 进 `this.pending` 的请求就既没有定时器、也没有 alarm —— 表项泄漏，而且只能
+    // 等下一次断线才可能被清掉。定时器是最后一道兜底，必须**最先**就位。
     entry.timer = setTimeout(() => {
       void this.settlePending(requestId, (r) => ({
         ok: false,
@@ -427,6 +444,22 @@ export class PhoneSession implements DurableObject {
         error: { code: "phone_timeout", message: `等待 phone_pong 超过 ${r.timeoutMs} ms` },
       }), "timeout");
     }, timeoutMs);
+
+    // 落盘镜像 + alarm 兜底。即使对象随后被驱逐，超时账也不会丢。
+    // 这两步失败只降级为"驱逐后这笔超时账会丢"，不会让请求挂住。
+    this.storedPending[requestId] = record;
+    await this.bestEffort("persist_pending", () =>
+      this.ctx.storage.put(STORAGE_KEY_PENDING, this.storedPending),
+    );
+    await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
+
+    if (!this.pending.has(requestId)) {
+      // 记账期间就已经被结算了（timeoutMs 很短 + 存储很慢时会真的发生）。
+      // 既然已经结算，**绝对不能**再发这一帧 —— 那会让手机回一个没人认领的 pong。
+      this.metrics.pingsSettledBeforeSend += 1;
+      await this.bestEffort("flush_metrics", () => this.flushMetrics());
+      return json(await promise);
+    }
 
     try {
       socket.send(encodeServerFrame({ type: "phone_ping", request_id: requestId, timestamp: sentAt }));
@@ -449,7 +482,7 @@ export class PhoneSession implements DurableObject {
 
     this.metrics.pingsSent += 1;
     this.metrics.lastPingAt = sentAt;
-    await this.flushMetrics();
+    await this.bestEffort("flush_metrics", () => this.flushMetrics());
 
     const outcome = await promise;
     return json(outcome);
@@ -609,7 +642,8 @@ export class PhoneSession implements DurableObject {
         error: { code: "phone_timeout", message: `等待 phone_pong 超过 ${r.timeoutMs} ms（alarm）` },
       }), "timeout_alarm");
     }
-    await this.rescheduleAlarm();
+    // 记账失败不能让 alarm 处理器抛出去：一抛，下一次 alarm 的调度就更没指望了。
+    await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
   }
 
   // ---------------------------------------------------------------------------
@@ -623,7 +657,7 @@ export class PhoneSession implements DurableObject {
       // 可能是：迟到的响应、伪造的响应、或者已经被超时清理掉的响应。
       // 三种都必须拒绝 —— 而且**绝不能**因为"看起来像"就去完成别的请求。
       this.metrics.pongsUnknown += 1;
-      await this.flushMetrics();
+      await this.bestEffort("flush_metrics", () => this.flushMetrics());
       logEvent("warn", "phone_session.pong_unknown_request", { requestId, generation: this.generation });
       this.safeSend(ws, {
         type: "error",
@@ -696,10 +730,23 @@ export class PhoneSession implements DurableObject {
     if (cause === "timeout" || cause === "timeout_alarm") this.metrics.timeouts += 1;
 
     delete this.storedPending[requestId];
-    await this.ctx.storage.put(STORAGE_KEY_PENDING, this.storedPending);
-    await this.flushMetrics();
-    await this.rescheduleAlarm();
 
+    // ── Gate 0.3 审计发现项 3 ────────────────────────────────────────────
+    // 这三步都是**记账**，不是结算本身。之前它们是裸 await：只要
+    // `ctx.storage.put` 抛一次（存储不可用 / DO 正在被驱逐），这一行之后的
+    // `entry.settle(...)` 就永远不会执行 —— 而 `this.pending` 里**已经删掉了**
+    // 这个请求，于是没有任何人还能再结算它。调用方（Worker → MCP 客户端）就
+    // 永久挂在那里。这是"请求永久挂起"的确切成因。
+    //
+    // 改成尽力而为：失败记一笔并继续，`entry.settle()` 必定被执行。
+    await this.bestEffort("persist_pending", () =>
+      this.ctx.storage.put(STORAGE_KEY_PENDING, this.storedPending),
+    );
+    await this.bestEffort("flush_metrics", () => this.flushMetrics());
+    await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
+
+    // ⚠ 顺序**仍然**是"先记账、后 resolve"：调用方被唤醒时，指标与镜像都已经
+    //   尝试更新过了。区别只在于这些更新现在不会因为失败而把人永远挂着。
     entry.settle(build({ ...entry }));
   }
 
@@ -708,7 +755,7 @@ export class PhoneSession implements DurableObject {
     const socketGeneration = att?.generation ?? -1;
 
     this.metrics.disconnects += 1;
-    await this.flushMetrics();
+    await this.bestEffort("flush_metrics", () => this.flushMetrics());
 
     logEvent("info", "phone_session.socket_gone", {
       cause,
@@ -755,6 +802,35 @@ export class PhoneSession implements DurableObject {
       if (att !== null && att.generation === this.generation) return ws;
     }
     return null;
+  }
+
+  /**
+   * 把一个**记账**动作降级为"尽力而为"：失败就记一笔并返回 false，绝不向外抛。
+   *
+   * 只用于"失败了也要继续把结果交给调用方"的动作，绝不用于鉴权、代次推进、
+   * 请求登记这些**决定性**动作 —— 那些失败必须让整个操作失败。
+   *
+   * 注意日志只用固定类别与固定 `reason`，不记异常原文（审计 R2）。
+   */
+  private async bestEffort(
+    step: "persist_pending" | "flush_metrics" | "reschedule_alarm",
+    action: () => Promise<void>,
+  ): Promise<boolean> {
+    try {
+      await action();
+      return true;
+    } catch {
+      if (step === "persist_pending") this.metrics.settleStorageFailures += 1;
+      else if (step === "flush_metrics") this.metrics.settleMetricFailures += 1;
+      else this.metrics.settleAlarmFailures += 1;
+
+      logEvent("error", "phone_session.bookkeeping_failed", {
+        errorCode: step === "reschedule_alarm" ? "alarm_schedule_failed" : "storage_failure",
+        reason: step,
+        generation: this.generation,
+      });
+      return false;
+    }
   }
 
   private async flushMetrics(): Promise<void> {

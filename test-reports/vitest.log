@@ -1,20 +1,24 @@
-$ npx vitest run --config worker/vitest.config.ts
+==============================================================
+ vitest：npx vitest run --config worker/vitest.config.ts
+ 时间：2026-10-10T05:07:38+00:00
+==============================================================
 
  RUN  v4.1.11 /root/android-mcp-hub
 
- ✓ worker/test/logging.test.ts (12 tests) 53ms
- ✓ worker/test/mcp-session.test.ts (11 tests) 38ms
+ ✓ worker/test/mcp-session.test.ts (11 tests) 42ms
+ ✓ worker/test/logging.test.ts (12 tests) 76ms
  ✓ worker/test/worker-index.test.ts (18 tests) 44ms
- ✓ worker/test/mcp-http.test.ts (31 tests) 132ms
- ✓ worker/test/tools.test.ts (19 tests) 156ms
- ✓ worker/test/security.test.ts (15 tests) 681ms
- ✓ worker/test/phone-session.test.ts (34 tests) 2881ms
+ ✓ worker/test/mcp-http.test.ts (31 tests) 102ms
+ ✓ worker/test/tools.test.ts (19 tests) 172ms
+ ✓ worker/test/security.test.ts (15 tests) 661ms
+ ✓ worker/test/phone-session.test.ts (40 tests) 3688ms
      ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  413ms
-     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  312ms
+     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  313ms
+     ✓ alarm 处理器自己的记账失败不会向外抛，指标照常记一笔  312ms
 
  Test Files  7 passed (7)
-      Tests  140 passed (140)
-   Start at  04:18:17
-   Duration  4.48s (transform 2.34s, setup 1.34s, import 2.85s, tests 3.99s, environment 1ms)
+      Tests  146 passed (146)
+   Start at  05:07:41
+   Duration  5.08s (transform 2.17s, setup 1.13s, import 2.76s, tests 4.78s, environment 1ms)
 
 EXIT=0

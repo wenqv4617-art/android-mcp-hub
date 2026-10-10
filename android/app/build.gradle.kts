@@ -45,26 +45,36 @@ android {
         buildConfig = true
     }
 
-    // 骨架阶段不让 lint 阻断构建。
+    // ── Lint 门禁（Gate 0.2 发现，Gate 0.3 收口）────────────────────────────
     //
-    // ⚠️ Gate 0.2 的审计发现，这里必须写清楚，免得下次又踩：
-    // lint **本来就能**抓到 Gate 0.1 的启动闪退 —— 它的 MissingClass 规则会报
+    // 事实经过：
     //
-    //   AndroidManifest.xml:21: Error: Class referenced in the manifest,
-    //   com.androidmcphub.app.HubApplication, was not found in the project
-    //   or the libraries [MissingClass]
+    //  Gate 0.1 交付的 APK 装上后启动即闪退，根因是 Manifest 里的类名与真实类名不一致。
+    //  lint 的 MissingClass 规则**本来就能抓到它**，报的是：
     //
-    // 但 abortOnError = false 把当时唯一的 Error 一起吞了，构建照样 SUCCESSFUL。
-    // 试过只把 MissingClass 提升为 fatal（fatal += "MissingClass"）：**无效** ——
-    // abortOnError = false 的优先级更高，实测把错误包名打回去之后
-    // :app:lintDebug 依然 BUILD SUCCESSFUL。
+    //    AndroidManifest.xml:21: Error: Class referenced in the manifest,
+    //    com.androidmcphub.app.HubApplication, was not found in the project
+    //    or the libraries [MissingClass]
     //
-    // 所以硬门禁没有放在 lint 里，而是放在文件末尾的 `verifyManifestClasses` 任务上：
-    // 它解析真实 APK 的二进制 Manifest + dex 的 class_defs 表，不依赖 lint 的严重级别配置。
-    // 没改成 abortOnError = true 是因为那会连带要求处理 PhoneLinkService.kt:321 的
-    // MissingPermission（当前树上唯一的 Error）—— 那是另一件事，不属于本次最小修复。
+    //  但当时这里写的是 abortOnError = false，这条 Error 被一起吞了，构建照样 SUCCESSFUL。
+    //  中途试过只把 MissingClass 提升为 fatal（fatal += "MissingClass"）：**无效** ——
+    //  abortOnError = false 的优先级更高，把错误包名打回去之后 :app:lintDebug 依然成功。
+    //
+    // Gate 0.3 的决定：**不再让 lint 沉默**。
+    //
+    //  之前不改 true 的唯一原因是那会连带要求处理 PhoneLinkService.kt 的 MissingPermission
+    //  （当时树上唯一的 Error）。那个权限守卫已经补上（见 updateNotification /
+    //  canPostNotifications），所以这里改回 true，任何新的 lint Error 都会让 :app:lintDebug
+    //  失败，从而让 :app:check 失败。
+    //
+    //  这是"用门禁兜住"而不是"用 ignore 规则绕开"：没有加任何
+    //  lint { disable += … } / baseline / @SuppressLint。
+    //
+    //  另外，Manifest 类名这一类问题仍然由文件末尾的 verifyManifestClasses 任务独立把守 ——
+    //  它解析真实 APK 的二进制 Manifest + dex 的 class_defs 表，不依赖 lint 的严重级别配置。
+    //  两条防线互相独立：lint 管"宽"，verify 管"准"。
     lint {
-        abortOnError = false
+        abortOnError = true
     }
 
     testOptions {

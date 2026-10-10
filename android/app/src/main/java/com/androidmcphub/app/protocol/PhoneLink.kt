@@ -2,7 +2,9 @@ package com.androidmcphub.app.protocol
 
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
+import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.backoffDelayMs
+import com.androidmcphub.app.core.hostOf
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -131,7 +133,9 @@ class PhoneLink(
         lastServerFrameAtMs = 0L
         lastHeartbeatSentAtMs = 0L
         attemptStartedAtMs = clock()
-        log(LogLevel.INFO, "开始连接：${config.serverUrl}")
+        // Gate 0.3 审计发现项 1：**不记完整 URL**。用户填的地址可能带查询参数
+        // （`wss://host/phone/ws?token=…`），那是令牌最容易泄漏的位置。只记主机名。
+        log(LogLevel.INFO, "开始连接 host=${hostOf(config.serverUrl)}")
         setState(LinkState.Connecting)
         listOf(LinkAction.Open)
     }
@@ -161,10 +165,11 @@ class PhoneLink(
     }
 
     /**
-     * 连接失败。[httpStatus] 非空表示是从 WebSocket 升级响应里拿到的状态码，
+     * 连接失败。[category] **必须**是 `SocketFailure` 闭集里的固定类别，不是异常原文；
+     * [httpStatus] 非空表示是从 WebSocket 升级响应里拿到的状态码，
      * 401 / 403 视为认证失败：凭据错了重试没有意义，交给用户改令牌后手动重连。
      */
-    fun onSocketFailure(detail: String, httpStatus: Int?): List<LinkAction> =
+    fun onSocketFailure(category: String, httpStatus: Int?): List<LinkAction> =
         synchronized(lock) {
             if (!attemptInFlight && !socketOpen) {
                 // 已经处理过的终态回调，忽略
@@ -174,15 +179,20 @@ class PhoneLink(
             socketOpen = false
             if (userStopped) return@synchronized emptyList()
 
+            // Gate 0.3 审计发现项 1：[category] 是**闭集**里的固定值（见 SocketFailure），
+            // 不是异常原文。这里先收敛一次，保证任何调用方都塞不进自由文本。
+            val safeCategory = SocketFailure.normalize(category)
+            val text = SocketFailure.describe(safeCategory)
+
             if (httpStatus == 401 || httpStatus == 403) {
                 log(
                     LogLevel.ERROR,
-                    "认证失败（HTTP $httpStatus）：$detail；不自动重连，请检查设备令牌与设备 ID",
+                    "认证失败（HTTP $httpStatus）category=$safeCategory；不自动重连，请检查设备令牌与设备 ID",
                 )
                 setState(LinkState.AuthFailed("HTTP $httpStatus"))
                 return@synchronized emptyList()
             }
-            scheduleReconnect("连接失败：$detail")
+            scheduleReconnect("连接失败（category=$safeCategory：$text）")
         }
 
     /**
@@ -271,7 +281,7 @@ class PhoneLink(
             }
 
             is IncomingFrame.ServerError -> {
-                log(LogLevel.ERROR, "服务端错误帧 code=${frame.code} message=${frame.message}")
+                log(LogLevel.ERROR, "服务端错误帧 code=${ServerErrorCode.normalize(frame.code)}")
                 emptyList()
             }
 
@@ -279,7 +289,7 @@ class PhoneLink(
             is IncomingFrame.Unknown -> {
                 log(
                     LogLevel.WARN,
-                    "忽略无法处理的帧：type='${frame.type}' reason=${frame.reason}",
+                    "忽略无法处理的帧：typeLen=${frame.type.length} reason=${frame.reason}",
                 )
                 emptyList()
             }

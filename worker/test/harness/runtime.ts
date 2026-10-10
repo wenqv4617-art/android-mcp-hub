@@ -162,6 +162,29 @@ export function createWebSocketPair(): { 0: FakeWebSocket; 1: FakeWebSocket } {
 //  DurableObjectStorage
 // ---------------------------------------------------------------------------
 
+/**
+ * 一次故障注入（Gate 0.3）。
+ *
+ * 目的是把"存储坏了会怎么样"变成可断言的事实，而不是靠读代码猜。
+ * 参考真实行为：`ctx.storage.put` 在对象被驱逐、存储后端不可用时**会抛**，
+ * 而 DO 里一个没接住的异常会连带把整个调用栈丢掉。
+ */
+export interface InjectedFailure {
+  /** 在哪个存储方法上失败。 */
+  op: "get" | "put" | "setAlarm" | "getAlarm" | "deleteAlarm";
+  /**
+   * 只在这个存储键上失败。`undefined` = 所有键都失败。
+   * `getAlarm` / `setAlarm` / `deleteAlarm` 没有键参数，只能不填。
+   */
+  key?: string;
+  /** 还要失败几次。默认 1。 */
+  times?: number;
+  /** 触发时抛什么。默认一个普通 Error（不携带任何凭据）。 */
+  error?: Error;
+  /** 已经命中几次 —— 测试可以断言"确实触发过"，避免门禁因为没生效而空过。 */
+  hits: number;
+}
+
 export class FakeDurableObjectStorage {
   private readonly map = new Map<string, unknown>();
   private alarmAt: number | null = null;
@@ -169,17 +192,60 @@ export class FakeDurableObjectStorage {
   /** 记录每一次写，测试可以断言"某次失败没有落盘"。 */
   readonly writes: string[] = [];
 
+  /** 已登记的故障注入。 */
+  readonly injected: InjectedFailure[] = [];
+
+  /**
+   * 登记一次故障注入。
+   *
+   * 语义是"接下来 [times] 次匹配 (op, key) 的调用抛错"，命中即递减。
+   * 刻意不做成"永久失败"：大多数测试只想让**结算的那一次**写失败，
+   * 永久失败会让后续的断言（比如"之后还能正常工作"）没法写。
+   */
+  failNext(op: InjectedFailure["op"], opts: { key?: string; times?: number; error?: Error } = {}): InjectedFailure {
+    const failure: InjectedFailure = {
+      op,
+      ...(opts.key !== undefined ? { key: opts.key } : {}),
+      times: opts.times ?? 1,
+      ...(opts.error !== undefined ? { error: opts.error } : {}),
+      hits: 0,
+    };
+    this.injected.push(failure);
+    return failure;
+  }
+
+  /** 清空所有还没用完的故障注入。 */
+  clearInjectedFailures(): void {
+    this.injected.length = 0;
+  }
+
+  /** 命中检查：匹配就抛。 */
+  private maybeFail(op: InjectedFailure["op"], key: string | undefined): void {
+    for (const failure of this.injected) {
+      if (failure.op !== op) continue;
+      if (failure.key !== undefined && failure.key !== key) continue;
+      const remaining = failure.times ?? 1;
+      if (remaining <= 0) continue;
+      failure.times = remaining - 1;
+      failure.hits += 1;
+      throw failure.error ?? new Error(`injected ${op} failure`);
+    }
+  }
+
   async get<T>(key: string): Promise<T | undefined> {
+    this.maybeFail("get", key);
     const value = this.map.get(key);
     return value === undefined ? undefined : (structuredClone(value) as T);
   }
 
   async put<T>(keyOrEntries: string | Record<string, unknown>, value?: T): Promise<void> {
     if (typeof keyOrEntries === "string") {
+      this.maybeFail("put", keyOrEntries);
       this.map.set(keyOrEntries, structuredClone(value));
       this.writes.push(keyOrEntries);
       return;
     }
+    for (const k of Object.keys(keyOrEntries)) this.maybeFail("put", k);
     for (const [k, v] of Object.entries(keyOrEntries)) {
       this.map.set(k, structuredClone(v));
       this.writes.push(k);
@@ -204,14 +270,17 @@ export class FakeDurableObjectStorage {
   }
 
   async getAlarm(): Promise<number | null> {
+    this.maybeFail("getAlarm", undefined);
     return this.alarmAt;
   }
 
   async setAlarm(scheduledTime: number | Date): Promise<void> {
+    this.maybeFail("setAlarm", undefined);
     this.alarmAt = scheduledTime instanceof Date ? scheduledTime.getTime() : scheduledTime;
   }
 
   async deleteAlarm(): Promise<void> {
+    this.maybeFail("deleteAlarm", undefined);
     this.alarmAt = null;
   }
 
