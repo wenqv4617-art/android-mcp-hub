@@ -15,7 +15,9 @@
     "mock:phone": "tsx tools/mock-phone/main.ts",
     "e2e": "GATE0_VERBOSE=1 tsx e2e/run-local-e2e.ts",
     "gate0": "npm run typecheck && npm run test && npm run e2e",
-    "check:credential": "tsx tools/check-device-credential.ts"
+    "check:credential": "tsx tools/check-device-credential.ts",
+    "smoke": "node tools/gate1-smoke.mjs",
+    "smoke:selftest": "node tools/gate1-smoke-selftest.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.23.0",

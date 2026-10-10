@@ -53,6 +53,7 @@
 | A8 | APK 内不含凭据形状字符串 | 解包 + `grep` 10 个模式 | **PASS** — 全部 `命中文件数=0` | `test-reports/android-build.log` §8 |
 | A9 | **部署配置能打包**（`--dry-run`，不上传、不创建资源） | `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run` | **PASS** — `Total Upload: 120.35 KiB / gzip: 31.40 KiB`，三个 DO binding 全部解析到真实导出类，`DRYRUN_EXIT=0` | `test-reports/wrangler-dryrun.log` |
 | A10 | **凭据生成步骤自检**（第 4.1 节的命令真的产出 Worker 认的摘要） | `printf '%s' "$TOKEN" \| npm run check:credential -- --device-id my-android-phone` | **PASS** — 与 `sha256sum` 逐字节一致；`loadConfig` 接受该 `DEVICE_TOKENS` 形状（1 条生效凭据、`deviceId` 解析成功）；把明文令牌填进 `tokenSha256` 会被明确拒绝 | `test-reports/credential-check.log` |
+| A11 | **部署后自检脚本本身可信**（部署前能验的就只剩这个） | `npm run smoke:selftest` | **PASS** — 10 PASS / 0 FAIL。先回放**正确**响应证明 `tools/gate1-smoke.mjs` 判 PASS（退出码 0），再把 S256、`resource_metadata`、`healthz.status` 分别改坏，证明它**真的会**报 FAIL（退出码 1），目标不可达时报退出码 2 —— 即「不会假绿、也不会把没验的算成通过」 | `test-reports/smoke-selftest.log` |
 
 ### A2 明细（`worker/test/` 8 个文件，200 条）
 
@@ -138,10 +139,10 @@
 
 | 阶段 | PASS | FAIL | NOT RUN | BLOCKED | 合计 |
 | --- | --- | --- | --- | --- | --- |
-| A 本地自动化（含 A9/A10 两项部署前检查） | **10** | 0 | 5 | 0 | 15 |
+| A 本地自动化（含 A9–A11 三项部署前检查） | **11** | 0 | 5 | 0 | 16 |
 | B 真实 Cloudflare 联调 | 0 | 0 | 0 | **10** | 10 |
 | C ChatGPT 官方验收 | 0 | 0 | 0 | **6** | 6 |
-| **合计** | **10** | **0** | **5** | **16** | **31** |
+| **合计** | **11** | **0** | **5** | **16** | **32** |
 
 ---
 
@@ -166,8 +167,9 @@
 | 3 | 测试 APK | ✅ | `dist/Android-MCP-Hub-Gate1-debug.apk` |
 | 4 | APK SHA-256 | ✅ | `2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b` |
 | 5 | Cloudflare 部署配置 | ✅（**未部署**） | `worker/wrangler.jsonc` + `docs/GATE1_DEPLOYMENT.md` |
-| 6 | 部署操作说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` |
-| 7 | ChatGPT MCP 接入说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` 第 6 节 + 本文件第 6 节 |
+| 6 | 部署操作说明 | ✅ | `docs/GATE1_DEPLOYMENT.md`（§6.0 是一条命令的自检，§6 是逐条 curl，§5.1 是手机端准备） |
+| 7 | ChatGPT MCP 接入说明 | ✅（**从未真实执行过，见文首状态**） | `docs/GATE1_CHATGPT_SETUP.md`（含六个 URL 对应关系、官方出处、同意页行为、六项验收、症状→原因排障表） |
 | 8 | Gate 1 验收报告 | ✅（本文） | `docs/GATE1_ACCEPTANCE.md` |
+| 8b | 部署后自检工具（本文新增，非任务书要求） | ✅ 已自检 | `tools/gate1-smoke.mjs` + `tools/gate1-smoke-selftest.mjs` |
 | 9 | 已知问题清单 | ✅ | `docs/GATE1_SECURITY.md` 第 6 节（G1-K1…G1-K6）+ `TEST_REPORT.md` §8 |
 | 10 | 回滚与资源删除说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` 第 7、8 节 |

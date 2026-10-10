@@ -206,6 +206,35 @@ Debug 签名，安装时系统会提示"未知来源"，允许即可。装好先
 
 把 `<WORKER>` 换成第 5 步输出里的地址（例如 `android-mcp-hub.abc.workers.dev`）。
 
+### 6.0 先跑一条命令：`npm run smoke`
+
+B1–B4 这 24 条期望已经写成了**可执行的断言**，不用一条条抄 curl：
+
+```bash
+npm run smoke -- --base https://<WORKER>
+```
+
+它只读、不改变任何东西，**也不需要你提供任何秘密**（凡是需要"错误凭据"的地方用的是写死的假串），
+跑完给一张 `PASS/FAIL/SKIP` 表，全对时退出码 0、有 FAIL 时退出码 1。样例输出：
+
+```
+PASS  B1.2   status=ok（config_problems 为空）
+PASS  B1.4   三个 Durable Object 绑定都在
+PASS  B1.8   MCP 静态 Bearer **没有**配置（G1-K4：真实部署不要配）
+PASS  B2.5   ★ code_challenge_methods_supported 含 S256（缺了 ChatGPT 直接拒绝接入）
+PASS  B3.2   ★ 401 带 resource_metadata 指针（Gate 0.3 的 K4 已反向）
+SKIP  B4.2   错误设备令牌回 401   ← Node 的 fetch 不让带 Upgrade 头，如实标 SKIP，请用下面的 curl 复核
+合计：24 PASS / 0 FAIL / 1 SKIP
+```
+
+**这个脚本本身有自检**，而且是"先证明它会红"那一种：`npm run smoke:selftest` 会起一个本地假服务器，
+先回放**正确**的响应证明它判 PASS，再分别把 S256、`resource_metadata`、`healthz.status` 改坏，
+证明它**真的会**报 FAIL（10 条断言全过）。它的断言不是凭空写的，是照着下面这串 curl 的"期望"列抄的。
+
+> `SKIP` 与 `FAIL` 是不同的东西：SKIP 表示"这次没验"，我们不会把它算成通过。
+
+下面是可以逐条手动复核的原始命令（也是上面那些断言的出处）：
+
 ```bash
 # B1 Worker 正常、配置无问题、三个 DO 绑定都在
 curl -s "https://<WORKER>/healthz" | head -c 800

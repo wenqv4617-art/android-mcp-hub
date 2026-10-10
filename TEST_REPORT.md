@@ -1110,3 +1110,48 @@ BUILD FAILED in 41s
 **代价**：交付 APK 因此重建，SHA-256 由 `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674`
 变成 **`2467a0348696fd94170f0db86f829d43beeb6bfb6286aba4b31adad80b8c868b`**（大小不变，仍是 10,318,558 字节，
 两次构建 SHA 一致 `REPRODUCIBLE=YES`）；旧 APK 作废，§12.6 的表已更新。Android 单测 170 → **171**（14 个类）。
+
+---
+
+### 12.12 把交付物清单走一遍，逼出来的两件事
+
+前一节（§12.11）是走**部署文档**；这一节是走**任务书的交付物清单**。同样不是从审计清单里来的。
+
+**第一件：第 7 项「ChatGPT MCP 接入说明」其实不存在。**
+
+`docs/GATE1_ACCEPTANCE.md` 的交付物对照表第 7 行原本指向「`docs/GATE1_DEPLOYMENT.md` 第 6 节」——
+但那个第 6 节是**部署后验证**（B1–B4 的 curl），跟「怎么在 ChatGPT 客户端里把这个 MCP server 加进去」
+完全是两件事。也就是说，验收要用的那份说明**被标成 ✅ 了，但它没写**。
+
+补成 `docs/GATE1_CHATGPT_SETUP.md`：三个 URL 的对应关系（`https://<主机>/mcp` 给 ChatGPT、
+`wss://<主机>/phone/ws` 给手机、`/healthz` 只给自己看）、官方接入流程六步（逐条标出处）、
+**为什么认证只能选 OAuth**（官方原文：不支持 client credentials / 服务账号 / JWT bearer / 自定义 API key，
+所以连接器界面根本没有填静态 Bearer 的地方）、同意页会长什么样以及几个刻意设计（口令输错不作废授权、
+`consent_id` 即 CSRF 令牌、令牌只存摘要）、C1–C6 验收对照表、症状→原因**排障表**。
+文首把状态标注为 **NOT RUN**：它是按官方规范 + 我们的实现写的，**没有被真实执行过一次**。
+
+**第二件：B1–B4 的"期望"只是散文，没有一个可执行的形式。**
+
+`GATE1_DEPLOYMENT.md` 第 6 节写着「期望：status=ok、`d1_bindings=0`、三个 DO 都在……」——
+这些只有人眼能核对。于是把 24 条期望写成 `tools/gate1-smoke.mjs`：
+
+```bash
+npm run smoke -- --base https://<WORKER>
+```
+
+它是**只读**的，**不需要任何秘密**（凡是需要"错误凭据"的地方用的是写死的假串，
+凡是需要真凭据的 B5 之后它一概不做），跑完给 `PASS/FAIL/SKIP` 表，全对时退出码 0、有 FAIL 时 1、用法/网络错误 2。
+
+**关键是它自己也可信**：`npm run smoke:selftest` 起一个本地假服务器，先回放**正确**的响应
+（证明脚本判 PASS、退出码 0），再分别把 S256、`resource_metadata`、`healthz.status` 改坏
+（证明它报 FAIL、退出码 1），最后指向一个不可达端口（证明它报 2）——
+`10 PASS / 0 FAIL`，日志 `test-reports/smoke-selftest.log`。
+
+两条刻意的诚实处理：
+
+- **`SKIP` ≠ `PASS`**：Node 的 `fetch` 不让带 `Upgrade` 头，所以 B4.2（错误设备令牌必须 401）
+  在脚本里**如实标 SKIP** 并给出等价的 curl，而不是拿 B4.1 的 426 冒充通过；
+- **目标不可达时退出码是 2**，不是 0 —— "没连上"绝不能被算成"通过了"。
+
+顺带把 `/` 的文案从「Gate 0 骨架」「需要 Authorization: Bearer」改成 Gate 1 的实况
+（现在 `/mcp` 走 OAuth 2.1 访问令牌，并列出两个发现路由）。

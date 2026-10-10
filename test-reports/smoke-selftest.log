@@ -1,0 +1,17 @@
+# Gate 1 · 部署后自检脚本的自检（npm run smoke:selftest）
+# 生成时间：2026-10-10T06:46:07+00:00  命令：npm run smoke:selftest
+
+PASS  正确响应 → 退出码 0
+PASS  正确响应 → 全部 PASS、没有 FAIL
+PASS  正确响应 → 确实跑了 S256 那一条
+PASS  缺 S256 → 退出码 1
+PASS  缺 S256 → 报 FAIL 且指到 B2.5
+PASS  401 缺 resource_metadata → 退出码 1
+PASS  401 缺 resource_metadata → 报 FAIL 且指到 B3.2
+PASS  healthz degraded → 退出码 1
+PASS  healthz degraded → 报 FAIL 且指到 B1.2
+PASS  目标不可达 → 退出码 2
+
+自检合计：10 PASS / 0 FAIL
+
+SELFTEST_EXIT=0

@@ -54,6 +54,7 @@ e2e/.tmp/
 # Gate 1 新增：部署前检查的两份原始输出（dry-run 打包结果、凭据生成自检）
 !test-reports/wrangler-dryrun.log
 !test-reports/credential-check.log
+!test-reports/smoke-selftest.log
 
 # 例外：交付用的 Debug APK 本体（任务书要求"可安装的 APK"，而 Release 是被禁止的，
 # 所以只能放进仓库里；用户与审计员要能直接下载，而不是只能相信 SHA-256）。

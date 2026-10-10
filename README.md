@@ -90,6 +90,8 @@ android-mcp-hub/
 │   └── *.test.ts                  8 个测试文件
 ├── tools/mock-phone/              模拟手机 WebSocket 客户端（可命令行、可被引用）
 ├── tools/check-device-credential.ts  部署前检查：设备令牌 → DEVICE_TOKENS 记录（令牌只走 stdin）
+├── tools/gate1-smoke.mjs           ★ 部署后自检：B1–B4 的 24 条期望写成可执行断言（只读、不需要秘密）
+├── tools/gate1-smoke-selftest.mjs  ★ 上面那个脚本的自检：先证明会红，再证明会绿
 ├── e2e/run-local-e2e.ts           端到端：真 HTTP + 真 WebSocket + 官方 MCP SDK
 ├── android/                       Kotlin + Compose + OkHttp 手机端 App
 │   ├── README-ANDROID.md          前台服务类型选择理由、人工验证清单
@@ -98,6 +100,7 @@ android-mcp-hub/
 │   ├── PROTOCOL.md                内部 WSS 协议规范（规则 R1–R13）
 │   ├── OAUTH-DESIGN.md            OAuth 方案设计（Gate 1 已按它实现，实际实现见 worker/src/oauth/）
 │   ├── GATE1_DEPLOYMENT.md        ★ 部署方案：资源清单、费用风险、命令、回滚、资源删除（待批准）
+│   ├── GATE1_CHATGPT_SETUP.md     ★ ChatGPT 接入说明：怎么在客户端加这个 MCP server、授权、验收、排障（NOT RUN）
 │   ├── GATE1_ACCEPTANCE.md        ★ 验收报告：阶段 A PASS / 阶段 B、C BLOCKED
 │   └── GATE1_SECURITY.md          ★ Gate 1 安全说明：OAuth 决策、威胁 T13–T26、已知问题 G1-K1…K6
 ├── .github/workflows/             仅一个**手动触发**的 Debug APK 构建（无部署、无密钥）
@@ -168,6 +171,7 @@ npm run mock:phone -- \
 ```bash
 cd android
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 171 个 JVM 单测
+npm run smoke:selftest                                                       # 部署后自检脚本的自检（离线）
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses # Manifest 类名 ↔ 真实 dex
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:lintDebug            # Lint 门禁（abortOnError = true）
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 产出 Debug APK
@@ -232,6 +236,7 @@ OAuth 相关的安全设计与已知问题见 [docs/GATE1_SECURITY.md](docs/GATE
 | [SECURITY.md](SECURITY.md) | 威胁模型、凭据模型、安全边界与残余风险 |
 | [TEST_REPORT.md](TEST_REPORT.md) | 实际执行的命令与结果、**NOT RUN 项**、已知风险 |
 | [docs/GATE1_DEPLOYMENT.md](docs/GATE1_DEPLOYMENT.md) | **待批准**的部署方案：资源清单、费用风险、命令、验证、回滚、资源删除 |
+| [docs/GATE1_CHATGPT_SETUP.md](docs/GATE1_CHATGPT_SETUP.md) | **ChatGPT 接入说明**：三个 URL 别填错、官方接入流程、为什么只能选 OAuth、同意页与六项验收、症状→原因排障表 |
 | [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md) | Gate 1 验收：阶段 A 的 PASS 明细 + 阶段 B/C 的 BLOCKED 清单 |
 | [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) | Gate 1 安全：OAuth 决策、威胁 T13–T26、已知问题 G1-K1…G1-K6 |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | 内部 WSS 协议 v1（规则 R1–R13、失败码、心跳） |

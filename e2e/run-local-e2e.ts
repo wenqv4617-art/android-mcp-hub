@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 // ============================================================================
-//  Gate 0 本地端到端（e2e）
+//  Gate 1 本地端到端（e2e）
 // ============================================================================
 //
 //  这个脚本回答一个单元测试回答不了的问题：
@@ -289,7 +289,7 @@ async function connectMcpClient(origin: string, token: string | null): Promise<M
 async function main(): Promise<void> {
   out("");
   out("═".repeat(78));
-  out("  Android MCP Hub · Gate 0 · 本地端到端（真实 HTTP + 真实 WebSocket + 官方 MCP SDK）");
+  out("  Android MCP Hub · Gate 1 · 本地端到端（真实 HTTP + 真实 WebSocket + 官方 MCP SDK）");
   out("═".repeat(78));
   out("  ⚠ Worker / DO 跑在 Node shim 上，不是 workerd —— 见 TEST_REPORT.md");
   out("");
