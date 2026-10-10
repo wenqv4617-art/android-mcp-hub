@@ -1,6 +1,6 @@
 {
   "name": "android-mcp-hub",
-  "version": "0.1.0-gate0",
+  "version": "0.1.0-gate1",
   "private": true,
   "type": "module",
   "description": "Gate 0 skeleton: MCP Streamable HTTP Worker + PhoneSession Durable Object + Android phone app for the Android MCP Hub.",

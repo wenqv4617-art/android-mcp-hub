@@ -25,6 +25,7 @@ import {
   framesOfType,
   makeRig,
   parseFrame,
+  PHONE_ROUTES,
   phoneStatus,
   pingPhoneDirect,
   settle,
@@ -1025,5 +1026,267 @@ describe("PhoneSession / 12. 结算路径的故障注入（Gate 0.3 审计发现
     // 落盘镜像里最终不该再有这两个请求。
     const mirrored = await storage.get<Record<string, unknown>>("pending");
     expect(Object.keys(mirrored ?? {})).toEqual([]);
+  });
+});
+
+// ============================================================================
+//  Gate 1 审计发现项 A / B / C
+// ============================================================================
+//
+//  任务书「六、补充修复 Gate 0.3 审计遗留问题」列了三条，这里逐条对应：
+//
+//    A. `settlePending()` 在 `entry.settle()` 前仍 await 异步持久化
+//       → "存储不返回"（不是"抛错"）也不能让调用方挂住
+//    B. `handlePingRequest()` 允许重复 request_id 覆盖 pending
+//       → 同 id 的第二个未完成请求必须被拒绝
+//    C. DO 重建后遗留 pending 的处理
+//       → 不产生虚假成功、不重复结算、不错误匹配迟到 pong
+//
+//  ⚠ 与 12 节的区别：12 节注入的是"抛错"，本节注入的是**永不返回**。
+//     这两条路径的兜底机制完全不同 —— 抛错靠 try/catch，不返回只能靠
+//     "结算绝不排在 I/O 之后"。Gate 0.3 只做了前者，K13 记的就是后者。
+// ============================================================================
+
+describe("PhoneSession / 13. Gate 1 审计发现项 A：存储不返回时仍必须结算", () => {
+  function storageOf(rig: Awaited<ReturnType<typeof makeRig>>): FakeDurableObjectStorage {
+    return rig.phone.ctxOf(DEVICE).storage as FakeDurableObjectStorage;
+  }
+
+  it("落盘永不返回：调用方仍在超时那一刻拿到 phone_timeout，而不是永远挂着", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "300" } });
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const storage = storageOf(rig);
+
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-hang-1" });
+    // 先让帧真的发出去、镜像真的写完 —— 悬挂是从"结算"那一刻才开始的。
+    await settle();
+
+    // 从这一刻起，写 pending 镜像**永不 resolve**（既不抛错，也不返回）。
+    const hang = storage.hangNext("put", { key: "pending", times: 100 });
+
+    const started = Date.now();
+    const raced = await Promise.race([pending, settle(1200).then(() => "HUNG" as const)]);
+    const elapsed = Date.now() - started;
+
+    // ⚠ 这一条就是 Gate 1 发现项 A 的核心。
+    //   Gate 0.3 只把这三步降级成 bestEffort（不再抛错），结算**仍然**排在
+    //   三次 await 之后。存储一旦"不返回"，`entry.settle()` 就永远不执行 ——
+    //   这里会拿到 "HUNG"。修复后结算排在记账之前，与存储是否返回无关。
+    expect(raced).not.toBe("HUNG");
+    if (raced === "HUNG") return;
+    expect(raced.ok).toBe(false);
+    if (raced.ok) return;
+    expect(raced.error.code).toBe("phone_timeout");
+    expect(elapsed).toBeLessThan(1000);
+    expect(hang.hits).toBeGreaterThanOrEqual(1);
+
+    // 悬挂的只是"记账"，内存表该清干净还是清干净。
+    storage.clearInjectedFailures();
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["pending_requests"]).toBe(0);
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["timeouts"]).toBe(1);
+    expect(metrics["pongsMatched"]).toBe(0);
+    expect(metrics["pingsSent"]).toBe(1);
+  });
+
+  it("落盘 + 指标 + alarm 三个记账点全部永不返回：并发请求各自照常结算", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "150", MAX_PENDING_REQUESTS: "16" } });
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const storage = storageOf(rig);
+
+    const pings = Array.from({ length: 3 }, (_, i) =>
+      pingPhoneDirect(rig, DEVICE, { requestId: `req-hang-conc-${i}` }),
+    );
+    await settle();
+
+    storage.hangNext("put", { key: "pending", times: 100 });
+    storage.hangNext("put", { key: "metrics", times: 100 });
+    storage.hangNext("getAlarm", { times: 100 });
+    storage.hangNext("setAlarm", { times: 100 });
+
+    const raced = await Promise.race([Promise.all(pings), settle(1200).then(() => "HUNG" as const)]);
+    expect(raced).not.toBe("HUNG");
+    if (raced === "HUNG") return;
+
+    for (const outcome of raced) {
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.error.code).toBe("phone_timeout");
+    }
+
+    storage.clearInjectedFailures();
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["pending_requests"]).toBe(0);
+    const metrics = status["metrics"] as Record<string, number>;
+    // 3 个请求 = 恰好 3 次超时：存储再不返回，也不能多结算或少结算。
+    expect(metrics["timeouts"]).toBe(3);
+    expect(metrics["pongsMatched"]).toBe(0);
+  });
+});
+
+describe("PhoneSession / 14. Gate 1 审计发现项 B：重复 request_id 不得覆盖", () => {
+  it("同一个 request_id 的第二个未完成请求被拒绝为 409 duplicate_request_id", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "300" } });
+    const { socket } = await connectMockPhone(rig, DEVICE, "no-response");
+
+    const first = pingPhoneDirect(rig, DEVICE, { requestId: "req-dup-id-1" });
+    await settle();
+
+    // 第二次用**同一个** request_id。修复前这里会把第一个 entry 覆盖掉：
+    // 第一个的 Promise 永远不 resolve，而 settlePending 再也找不到它。
+    const second = await rig.phone.fetchOn(
+      DEVICE,
+      new Request(`https://phone-session.internal${PHONE_ROUTES.ping}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: "req-dup-id-1", deviceId: DEVICE }),
+      }),
+    );
+
+    expect(second.status).toBe(409);
+    const secondBody = (await second.json()) as { ok: boolean; error?: { code: string } };
+    expect(secondBody.ok).toBe(false);
+    expect(secondBody.error?.code).toBe("duplicate_request_id");
+
+    // 第二个请求**没有**发出任何帧：手机不该收到两条同 id 的 phone_ping。
+    const sent = framesOfType(socket, "phone_ping").filter((f) => f["request_id"] === "req-dup-id-1");
+    expect(sent.length).toBe(1);
+
+    // 第一个请求仍然活着，并照常走到超时 —— 它没有被替身或被遗忘。
+    const firstOutcome = await first;
+    expect(firstOutcome.ok).toBe(false);
+    if (firstOutcome.ok) return;
+    expect(firstOutcome.error.code).toBe("phone_timeout");
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["pendingRejectedDuplicate"]).toBe(1);
+    expect(metrics["timeouts"]).toBe(1);
+    expect(metrics["pongsMatched"]).toBe(0);
+  });
+
+  it("不同 request_id 不受影响：拒绝重复之后，新请求照常登记、发帧并超时", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "200" } });
+    const { socket } = await connectMockPhone(rig, DEVICE, "no-response");
+
+    const first = pingPhoneDirect(rig, DEVICE, { requestId: "req-dup-guard-1" });
+    await settle();
+
+    const rejected = await pingPhoneDirect(rig, DEVICE, { requestId: "req-dup-guard-1" });
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("duplicate_request_id");
+
+    // 换一个 id：正常登记、正常发帧 —— 拒绝重复不会波及其它请求。
+    const fresh = pingPhoneDirect(rig, DEVICE, { requestId: "req-dup-guard-2" });
+    await settle();
+
+    expect(framesOfType(socket, "phone_ping").map((f) => f["request_id"])).toEqual([
+      "req-dup-guard-1",
+      "req-dup-guard-2",
+    ]);
+
+    const [a, b] = await Promise.all([first, fresh]);
+    expect(a.ok).toBe(false);
+    expect(b.ok).toBe(false);
+    if (!b.ok) expect(b.error.code).toBe("phone_timeout");
+
+    const metrics = ((await phoneStatus(rig, DEVICE))["metrics"]) as Record<string, number>;
+    expect(metrics["pendingRejectedDuplicate"]).toBe(1);
+    expect(metrics["timeouts"]).toBe(2);
+    expect(metrics["pongsMatched"]).toBe(0);
+  });
+});
+
+describe("PhoneSession / 15. Gate 1 审计发现项 C：DO 重建后的遗留 pending", () => {
+  it("遗留镜像被丢弃，随后到达的同 id pong 既不匹配也不伪造成功", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "500" } });
+
+    // 先让**第一个**实例完整构造并装载结束（任何一次 fetch 都会 await this.ready）。
+    // 不做这一步的话，种镜像与构造函数里的 blockConcurrencyWhile 会抢跑：
+    // storage.put 的 map.set 是同步的，而构造函数的续体挂在微任务上，先后不确定。
+    await phoneStatus(rig, DEVICE);
+
+    // 手工种一条"上一世"留下的待处理镜像 —— 这正是 DO 被驱逐后存储里会有的东西：
+    // 记录还在，但那个 await 它的调用栈已经不存在了。
+    const state0 = rig.phone.ctxOf(DEVICE);
+    await state0.storage.put("pending", {
+      "req-ghost-1": {
+        requestId: "req-ghost-1",
+        deviceId: DEVICE,
+        generation: 1,
+        sentAt: Date.now() - 1000,
+        deadline: Date.now() - 500,
+        timeoutMs: 500,
+      },
+    });
+
+    // 驱逐：内存全丢，持久化状态保留。
+    rig.phone.evict(DEVICE);
+
+    // 连上一台**不回 pong** 的手机（建连会把对象唤醒 → 触发重建）。
+    const { socket } = await connectMockPhone(rig, DEVICE, "no-response");
+    expect(rig.phone.constructionCount(DEVICE)).toBe(2);
+
+    // 重建时应当把遗留镜像丢掉并记一笔，绝不"补一个成功"。
+    let status = await phoneStatus(rig, DEVICE);
+    let metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["reconstructedPendingFailed"]).toBe(1);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+
+    // 现在送来一条针对那个遗留 request_id 的**迟到 pong**。
+    socket.send(JSON.stringify({ type: "phone_pong", request_id: "req-ghost-1", timestamp: Date.now() }));
+    await settle();
+
+    status = await phoneStatus(rig, DEVICE);
+    metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["pongsMatched"]).toBe(0); // 绝不伪造成功
+    expect(metrics["pongsUnknown"]).toBe(1); // 明确判为"没有配对的待处理请求"
+    expect(metrics["timeouts"]).toBe(0); // 也不该有人替它多记一笔超时
+    expect(status["pending_requests"]).toBe(0);
+
+    const errors = framesOfType(socket, "error");
+    expect(errors.some((e) => e["code"] === "unknown_request_id")).toBe(true);
+    // 重建后没人发过 phone_ping —— 遗留请求绝不自动重放（R8）。
+    expect(framesOfType(socket, "phone_ping").length).toBe(0);
+
+    // 镜像必须被真正清空，否则每次重建都会重复记一笔。
+    expect(await state0.storage.get<Record<string, unknown>>("pending")).toEqual({});
+  });
+
+  it("重建后同一 request_id 可以被**新的**请求使用（遗留的那个已经不存在了）", async () => {
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "400" } });
+
+    // 同上：先等第一个实例构造完毕，保证种下的镜像一定被重建路径读到。
+    await phoneStatus(rig, DEVICE);
+
+    const state0 = rig.phone.ctxOf(DEVICE);
+    await state0.storage.put("pending", {
+      "req-ghost-2": {
+        requestId: "req-ghost-2",
+        deviceId: DEVICE,
+        generation: 1,
+        sentAt: Date.now() - 1000,
+        deadline: Date.now() - 500,
+        timeoutMs: 500,
+      },
+    });
+    rig.phone.evict(DEVICE);
+
+    await connectMockPhone(rig, DEVICE, "no-response");
+    expect(rig.phone.constructionCount(DEVICE)).toBe(2);
+
+    // 遗留表项已被丢弃，所以这个 id 在内存里是**空**的 —— 不该被误判成"重复"。
+    const outcome = await pingPhoneDirect(rig, DEVICE, { requestId: "req-ghost-2", timeoutMs: 200 });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("phone_timeout");
+
+    const metrics = ((await phoneStatus(rig, DEVICE))["metrics"]) as Record<string, number>;
+    expect(metrics["pendingRejectedDuplicate"]).toBe(0);
+    expect(metrics["pongsMatched"]).toBe(0);
+    expect(metrics["reconstructedPendingFailed"]).toBe(1);
   });
 });

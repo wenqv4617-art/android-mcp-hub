@@ -1,0 +1,171 @@
+# GATE1_ACCEPTANCE.md — Android MCP Hub Gate 1 验收报告
+
+> **当前状态：阶段 A 完成（本地）；阶段 B / 阶段 C 全部 BLOCKED —— 等用户在可信环境完成 Cloudflare 部署与 ChatGPT 接入授权。**
+> 本文只记录**真实执行过的命令与真实输出**。没有真实执行的项一律标 `NOT RUN` 或 `BLOCKED`，**绝不写成 PASS**。
+
+---
+
+## 0. 一句话现状
+
+**代码已经具备完整闭环所需的全部能力，本地能证明的每一条都通过了；但"ChatGPT 真的 ping 到这台手机"这件事本身，还没有发生 —— 它需要一次真实的 `wrangler deploy`，而那一步必须由用户先批准。**
+
+---
+
+## 1. 图例
+
+| 标记 | 含义 |
+| --- | --- |
+| **PASS** | 在本机真实执行过，输出为通过，证据文件在仓库里可查 |
+| **FAIL** | 真实执行过且失败（本轮为 0 条） |
+| **NOT RUN** | 本机根本跑不了（环境缺能力），**不是通过** |
+| **BLOCKED** | 本机能跑，但需要用户批准/提供凭据才能执行，按任务书要求**主动暂停** |
+
+---
+
+## 2. 验收的唯一标准
+
+任务书第 11 节：Gate 1 的最终验收 **不是**"Worker 测试通过"，**也不是**"APK 显示已连接"，而是下面这条完整闭环：
+
+```
+用户在 ChatGPT 官方客户端说："G老师，Ping 一下我的手机。"
+   → ChatGPT 真的发起 MCP tools/call phone_ping
+   → Cloudflare Worker → PhoneSession DO → WSS → 真实 Android 手机
+   → 手机回同一个 request_id 的 phone_pong
+   → ChatGPT 拿到真实结果（成功/失败、device_id、request_id、RTT、connection_generation）
+   → 手机界面能看到对应的 Ping 记录
+```
+
+**只要还没走完这条链，就不允许宣布 Gate 1 PASS。** 本报告的结论就是"还没走完"。
+
+---
+
+## 3. 阶段 A —— 本地自动化测试（**已执行**）
+
+| # | 项目 | 命令 | 结果 | 证据文件 |
+| --- | --- | --- | --- | --- |
+| A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
+| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 198 passed (198)` | `test-reports/vitest.log` |
+| A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
+| A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=157 failures=0 errors=0 skipped=0`（13 个测试类） | `test-reports/android-build.log` |
+| A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
+| A6 | Android Lint 门禁（`abortOnError = true`） | `./gradlew --no-daemon :app:lintDebug` | **PASS** — `0 errors / 29 warnings`；注入故障时 `BUILD FAILED`（证明门禁真的会红） | `test-reports/lint-gate.log` |
+| A7 | Debug APK 构建 | `./gradlew --no-daemon clean :app:assembleDebug` | **PASS**（`ASSEMBLE_EXIT=0`，两次重建 `REPRODUCIBLE=YES`） | `test-reports/android-build.log` |
+| A8 | APK 内不含凭据形状字符串 | 解包 + `grep` 10 个模式 | **PASS** — 全部 `命中文件数=0` | `test-reports/android-build.log` §8 |
+
+### A2 明细（`worker/test/` 8 个文件，198 条）
+
+| 文件 | 条数 | 覆盖 |
+| --- | --- | --- |
+| `worker/test/oauth.test.ts` | 46 | **Gate 1 新增**：OAuth 全流程 + 安全性质 |
+| `worker/test/phone-session.test.ts` | 46 | DO 状态机、超时、断线、重建、**发现项 A/B/C 的故障注入** |
+| `worker/test/mcp-http.test.ts` | 31 | `/mcp` 传输层、鉴权、会话、方法派发 |
+| `worker/test/tools.test.ts` | 19 | `phone_ping` 参数校验与结果形状 |
+| `worker/test/worker-index.test.ts` | 18 | 路由、`/healthz` 契约 |
+| `worker/test/security.test.ts` | 15 | 仓库凭据扫描、隔离性、DO 绑定数 |
+| `worker/test/logging.test.ts` | 12 | 日志白名单 / 错误类别 / 凭据形状终检 |
+| `worker/test/mcp-session.test.ts` | 11 | `McpSession` 生命周期与 TTL |
+
+> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+19+18+15+12+11 = **198**，与 vitest 自报的 `198 passed` 逐条吻合。
+
+### A4 明细（Android 13 个类，157 条）
+
+`PhoneLinkTest` 35 / `ConnectGateTest` 21 / `DeviceTokenStoreTest` 18 / `PhoneLinkProtocolTest` 15 / `LogRedactionTest` 13 / `BackoffTest` 9 / `PingResponderTest` 9 / `SocketFailureTest` 9 / `WsUrlTest` 8 / `HubConfigTest` 7 / `PhoneLinkClientTest` 7 / `HubLogTest` 4 / `ManifestComponentTest` 2
+
+### A7 产物
+
+| 项 | 值 |
+| --- | --- |
+| 文件 | `dist/Android-MCP-Hub-Gate1-debug.apk` |
+| SHA-256 | `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674` |
+| 大小 | 10 318 558 字节 |
+| `versionName` / `versionCode` | `0.1.4-gate1` / `5` |
+| `minSdk` / `targetSdk` / `compileSdk` | 26 / 35 / 35 |
+| 签名 | Debug（`CN=Android Debug`），cert SHA-256 `b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429` |
+| 权限 | 5 个自有权限 + AndroidX 的 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`（**没有新增任何权限**） |
+
+---
+
+## 4. 阶段 A 里 **NOT RUN** 的部分（不许当成通过）
+
+| 项 | 为什么没跑 | 影响 |
+| --- | --- | --- |
+| `wrangler dev --local`（真实 workerd） | 本容器是 Android 运行时，workerd 启动即 `MmapAligned() failed` / `FATAL ERROR: Out of memory trying to allocate internal tcmalloc data`，退出码 134 | 所有 Worker 结论都来自 **Node 替身**，不是真运行时 |
+| `@cloudflare/vitest-pool-workers` | 同上 | Durable Object 的真实驱逐/重建、真实 alarm 送达未验证 |
+| 真实 Hibernation API 行为 | 同上 | `acceptWebSocket` 的休眠唤醒路径未验证 |
+| GitHub Actions 工作流 | 本机没有 runner；工作流从未被执行过 | `.github/workflows/android-debug-apk.yml` 只是**手动触发**的构建产物工作流，不含任何部署步骤（`permissions: contents: read`） |
+| 费用测算 | 需要账号与真实账单 | 见 `docs/GATE1_DEPLOYMENT.md` 第 2 节，标 NOT RUN |
+
+---
+
+## 5. 阶段 B —— 真实 Cloudflare 联调（**BLOCKED**）
+
+**全部 10 项都未执行。** 前置条件是用户在可信环境完成：
+① `wrangler login`；② `wrangler secret put DEVICE_TOKENS`；③ `wrangler secret put OAUTH_OWNER_SECRET`；④ `wrangler deploy`。
+
+| # | 要验证的 | 怎么验证 | 期望 | 状态 |
+| --- | --- | --- | --- | --- |
+| B1 | Worker 正常运行 | `curl https://<worker>/healthz` | `status=ok`、`d1_bindings=0`、`durable_object_bindings` 含三个绑定、`config_problems=[]` | **BLOCKED** |
+| B2 | 发现路由可用 | `curl https://<worker>/.well-known/oauth-protected-resource/mcp` 与 `/.well-known/oauth-authorization-server` | 200 + JSON，`resource` 指向 `<worker>/mcp` | **BLOCKED** |
+| B3 | 未认证 `/mcp` 必须 401 且带 `resource_metadata` | `curl -i https://<worker>/mcp` | 401 + `WWW-Authenticate` 含 `resource_metadata="…/.well-known/oauth-protected-resource/mcp"` | **BLOCKED** |
+| B4 | 错误设备令牌必须 401 | `curl -i "https://<worker>/phone/ws" -H 'X-Device-Id: …' -H 'Authorization: Bearer <错误值>'` | 401 + `{error:"unauthorized"}` | **BLOCKED** |
+| B5 | Android 能建立 WSS | 手机上填真实 WSS 地址 + 设备 ID + 令牌，点"连接" | 状态显示已连接，`/healthz` 的 `phone_connected` 变 true | **BLOCKED** |
+| B6 | （上一项的否命题）错误令牌被拒 | 手机上故意填错令牌 | 界面明确显示失败，**不显示已连接** | **BLOCKED** |
+| B7 | 真实 phone_ping / phone_pong | 用 OAuth 令牌或静态令牌调 `tools/call phone_ping` | 返回 `isError=false` + `rtt_ms` 为真实数字 | **BLOCKED** |
+| B8 | `request_id` 正确匹配 | 同上，核对返回的 `request_id` 与手机界面上的记录一致 | 一致 | **BLOCKED** |
+| B9 | RTT 正确 | 对比 `rtt_ms` 与手机端显示的耗时 | 同数量级、不出现 0 或负数 | **BLOCKED** |
+| B10 | 断线后状态正确 / 网络恢复能重连 | 手机断网 → 观察 Worker 侧请求失败而不是挂起；恢复网络 → 观察自动重连 | 失败有明确错误码；重连后能再次 ping 通 | **BLOCKED** |
+
+---
+
+## 6. 阶段 C —— ChatGPT 官方 MCP 验收（**BLOCKED**）
+
+**不得用模拟客户端结果代替本阶段。** 前置条件：阶段 B 全绿 + 用户在 ChatGPT 里完成 OAuth 授权。
+
+| # | 要验证的 | 操作 | 期望 | 状态 |
+| --- | --- | --- | --- | --- |
+| C1 | ChatGPT 能完成授权 | ChatGPT → 添加自定义 MCP server → 填 `<worker>/mcp` → 选 OAuth → 在同意页输入 `OAUTH_OWNER_SECRET` 并批准 | 授权成功，连接器状态为已连接 | **BLOCKED** |
+| C2 | ChatGPT 能发现 `phone_ping` | 在 ChatGPT 里问"我连了哪些工具" | 列出 `phone_ping` | **BLOCKED** |
+| C3 | ChatGPT 能实际调用 `phone_ping` | 输入验收语句："**G老师，Ping 一下我的手机。**" | ChatGPT 真的发起 `tools/call phone_ping`（不是它自己编一个答案） | **BLOCKED** |
+| C4 | 手机收到真实请求 | 同时看手机界面 | 出现一条新的 Ping 记录 | **BLOCKED** |
+| C5 | ChatGPT 获得真实 `phone_pong` 结果 | 看 ChatGPT 的回复 | 含成功状态、`device_id`、`request_id`、RTT | **BLOCKED** |
+| C6 | 双方 `request_id` 一致 | 对比 ChatGPT 回复里的 `request_id` 与手机记录 | 完全一致 | **BLOCKED** |
+
+---
+
+## 7. 汇总
+
+| 阶段 | PASS | FAIL | NOT RUN | BLOCKED | 合计 |
+| --- | --- | --- | --- | --- | --- |
+| A 本地自动化 | **8** | 0 | 5 | 0 | 13 |
+| B 真实 Cloudflare 联调 | 0 | 0 | 0 | **10** | 10 |
+| C ChatGPT 官方验收 | 0 | 0 | 0 | **6** | 6 |
+| **合计** | **8** | **0** | **5** | **16** | **29** |
+
+---
+
+## 8. 什么时候可以宣布 Gate 1 PASS
+
+三条**全部**满足才可宣布：
+
+1. 阶段 B 的 10 项全部从 BLOCKED 变成 PASS，且证据（`curl` 原始输出、手机截图、Worker 日志）入库；
+2. 阶段 C 的 6 项全部从 BLOCKED 变成 PASS，其中 C6 的 `request_id` 一致性有**两边各自的截图**为证；
+3. 阶段 A 的 8 项在**与阶段 B 相同的那个 commit** 上重跑仍然全绿。
+
+任何一条不满足，状态就是"Gate 1 未完成"，不能写成"基本可用"。
+
+---
+
+## 9. 交付物对照（任务书第九节 10 项）
+
+| # | 交付物 | 状态 | 位置 |
+| --- | --- | --- | --- |
+| 1 | Gate 1 源代码 | ✅ | 本仓库 `gate0` 分支 |
+| 2 | Git commit SHA | ✅ | 见 `TEST_REPORT.md` §11 |
+| 3 | 测试 APK | ✅ | `dist/Android-MCP-Hub-Gate1-debug.apk` |
+| 4 | APK SHA-256 | ✅ | `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674` |
+| 5 | Cloudflare 部署配置 | ✅（**未部署**） | `worker/wrangler.jsonc` + `docs/GATE1_DEPLOYMENT.md` |
+| 6 | 部署操作说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` |
+| 7 | ChatGPT MCP 接入说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` 第 6 节 + 本文件第 6 节 |
+| 8 | Gate 1 验收报告 | ✅（本文） | `docs/GATE1_ACCEPTANCE.md` |
+| 9 | 已知问题清单 | ✅ | `docs/GATE1_SECURITY.md` 第 6 节（G1-K1…G1-K6）+ `TEST_REPORT.md` §8 |
+| 10 | 回滚与资源删除说明 | ✅ | `docs/GATE1_DEPLOYMENT.md` 第 7、8 节 |

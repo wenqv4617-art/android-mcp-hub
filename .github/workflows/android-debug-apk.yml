@@ -48,7 +48,7 @@ jobs:
         working-directory: android
         run: ./gradlew --no-daemon :app:assembleDebug
 
-      # Gate 0.2：用**真实产物**确认 AndroidManifest 里每个组件类在 dex 里都存在。
+      # 用**真实产物**确认 AndroidManifest 里每个组件类在 dex 里都存在。
       # 这一步挡的正是让 Gate 0.1 启动即闪退的那个错误（HubApplication.kt 的 package
       # 与 Manifest 的 android:name 对不上）。它读 APK 里的二进制 Manifest + dex 的
       # class_defs 表，不做源码文本匹配。不需要 aapt2，只要 python3（runner 自带）。
@@ -72,7 +72,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: Android-MCP-Hub-Gate0.2-debug-apk
+          name: Android-MCP-Hub-debug-apk
           path: |
             android/app/build/outputs/apk/debug/app-debug.apk
             android/sha256.txt

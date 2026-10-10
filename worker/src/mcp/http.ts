@@ -13,12 +13,14 @@
 //    DELETE /mcp   终止会话，返回 204。
 //
 //  ── 认证 ──────────────────────────────────────────────────────────────────
-//  `Authorization: Bearer <MCP_ACCESS_TOKEN>`。这是 Gate 0 的临时方案，
-//  与手机设备令牌完全分离（见 SECURITY.md 第 3 节）。
-//  未配置令牌时**失败关闭**：返回 503，而不是"放行"。
-//  401 响应**故意不**带 `resource_metadata` 指针 —— 因为在 Gate 0 里还不存在
-//  授权服务器，指向一个不存在的地址只会让 ChatGPT 的接入流程卡在更难看的地方。
-//  这条决定与后续 OAuth 方案写在 docs/OAUTH-DESIGN.md。
+//  两条并存的路径，见下面 `verifyMcpAuth` 的注释：
+//    1. 静态 `Authorization: Bearer <MCP_ACCESS_TOKEN>` —— 本机 e2e / 手工 curl；
+//    2. OAuth 访问令牌（Gate 1 新增）—— ChatGPT 只能走这条。
+//  两条**都**不成立时失败关闭（503 或 401），没有"放行"分支。
+//
+//  401 响应里的 `resource_metadata` 指针：**OAuth 启用时带、未启用时不带**。
+//  带它是 RFC 9728 发现流程的入口；不带它是因为指向一个 404 比不指更糟。
+//  Gate 0.3 的 K4 断言的是"未启用时不带"，那条断言依然成立。
 // ============================================================================
 
 import { loadConfig, type AppConfig } from "../config";
@@ -29,6 +31,7 @@ import { logEvent } from "../util/log";
 import { timingSafeEqual } from "../util/crypto";
 import { newSessionId } from "../util/ids";
 import { jsonResponse, methodNotAllowed } from "../util/http";
+import { OAUTH_ACCESS_TOKEN_PREFIX, OAUTH_PATHS, verifyAccessToken } from "../oauth/endpoints";
 import {
   failure,
   parseMessage,
@@ -45,11 +48,11 @@ export const MCP_SESSION_HEADER = "Mcp-Session-Id";
 export const MCP_PROTOCOL_HEADER = "MCP-Protocol-Version";
 
 export const SERVER_NAME = "android-mcp-hub";
-export const SERVER_VERSION = "0.1.0-gate0";
-export const SERVER_TITLE = "Android MCP Hub (Gate 0)";
+export const SERVER_VERSION = "0.1.0-gate1";
+export const SERVER_TITLE = "Android MCP Hub (Gate 1)";
 
 const INSTRUCTIONS =
-  "这是 Android MCP Hub 的 Gate 0 骨架。当前只提供一个工具 phone_ping：" +
+  "这是 Android MCP Hub 的 Gate 1。当前只提供一个工具 phone_ping：" +
   "向已通过 WebSocket 连上的 Android 手机发一条 ping 并等待 pong，返回服务端测量的 RTT。" +
   "手机没有连接时工具会以 isError=true 明确失败，不会伪造成功，也不会自动重放。";
 
@@ -86,7 +89,7 @@ export async function handleMcpRequest(request: Request, env: Env, deps: McpHttp
   const config = loadConfig(env);
   const method = request.method.toUpperCase();
 
-  const auth = verifyMcpAuth(request, env, config);
+  const auth = await verifyMcpAuth(request, env, config);
   if (!auth.ok) return auth.response;
 
   switch (method) {
@@ -106,19 +109,33 @@ export async function handleMcpRequest(request: Request, env: Env, deps: McpHttp
 //  认证
 // ---------------------------------------------------------------------------
 
-function verifyMcpAuth(
+/**
+ * `/mcp` 的鉴权。
+ *
+ * ── 两条并存的路径，没有第三条 ────────────────────────────────────────────
+ *
+ *   1. **静态 Bearer**（`MCP_ACCESS_TOKEN`）：给本机 e2e / 测试 / 手工 curl 用。
+ *      它是"共享密钥"，不能给公开客户端 —— 但它是**认证**，不是无认证。
+ *
+ *   2. **OAuth 访问令牌**（Gate 1 新增）：ChatGPT 走这条。ChatGPT 的
+ *      "Add custom MCP server" 只提供 OAuth / No authentication 两种选择，
+ *      **不支持**静态 Bearer 或自定义 header，所以要走它就必须自己当授权服务器。
+ *
+ * 两条都不成立时一律 401。**没有**"两条都不配置就放行"的分支。
+ */
+async function verifyMcpAuth(
   request: Request,
   env: Env,
   config: AppConfig,
-): { ok: true } | { ok: false; response: Response } {
-  if (!config.hasMcpAccessToken) {
-    // 失败关闭：没有配置令牌，任何人都不许进。
+): Promise<{ ok: true } | { ok: false; response: Response }> {
+  if (!config.hasMcpAccessToken && !config.oauth.enabled) {
+    // 失败关闭：既没有静态令牌、也没有 OAuth，任何人都不许进。
     return {
       ok: false,
       response: jsonResponse(
         {
           error: "misconfigured",
-          message: "服务端没有配置 MCP_ACCESS_TOKEN，/mcp 拒绝所有请求（失败关闭）",
+          message: "服务端既没有配置 MCP_ACCESS_TOKEN、也没有启用 OAuth，/mcp 拒绝所有请求（失败关闭）",
         },
         { status: 503 },
       ),
@@ -128,31 +145,59 @@ function verifyMcpAuth(
   const header = request.headers.get("Authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   if (match === null) {
-    return { ok: false, response: unauthorized("缺少 Authorization: Bearer <token>") };
+    return { ok: false, response: unauthorized(request, config, "缺少 Authorization: Bearer <token>") };
   }
 
   const presented = match[1]!.trim();
-  const expected = (env.MCP_ACCESS_TOKEN ?? "").trim();
-  if (!timingSafeEqual(presented, expected)) {
-    logEvent("warn", "mcp.auth_failed", { reason: "invalid_token", path: new URL(request.url).pathname });
-    return { ok: false, response: unauthorized("令牌无效") };
+
+  // 路径 1：静态 Bearer。先比它，因为它是常数时间比较、不碰存储。
+  if (config.hasMcpAccessToken) {
+    const expected = (env.MCP_ACCESS_TOKEN ?? "").trim();
+    if (timingSafeEqual(presented, expected)) return { ok: true };
   }
 
-  return { ok: true };
+  // 路径 2：OAuth 访问令牌。令牌只以 SHA-256 摘要存在 OAuthStore 里，
+  // 所以这里必须真的去问一次存储 —— 这是刻意的：没有"本地自校验 JWT"，
+  // 也就没有"撤销了但还能用到过期"的窗口。
+  //
+  // ⚠ 前置条件是 `presented` 得长得像我们自己签的令牌（前缀 `mcp_at_`）。
+  //    没有这个前置，任何人拿一段随机字符串都会让 Worker 去敲一次 DO，
+  //    等于把一个公开端点变成 DO 的放大器。
+  if (config.oauth.enabled && presented.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
+    const origin = new URL(request.url).origin;
+    const verdict = await verifyAccessToken(env, config, presented, `${origin}/mcp`);
+    if (verdict.ok) return { ok: true };
+    logEvent("warn", "mcp.auth_failed", { reason: "invalid_oauth_token", path: new URL(request.url).pathname });
+  } else {
+    logEvent("warn", "mcp.auth_failed", { reason: "invalid_token", path: new URL(request.url).pathname });
+  }
+
+  return { ok: false, response: unauthorized(request, config, "令牌无效") };
 }
 
-function unauthorized(message: string): Response {
-  return jsonResponse(
-    { error: "unauthorized", message },
-    {
-      status: 401,
-      headers: {
-        // ⚠ 故意不带 resource_metadata：Gate 0 还没有授权服务器。
-        //    指向不存在的地址只会让客户端接入流程卡得更难看。见 docs/OAUTH-DESIGN.md。
-        "WWW-Authenticate": 'Bearer realm="android-mcp-hub", error="invalid_token"',
-      },
-    },
-  );
+/**
+ * 401 响应。
+ *
+ * ── `resource_metadata` 什么时候带、什么时候不带 ──────────────────────────
+ *
+ * 它只在 OAuth **已启用**时出现。这不是可选的装饰：RFC 9728 的发现流程里，
+ * 客户端（ChatGPT）拿到 401 后会去读 `WWW-Authenticate` 里的
+ * `resource_metadata` 指针，顺着它找到授权服务器；没有这个指针，它就只能
+ * 靠猜 `/.well-known/...` 的固定路径。
+ *
+ * 反过来，OAuth **没启用**时绝不能带 —— 指向一个 404 的地址比不指更糟，
+ * 它会让客户端的发现流程走到一个"看起来配置过、实际什么都没有"的分支上。
+ *
+ * Gate 0.3 的 K4（`worker/test/mcp-http.test.ts:102`）断言的是"未启用时不带"，
+ * 那条断言依然成立；启用后的反向断言是 Gate 1 新增的。
+ */
+function unauthorized(request: Request, config: AppConfig, message: string): Response {
+  let challenge = 'Bearer realm="android-mcp-hub", error="invalid_token"';
+  if (config.oauth.enabled) {
+    const origin = new URL(request.url).origin;
+    challenge += `, resource_metadata="${origin}${OAUTH_PATHS.protectedResourceMcp}"`;
+  }
+  return jsonResponse({ error: "unauthorized", message }, { status: 401, headers: { "WWW-Authenticate": challenge } });
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +361,17 @@ async function dispatchRpc(
     }
 
     default:
+      // ⚠ 未实现的方法必须回 **HTTP 404**，不能回 200 —— 即便 JSON-RPC 的
+      //    error.code 已经是正确的 `-32601`。
+      //
+      //    原因（实测结论，不是推测）：新版官方连接器会用 `server/discover`
+      //    之类的方法探测服务端能力。如果服务端回 "200 + -32601"，客户端会把它
+      //    理解成"这个服务器实现了一个我们不认识的方法"，于是**永久失败**；
+      //    回 404 才会被理解成"这个方法不存在"，从而回退到 `initialize`。
+      //    这正是官方要求"未实现的 RPC 应回 404 + -32601"的原因。
       return {
         payload: failure(id, RPC_ERRORS.methodNotFound, `Method not found: ${method}`),
-        status: 200,
+        status: 404,
       };
   }
 }

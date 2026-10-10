@@ -13,6 +13,12 @@
 //  ⚠ 本文件的存在不代表已部署。Gate 0 不执行 `wrangler deploy`。
 //     本地验证一律用 `wrangler dev --local`（不产生任何云端资源）。
 //
+//  Gate 1 追加：OAuth 授权服务器所需的第三个 Durable Object（OAuthStore）。
+//    · 仍然**没有** D1 —— 任务书明令不用 D1，这里也没有任何 d1_databases；
+//    · 仍然**没有** account_id / route —— 部署时由操作者显式提供；
+//    · `OAUTH_OWNER_SECRET` 是 secret，**不在** vars 里；
+//    · `OAUTH_REDIRECT_ALLOWLIST` 是白名单，可以走 vars（它不是秘密）。
+//
 //  配置项含义见 README.md「本地构建与测试」与 ARCHITECTURE.md。
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
@@ -20,7 +26,7 @@
   // Worker 名称。与 GitHub 仓库名一致，便于审计时把「代码」和「资源」对上。
   "name": "android-mcp-hub",
 
-  // 入口模块（同时导出 PhoneSession / McpSession 两个 Durable Object 类）。
+  // 入口模块（同时导出 PhoneSession / McpSession / OAuthStore 三个 Durable Object 类）。
   "main": "src/index.ts",
 
   // 兼容性日期：2025-06-18。选这个日期是因为它就是 Gate 0 选定的
@@ -32,14 +38,23 @@
     "enabled": true
   },
 
-  // 非敏感运行参数。敏感值（MCP_ACCESS_TOKEN / DEVICE_TOKENS）**不在这里**，
-  // 由 `wrangler secret put` 注入 —— 见 SECURITY.md 第 3 节。
+  // 非敏感运行参数。敏感值（MCP_ACCESS_TOKEN / DEVICE_TOKENS / OAUTH_OWNER_SECRET）
+  // **不在这里**，由 `wrangler secret put` 注入 —— 见 SECURITY.md 第 3 节。
   "vars": {
     "PHONE_PING_TIMEOUT_MS": "10000",
     "HEARTBEAT_INTERVAL_MS": "30000",
     "MAX_PENDING_REQUESTS": "16",
     "MAX_PHONE_MESSAGE_BYTES": "65536",
-    "SUPPORTED_MCP_PROTOCOL_VERSIONS": "2025-06-18,2025-03-26,2024-11-05"
+    "SUPPORTED_MCP_PROTOCOL_VERSIONS": "2025-06-18,2025-03-26,2024-11-05",
+
+    // ---- Gate 1 OAuth ------------------------------------------------
+    // 允许的重定向主机。默认就只有 ChatGPT 那一个。
+    // 把本机 e2e 用的 localhost 也放进来是**故意**的：它只影响
+    // "http://localhost:PORT/callback" 这类回环地址是否被接受，
+    // 而接受回环地址不会让公网攻击者多拿到任何东西。
+    // ⚠ 如果你不想在这份线上配置里留 localhost，删掉它即可 ——
+    //    本地测试用的是 worker/test/harness 里的 env，不依赖这一行。
+    "OAUTH_REDIRECT_ALLOWLIST": "chatgpt.com,localhost"
   },
 
   "durable_objects": {
@@ -47,18 +62,27 @@
       // 每台手机一个实例：idFromName(deviceId) → PhoneSession
       { "name": "PHONE_SESSION", "class_name": "PhoneSession" },
       // 每个 MCP 会话一个实例：idFromName(sessionId) → McpSession
-      { "name": "MCP_SESSION", "class_name": "McpSession" }
+      { "name": "MCP_SESSION", "class_name": "McpSession" },
+      // OAuth 状态**只有一个实例**：idFromName("oauth-global") → OAuthStore。
+      // 单实例是刻意的 —— 授权码"只能用一次"需要原子的读—判—写。
+      { "name": "OAUTH_STORE", "class_name": "OAuthStore" }
     ]
   },
 
   // Durable Object 迁移。这是 DO 的类注册，**不是**数据库：
-  // 两个类都用 SQLite 存储后端（DO 自带、随对象生命周期存在、无独立数据库实例、
+  // 三个类都用 SQLite 存储后端（DO 自带、随对象生命周期存在、无独立数据库实例、
   // 无 SQL 端点、不能被 SQL 查询）。这一点在 SECURITY.md 第 5 节专门澄清，
   // 以免与任务书「不使用 D1」的要求混淆。
+  //
+  // ⚠ v1 已经部署过就不能改，只能追加新 tag —— 这正是 v2 存在的原因。
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["PhoneSession", "McpSession"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["OAuthStore"]
     }
   ]
 }

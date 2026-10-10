@@ -42,8 +42,27 @@ export interface RuntimeConfig {
   defaultDeviceId: string | null;
 }
 
+/**
+ * Gate 1 的 OAuth 配置。
+ *
+ * `enabled` 由 `OAUTH_OWNER_SECRET` 是否配置决定 —— **没有口令就没有 OAuth**。
+ * 未启用时所有 OAuth 路由回 404（不是 500）：官方要求里写明未实现的发现路由回
+ * 5xx 会让连接器**永久失败**，回 404 才是"这里没有这个东西"的正确表达。
+ */
+export interface OAuthConfig {
+  enabled: boolean;
+  scope: string;
+  accessTokenTtlMs: number;
+  refreshTokenTtlMs: number;
+  codeTtlMs: number;
+  consentTtlMs: number;
+  /** 允许的重定向主机（小写）。默认只有 `chatgpt.com`。 */
+  allowedRedirectHosts: string[];
+}
+
 export interface AppConfig {
   runtime: RuntimeConfig;
+  oauth: OAuthConfig;
   credentials: DeviceCredential[];
   /** 人类可读的配置问题清单。空数组 = 健康。 */
   problems: string[];
@@ -56,7 +75,17 @@ const DEFAULTS = {
   heartbeatIntervalMs: 30_000,
   maxPendingRequests: 16,
   maxPhoneMessageBytes: 65_536,
+  oauthAccessTokenTtlMs: 3_600_000,
+  oauthRefreshTokenTtlMs: 30 * 24 * 3_600_000,
+  oauthCodeTtlMs: 5 * 60_000,
+  oauthConsentTtlMs: 10 * 60_000,
 };
+
+/** 默认允许的重定向主机。只有 `chatgpt.com` —— 多一个都要运维显式加上去。 */
+export const DEFAULT_OAUTH_REDIRECT_HOSTS = ["chatgpt.com"] as const;
+
+/** 默认 scope。只描述"能调用本服务的工具"，不描述任何手机系统能力。 */
+export const DEFAULT_OAUTH_SCOPE = "mcp:tools";
 
 /**
  * 数值夹紧区间。超范围不报错，直接夹紧并记一条 problem（可诊断）。
@@ -72,7 +101,30 @@ const CLAMPS = {
   heartbeatIntervalMs: [5_000, 300_000] as const,
   maxPendingRequests: [1, 256] as const,
   maxPhoneMessageBytes: [1_024, 1_048_576] as const,
+  oauthAccessTokenTtlMs: [60_000, 24 * 3_600_000] as const,
+  oauthRefreshTokenTtlMs: [60_000, 365 * 24 * 3_600_000] as const,
+  // 授权码是"一次性、马上要用"的东西，上限 10 分钟（RFC 6749 建议值）。
+  oauthCodeTtlMs: [10_000, 600_000] as const,
+  oauthConsentTtlMs: [10_000, 3_600_000] as const,
 };
+
+/**
+ * 解析逗号分隔的主机白名单。全部转小写、去端口、去空项、去重。
+ *
+ * 去端口是刻意的：`https://chatgpt.com:443/...` 与 `https://chatgpt.com/...`
+ * 在语义上等价，如果这里区分了，白名单就会变成一个"看起来配对了、其实没生效"
+ * 的陷阱。真正的比较对象在 `checkRedirectUri()` 里。
+ */
+export function parseHostList(raw: string | undefined, fallback: readonly string[]): string[] {
+  const source = raw === undefined || raw.trim() === "" ? fallback.join(",") : raw;
+  const seen = new Set<string>();
+  for (const piece of source.split(",")) {
+    const host = piece.trim().toLowerCase();
+    if (host === "") continue;
+    seen.add(host);
+  }
+  return [...seen];
+}
 
 function parseBoundedInt(
   raw: string | undefined,
@@ -171,6 +223,14 @@ export function loadConfig(env: Env): AppConfig {
     env.DEFAULT_DEVICE_ID,
     env.DEVICE_TOKENS,
     env.MCP_ACCESS_TOKEN === undefined ? "<unset>" : "<set>",
+    // ⚠ 新增 env 字段必须加进这个数组 —— 否则缓存键不变，改了配置也不生效。
+    env.OAUTH_OWNER_SECRET === undefined ? "<unset>" : "<set>",
+    env.OAUTH_SCOPE,
+    env.OAUTH_ACCESS_TOKEN_TTL_MS,
+    env.OAUTH_REFRESH_TOKEN_TTL_MS,
+    env.OAUTH_CODE_TTL_MS,
+    env.OAUTH_CONSENT_TTL_MS,
+    env.OAUTH_REDIRECT_ALLOWLIST,
   ].join("|");
 
   if (cached && cached.key === cacheKey) return cached.value;
@@ -202,6 +262,15 @@ export function loadConfig(env: Env): AppConfig {
       maxPhoneMessageBytes: parseBoundedInt(env.MAX_PHONE_MESSAGE_BYTES, DEFAULTS.maxPhoneMessageBytes, CLAMPS.maxPhoneMessageBytes, "MAX_PHONE_MESSAGE_BYTES", problems),
       supportedProtocolVersions,
       defaultDeviceId: env.DEFAULT_DEVICE_ID?.trim() || null,
+    },
+    oauth: {
+      enabled: (env.OAUTH_OWNER_SECRET ?? "").trim() !== "",
+      scope: (env.OAUTH_SCOPE ?? "").trim() || DEFAULT_OAUTH_SCOPE,
+      accessTokenTtlMs: parseBoundedInt(env.OAUTH_ACCESS_TOKEN_TTL_MS, DEFAULTS.oauthAccessTokenTtlMs, CLAMPS.oauthAccessTokenTtlMs, "OAUTH_ACCESS_TOKEN_TTL_MS", problems),
+      refreshTokenTtlMs: parseBoundedInt(env.OAUTH_REFRESH_TOKEN_TTL_MS, DEFAULTS.oauthRefreshTokenTtlMs, CLAMPS.oauthRefreshTokenTtlMs, "OAUTH_REFRESH_TOKEN_TTL_MS", problems),
+      codeTtlMs: parseBoundedInt(env.OAUTH_CODE_TTL_MS, DEFAULTS.oauthCodeTtlMs, CLAMPS.oauthCodeTtlMs, "OAUTH_CODE_TTL_MS", problems),
+      consentTtlMs: parseBoundedInt(env.OAUTH_CONSENT_TTL_MS, DEFAULTS.oauthConsentTtlMs, CLAMPS.oauthConsentTtlMs, "OAUTH_CONSENT_TTL_MS", problems),
+      allowedRedirectHosts: parseHostList(env.OAUTH_REDIRECT_ALLOWLIST, DEFAULT_OAUTH_REDIRECT_HOSTS),
     },
     credentials: creds.credentials,
     problems,

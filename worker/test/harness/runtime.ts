@@ -181,8 +181,24 @@ export interface InjectedFailure {
   times?: number;
   /** 触发时抛什么。默认一个普通 Error（不携带任何凭据）。 */
   error?: Error;
+  /**
+   * Gate 1：`true` = "悬挂"而不是"抛错" —— 这次调用**永不返回**。
+   *
+   * 真实世界里对应"存储后端长时间无响应 / 对象正在被驱逐"。它和 `error`
+   * 走的是两条完全不同的代码路径：抛错靠 try/catch 兜住，不返回只能靠
+   * "绝不把结算排在 I/O 之后"来兜住。没有这一种注入，"存储不返回会不会
+   * 让调用方挂住"就只能靠读代码猜 —— 那是 Gate 0.3 审计 K13 的由来。
+   */
+  hang?: boolean;
   /** 已经命中几次 —— 测试可以断言"确实触发过"，避免门禁因为没生效而空过。 */
   hits: number;
+}
+
+/** 一个永远 pending 的 Promise。用于模拟"存储调用不返回"。 */
+function neverSettles<T>(): Promise<T> {
+  return new Promise<T>(() => {
+    /* 故意什么都不做 */
+  });
 }
 
 export class FakeDurableObjectStorage {
@@ -214,13 +230,31 @@ export class FakeDurableObjectStorage {
     return failure;
   }
 
+  /**
+   * 登记一次"悬挂"注入（Gate 1 审计发现项 A）。
+   *
+   * 语义是"接下来 [times] 次匹配 (op, key) 的调用**永不返回**"：不抛错、
+   * 也不落盘，就一直 pending 着。
+   */
+  hangNext(op: InjectedFailure["op"], opts: { key?: string; times?: number } = {}): InjectedFailure {
+    const failure: InjectedFailure = {
+      op,
+      ...(opts.key !== undefined ? { key: opts.key } : {}),
+      times: opts.times ?? 1,
+      hang: true,
+      hits: 0,
+    };
+    this.injected.push(failure);
+    return failure;
+  }
+
   /** 清空所有还没用完的故障注入。 */
   clearInjectedFailures(): void {
     this.injected.length = 0;
   }
 
-  /** 命中检查：匹配就抛。 */
-  private maybeFail(op: InjectedFailure["op"], key: string | undefined): void {
+  /** 命中检查：返回命中的那条注入（并消耗一次），没命中返回 null。 */
+  private hit(op: InjectedFailure["op"], key: string | undefined): InjectedFailure | null {
     for (const failure of this.injected) {
       if (failure.op !== op) continue;
       if (failure.key !== undefined && failure.key !== key) continue;
@@ -228,32 +262,75 @@ export class FakeDurableObjectStorage {
       if (remaining <= 0) continue;
       failure.times = remaining - 1;
       failure.hits += 1;
-      throw failure.error ?? new Error(`injected ${op} failure`);
+      return failure;
     }
+    return null;
   }
 
-  async get<T>(key: string): Promise<T | undefined> {
-    this.maybeFail("get", key);
-    const value = this.map.get(key);
+  /**
+   * 命中"抛错"型注入就抛；命中"悬挂"型则把它返回给调用方 ——
+   * 由调用方去永不返回（这样才能保住各个方法的返回类型）。
+   */
+  private maybeFail(op: InjectedFailure["op"], key: string | undefined): InjectedFailure | null {
+    const failure = this.hit(op, key);
+    if (failure === null) return null;
+    if (failure.hang === true) return failure;
+    throw failure.error ?? new Error(`injected ${op} failure`);
+  }
+
+  async get<T>(key: string): Promise<T | undefined>;
+  async get<T>(keys: string[]): Promise<Map<string, T>>;
+  async get<T>(keyOrKeys: string | string[]): Promise<T | undefined | Map<string, T>> {
+    if (Array.isArray(keyOrKeys)) {
+      const out = new Map<string, T>();
+      for (const key of keyOrKeys) {
+        if (this.maybeFail("get", key) !== null) return neverSettles<Map<string, T>>();
+        const value = this.map.get(key);
+        if (value !== undefined) out.set(key, structuredClone(value) as T);
+      }
+      return out;
+    }
+    if (this.maybeFail("get", keyOrKeys) !== null) return neverSettles<T>();
+    const value = this.map.get(keyOrKeys);
     return value === undefined ? undefined : (structuredClone(value) as T);
   }
 
   async put<T>(keyOrEntries: string | Record<string, unknown>, value?: T): Promise<void> {
     if (typeof keyOrEntries === "string") {
-      this.maybeFail("put", keyOrEntries);
+      if (this.maybeFail("put", keyOrEntries) !== null) return neverSettles<void>();
       this.map.set(keyOrEntries, structuredClone(value));
       this.writes.push(keyOrEntries);
       return;
     }
-    for (const k of Object.keys(keyOrEntries)) this.maybeFail("put", k);
+    let hanging = false;
+    for (const k of Object.keys(keyOrEntries)) {
+      if (this.maybeFail("put", k) !== null) hanging = true;
+    }
     for (const [k, v] of Object.entries(keyOrEntries)) {
       this.map.set(k, structuredClone(v));
       this.writes.push(k);
     }
+    if (hanging) return neverSettles<void>();
   }
 
-  async delete(key: string): Promise<boolean> {
-    return this.map.delete(key);
+  // ⚠ 这里必须支持**数组删除**。真实的 Durable Object 存储 API 有两种形态：
+  //     delete(key: string): Promise<boolean>
+  //     delete(keys: string[]): Promise<number>
+  //   早先这个替身只接受 string，于是 `storage.delete([k1, k2])` 会走进
+  //   `Map.delete(array)` —— 静默返回 false、**一个键都没删**。OAuth 的撤销端点
+  //   正是用数组删访问令牌与刷新令牌的，所以这个替身缺陷会让"撤销之后令牌仍然可用"
+  //   这类测试**以错误的理由变绿**。Gate 1 修掉了它（见 TEST_REPORT 的替身偏差清单）。
+  async delete(key: string): Promise<boolean>;
+  async delete(keys: string[]): Promise<number>;
+  async delete(keyOrKeys: string | string[]): Promise<boolean | number> {
+    if (Array.isArray(keyOrKeys)) {
+      let deleted = 0;
+      for (const key of keyOrKeys) {
+        if (this.map.delete(key)) deleted += 1;
+      }
+      return deleted;
+    }
+    return this.map.delete(keyOrKeys);
   }
 
   async deleteAll(): Promise<void> {
@@ -270,17 +347,17 @@ export class FakeDurableObjectStorage {
   }
 
   async getAlarm(): Promise<number | null> {
-    this.maybeFail("getAlarm", undefined);
+    if (this.maybeFail("getAlarm", undefined) !== null) return neverSettles<number | null>();
     return this.alarmAt;
   }
 
   async setAlarm(scheduledTime: number | Date): Promise<void> {
-    this.maybeFail("setAlarm", undefined);
+    if (this.maybeFail("setAlarm", undefined) !== null) return neverSettles<void>();
     this.alarmAt = scheduledTime instanceof Date ? scheduledTime.getTime() : scheduledTime;
   }
 
   async deleteAlarm(): Promise<void> {
-    this.maybeFail("deleteAlarm", undefined);
+    if (this.maybeFail("deleteAlarm", undefined) !== null) return neverSettles<void>();
     this.alarmAt = null;
   }
 

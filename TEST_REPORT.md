@@ -1,4 +1,4 @@
-# TEST_REPORT.md — Android MCP Hub · Gate 0.1 / 0.2 / 0.3
+# TEST_REPORT.md — Android MCP Hub · Gate 0.1 / 0.2 / 0.3 / 1
 
 **报告日期**：2026-10-10
 **被测提交**：见 §10「提交与分支」（本报告与该提交一同入库）
@@ -12,23 +12,24 @@
 
 ## 0. 一句话结论
 
-| 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3（本轮） | 结果 |
-| --- | --- | --- | --- | --- | --- |
-| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | **146**（7 个文件） | ✅ 全过 |
-| Durable Object（PhoneSession / McpSession） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（**51**） | ✅ 全过 |
-| 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
-| Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
-| Android JVM 单测 | 90 | 132（10 个类） | 135（11 个类） | **157**（13 个类） | ✅ 全过 |
-| Android Lint（阻塞式门禁） | — | — | ❌ **被 `abortOnError = false` 静音** | ✅ **`abortOnError = true`，且实测会红** | ✅ 见 **§6.7** |
-| Manifest 组件类名 ↔ 真实 APK 的 dex | — | ❌ **漏了 —— Gate 0.1 启动即闪退** | ✅ **新增（两层检查）** | ✅ 保留，未回退 | ✅ 见 **§6.6** |
-| Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 不变 | ✅ 不变 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
-| 真实 workerd 运行时上的验证 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | ⛔ **仍 NOT RUN** | §5，附精确错误 |
-| Android 真机行为验证（**含"启动是否真的不闪退"**） | NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | ⛔ **仍 NOT RUN** | §6.4 / §6.6 |
-| Android Keystore 真实加解密 | — | ⛔ NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | §6.3 |
-| ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | §7 |
-| 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行，且任务书明确禁止 | ⛔ **仍未执行** | ⛔ **仍未执行** | §8.3 |
+| 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | Gate 1（本轮） | 结果 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **198（8 个文件）** | ✅ 全过 |
+| Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
+| 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
+| Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
+| Android JVM 单测 | 90 | 132（10 个类） | 135（11 个类） | 157（13 个类） | **157**（13 个类，未新增） | ✅ 全过 |
+| Android Lint（阻塞式门禁） | — | — | ❌ **被 `abortOnError = false` 静音** | ✅ **会红** | ✅ 保留，未回退 | ✅ 见 **§6.7** |
+| Manifest 组件类名 ↔ 真实 APK 的 dex | — | ❌ **漏了 —— Gate 0.1 启动即闪退** | ✅ **新增（两层检查）** | ✅ 保留，未回退 | ✅ 保留，未回退 | ✅ 见 **§6.6** |
+| Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 不变 | ✅ 不变 | ✅ 不变 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
+| OAuth 授权服务器（ChatGPT 接入的前提） | — | — | — | — | ✅ **代码 + 本地替身 46 条** | ✅ 见 **§12.2** |
+| 真实 workerd 运行时上的验证 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | §5，附精确错误 |
+| Android 真机行为验证（**含"启动是否真的不闪退"**） | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | §6.4 / §6.6 |
+| Android Keystore 真实加解密 | — | ⛔ NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | §6.3 |
+| ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN（OAuth 已就绪，但没连过）** | §7 / §12.4 |
+| 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ **仍未执行，等用户批准** | §12.4 |
 
-**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157），**Gate 0.2 的启动修复与 Manifest 类名校验原样保留、没有回退**。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，本轮依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。
+**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→198）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
 
 ### 0.1 Gate 0.1 审计问题 → 修复 → 对应测试
 
@@ -757,16 +758,17 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | 类别 | 通过 | 失败 | 跳过 | NOT RUN |
 | --- | --- | --- | --- | --- |
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
-| Worker/DO 单元测试 | **146** | 0 | 0 | 6（workerd 相关，§5） |
+| Worker/DO 单元测试 | **198** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
 | Android JVM 单测 | **157** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
 | Android Lint 门禁（Gate 0.3 新增，实测会红 + 放行） | **2（注入故障 / 恢复）** | 0 | 0 | 0 |
 | Android 真机行为 | 0 | 0 | 0 | 7（§6.4）+ 9（§6.5） |
 | Android Keystore 真实路径 | 0 | 0 | 0 | 1 类（§6.3） |
-| GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11） |
-| ChatGPT 接入 / OAuth | 0 | 0 | 0 | 若干（§7） |
-| **合计（已执行）** | **328** | **0** | **0** | **29+** |
+| GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11.2） |
+| 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
+| ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
+| **合计（已执行）** | **380** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -792,7 +794,8 @@ $ git log --oneline
 | `e2bed4b` / `52eb63e` / `f486517` | Gate 0.1：APK 入库、安全扫描启发式收窄、证据日志重生成 |
 | `69daba5` | **Gate 0.2：修启动闪退 + 两层 Manifest 类名检查 + 新 APK**（本文件随后还有一个只改文档的收尾提交） |
 | `18f05e5` | **Gate 0.3：①手机端日志脱敏 ②Lint 门禁恢复阻塞 ③DO 结算路径故障注入 + 新 APK**（APK 已在该提交上重建比对，见 §11） |
-| （本次提交） | Gate 0.3 收尾：把上面那个提交的完整哈希写进本文件 §11（只改文档） |
+| `8196d2e` | Gate 0.3 收尾：把 APK 绑定的提交哈希写进本文件 §11（只改文档） |
+| （本次 Gate 1 提交） | **Gate 1：OAuth 2.1 授权服务器（第三个 DO `OAuthStore`）+ Gate 0.3 遗留三项修复 + 46 条 OAuth 测试 + 三份 Gate 1 文档 + 新 APK**（完整哈希见 §12.6，由紧随其后的一个只改文档的提交补上） |
 
 > 刻意**不**在本文件里写死"当前 HEAD"的哈希：哈希一旦被写进文件，任何后续提交都会让它变成一句假话。要引用最新哈希，请用 `git rev-parse HEAD`。
 >
@@ -897,3 +900,77 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 **这个 APK 能做什么、不能做什么**：能装、能启动、能填地址与令牌并手动连接。**它从未在真机上运行过** —— 界面的观感、Keystore 的真实加解密、前台服务的实际表现都属于 §8 的 NOT RUN。**并且两轮都要说清楚**：审计指出的那一处闪退原因已经修掉、也有两层检查防回归（§6.6），但"它装上之后真的不闪退了吗"这个问题，**依然标 NOT RUN**（§6.6.7）—— 唯一能回答它的是真机冷启动。Gate 0.3 改的是日志与权限检查，**没有**、也不可能改变这个结论。
 
 ⚠ 这是 **debug 签名**的包，只适合人工验证；不要用它做任何发布。
+
+---
+
+## 12. Gate 1（本轮）：OAuth 授权服务器 + Gate 0.3 遗留三项收口
+
+> 本节的完整计划与验收清单在 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md)，安全决策与已知问题在 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md)，部署方案（**待批准**）在 [docs/GATE1_DEPLOYMENT.md](docs/GATE1_DEPLOYMENT.md)。
+
+### 12.1 本轮做了什么
+
+| # | 任务书要求 | 做了什么 | 守着它的测试 |
+| --- | --- | --- | --- |
+| 1 | 让 ChatGPT 官方客户端能接入（不能只做普通 HTTP 测试接口） | 实现完整的 OAuth 2.1 授权服务器：RFC 9728 资源元数据、RFC 8414 授权服务器元数据、RFC 7591 DCR（同时兼容 CIMD 的 URL 形态 `client_id`）、**强制 PKCE S256**、RFC 8707 `resource` 受众绑定、RFC 9207 `iss`、刷新令牌轮换、零脚本 CSP 同意页 | 新文件 `worker/test/oauth.test.ts` **46 条** |
+| 2 | **不要假设自定义 Bearer 一定能用于 ChatGPT**；需要 OAuth 就实现最小安全方案 | 另保留一条静态 Bearer 路径（只给本机 e2e/curl 用），ChatGPT 走 OAuth；两条路径都是认证，**没有无认证入口**；未配置 `OAUTH_OWNER_SECRET` 时整个 OAuth 面回 **404**（官方要求：未实现的发现路由回 5xx 会让连接器永久失败） | `oauth.test.ts` A 组「未启用失败关闭」8 条 + `mcp-http.test.ts` |
+| 3 | 不得为了省事禁用认证 | `/mcp` 的 `verifyMcpAuth` 改成 async 双路径；OAuth 分支**前置要求**令牌以 `mcp_at_` 开头（否则公开端点会变成 DO 放大器） | `oauth.test.ts` G 组「访问令牌用于 /mcp」 |
+| 4 | 未知 JSON-RPC 方法应让客户端能回退 | `dispatchRpc` 的 `default` 分支从 **200 + `-32601` 改成 404 + `-32601`**（实测：新版官方连接器把 200+-32601 当成"服务器实现了陌生方法"从而永久失败） | `mcp-http.test.ts`「不支持的方法返回 404 + -32601」 |
+| 5 | Gate 0.3 遗留 ①：`settlePending()` 在 `entry.settle()` 前 await 异步持久化 | 把顺序**倒过来**：先 `entry.settle(build(...))`，再三次 `bestEffort(...)` 记账。理由：`bestEffort` 只保证"不抛错"，**不保证"会返回"**；存储若永不 resolve，调用方就被无限期挂住 | `phone-session.test.ts` §13 两条（含"落盘永不返回"与"三个记账点全部永不返回"） |
+| 6 | Gate 0.3 遗留 ②：重复 `request_id` 覆盖 pending | `handlePingRequest` 在并发上限检查**之前**加守卫：已在 `pending` 里的同 id 直接 **409 + `duplicate_request_id`**，新增计数器 `pendingRejectedDuplicate` | `phone-session.test.ts` §14 两条 |
+| 7 | Gate 0.3 遗留 ③：DO 重建后遗留 pending | 产品代码**本来就已经正确**（重建时丢弃镜像、累加 `reconstructedPendingFailed`、不产生任何响应）；本轮补上会红的测试 | `phone-session.test.ts` §15 两条 |
+| 8 | 测试替身要能注入"不返回" | `worker/test/harness/runtime.ts` 新增 `hangNext(op, opts)` 与 `neverSettles()`，把 `maybeFail` 重构成 `hit` + `maybeFail` 两级 | 由 §13/§14/§15 六条用例驱动 |
+| 9 | Android 侧保留全部既有保护 | **只改版本号**（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5），行为一行未改；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条不变 + `verifyManifestClasses` + `lintDebug` |
+
+### 12.2 OAuth 面：新增了什么、为什么这么设计
+
+新增三个文件（合计约 1 590 行）：`worker/src/oauth/store-do.ts`（`OAuthStore` DO）、`worker/src/oauth/endpoints.ts`（端点实现）、`worker/src/oauth/pages.ts`（同意页）。路由入口在 `worker/src/index.ts` 的 `isOAuthPath()`。
+
+**必须做 OAuth 的直接原因**：ChatGPT 的「Add custom MCP server」只提供 **OAuth / No authentication** 两种认证方式，**不支持**静态 Bearer、自定义 header、client credentials、JWT bearer。任务书又明确"不得为了省事禁用认证" —— 所以唯一的出路是自己当授权服务器。
+
+**几个关键决策**（完整版见 `docs/GATE1_SECURITY.md` 第 3 节）：
+
+- **状态放 DO 而不是 KV**：授权码/刷新令牌"只能用一次"是原子读—判—写，KV 最终一致撑不住。用第三个 DO `OAuthStore`，**单实例** `idFromName("oauth-global")`，靠 DO 单线程串行天然串行化。
+- **只存摘要**：码、访问令牌、刷新令牌、客户端密钥全部只存 `sha256Hex`（与设备令牌同一套）。dump 存储也换不出可用令牌。
+- **不 D1**（任务书禁止），**不用 KV**（语义不匹配）。
+- **同意页表单只提交三个字段**：`consent_id` / `owner_secret` / `decision`。全部授权参数留在服务端 consent 记录里 —— 隐藏字段方案可被篡改 `redirect_uri`。`consent_id` 是 24 字节随机、一次性，即本页的 CSRF 防护；**刻意不用 Origin/Referer 做信任判断**。
+- **口令校验在消费之前**（peek → 验 → consume）：先消费再验的话，运维**输错一次**就把整个授权请求作废，得回 ChatGPT 从头点一遍。这条有专门的测试（"口令输错一次 401 后改对仍能拿到码"）。
+- **`redirect_uri` 双重闸**：注册值逐字节相等 **+** 主机白名单（默认只放行 `chatgpt.com`；非 https 只在白名单显式含 `localhost` 时放行回环）。
+- **未启用时回 404 不回 5xx**：这同时让 Gate 0.3 的 K4 断言（未配置时 401 **不带** `resource_metadata`）继续成立；配置后新增了"**必须带**"的反向断言。
+
+**`worker/test/oauth.test.ts` 的 46 条分 10 组**：A 未启用失败关闭（8）/ B 发现元数据 / C DCR 校验 / D 授权端点与同意页 / E 授权码（一次性、PKCE、跨客户端）/ F 刷新轮换与重放 / G 访问令牌真的能完成 `initialize`（含伪造前缀、撤销、过期、受众不符、缺 scope）/ H 日志不出现任何凭据 / I 存储故障必须 503 而不是假码 / J 与手机链路并联（OAuth 令牌 → `phone_ping` → `MockPhone` → 结果含成功与 RTT）。
+
+### 12.3 ⚠ 对 §0.3 第 ③ 行的一处**更正**
+
+§0.3 的表格里写的是"`entry.settle()` 仍在三行**之后**（顺序仍是'先记账、后 resolve'）"。**Gate 1 把这个顺序改了**，因此那句话对当前代码不再成立：
+
+- Gate 0.3 的做法是把三行裸 `await` 换成 `bestEffort()`，解决的是"**抛错**导致永不 resolve"；
+- 但 Gate 1 复核时发现 `bestEffort` **不解决"永不返回"** —— 存储调用如果既不 resolve 也不 reject，调用方照样被挂住，这正是审计发现项 A 的剩余部分；
+- 所以现在改成 **先 `entry.settle(build(...))`，再记账**。代价写在代码注释里：resolve 与 `storage.put` 之间不再有先后保证，DO 若在落盘前被驱逐，镜像里的超时账可能丢 —— 可接受，因为镜像只是重建时标记遗留请求的辅助信息，而**挂住调用方不可接受**。
+
+`test-reports/vitest.log` 与 `test-reports/android-build.log` 是本轮重新生成的，旧的那两份会被覆盖（`git log -p` 里仍可查）。
+
+### 12.4 ⛔ 阶段 B / C：**BLOCKED，一项都没跑**
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| B | 真实 Cloudflare 联调 10 项（Worker 运行 / 发现路由 / 未认证 `/mcp` 必须 401 且带 `resource_metadata` / 错误设备令牌被拒 / Android 建 WSS / 真实 ping-pong / `request_id` 匹配 / RTT 正确 / 断线状态 / 恢复重连） | **BLOCKED** —— 需要用户 `wrangler login` + `secret put` + `deploy` |
+| C | ChatGPT 官方验收 6 项（能授权 / 能发现 `phone_ping` / 能实际调用 / 手机收到真实请求 / ChatGPT 拿到真实 pong / 双方 `request_id` 一致） | **BLOCKED** —— 必须先有阶段 B |
+
+**为什么停在这里**：任务书明确"**用户确认前不得真实部署、不得创建收费资源、不得改账号配置**"，并要求"先完成部署前检查与必要代码修改，准备好后提供部署计划，等待用户批准"。
+**Gate 1 的唯一验收标准是"ChatGPT 真的 ping 到这台手机"** —— 这条链**目前还没有真的跑过**，所以 Gate 1 **不能**宣布 PASS。逐条的期望结果与命令见 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md) 第 5、6 节。
+
+### 12.5 本轮发现的**测试替身缺陷**（K2 的一个真实实例，值得单独记）
+
+写 OAuth 撤销的测试时发现：`worker/test/harness/runtime.ts` 里的 `FakeDurableObjectStorage.delete` 只实现了 `delete(key: string)`，而真实 DO 存储 API 有 `delete(key): Promise<boolean>` 与 `delete(keys: string[]): Promise<number>` 两种形态。
+
+`worker/src/oauth/store-do.ts` 的撤销正是 `await this.ctx.storage.delete([PREFIX_ACCESS + digest, PREFIX_REFRESH + digest])` —— 于是替身里 `Map.delete(array)` **静默返回 false、一个键都没删**，而"撤销之后令牌立刻失效"这条测试**以错误的理由变绿**（令牌失效是因为另一条路径，不是撤销真的删掉了）。
+
+修法：把替身的 `get` 与 `delete` 都改成支持数组的重载实现，并写注释记录这个坑。**这就是 §3.1 说的"替身能证伪的东西比真运行时少"的一个具体例子** —— 它不是推理出来的，是踩出来的。
+
+### 12.6 本轮的提交与产物
+
+（提交哈希在写这一节时还没有生成 —— 本节与代码一同入库，紧接着有一个只改文档的提交把哈希补上，与 Gate 0.2/0.3 的做法一致。）
+
+### 12.7 Gate 1 的已知问题
+
+见 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) 第 6 节：**G1-K1** 客户端注册记录无上限（DCR 匿名、`client:` 前缀没有过期时间，`alarm()` 也不清理它）；**G1-K2** 同意页口令节流是全局单计数器，可被用来锁死运维；**G1-K3** `OAUTH_OWNER_SECRET` 是共享秘密、不是多因素；**G1-K4** 静态 `MCP_ACCESS_TOKEN` 路径仍然保留（真实部署时不要设置）；**G1-K5** 鉴权结果绝不能被边缘缓存；**G1-K6** 过期清理依赖 DO 被唤醒（只影响容量，不影响安全）。

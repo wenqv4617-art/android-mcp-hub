@@ -1,1 +1,1 @@
-cbce07eaf40b2f2c1bc47a724d74342c1cf6ded234f58c1744e5a1d253ab0f57  Android-MCP-Hub-Gate0.3-debug.apk
+c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674  Android-MCP-Hub-Gate1-debug.apk

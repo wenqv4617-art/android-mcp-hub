@@ -43,6 +43,8 @@ export type PhoneErrorCode =
   | "phone_disconnected"
   | "phone_replaced"
   | "too_many_pending_requests"
+  /** Gate 1：同一个 request_id 已经有一个未完成请求，拒绝覆盖（见 handlePingRequest）。 */
+  | "duplicate_request_id"
   | "unknown_device"
   | "ambiguous_device"
   | "invalid_pong"
@@ -80,6 +82,13 @@ export interface PhoneSessionMetrics {
   timeouts: number;
   disconnects: number;
   pendingRejectedOverLimit: number;
+  /**
+   * Gate 1 审计发现项 B：因为 request_id 与某个未完成请求重复而被拒绝的次数。
+   *
+   * **正常情况恒为 0** —— MCP 层每个 phone_ping 都用新生成的 UUID。
+   * 非 0 说明调用方在重放同一个 request_id，那是必须被挡住的行为。
+   */
+  pendingRejectedDuplicate: number;
   messagesRejected: number;
   reconstructedPendingFailed: number;
   /** Gate 0.1 / R1：新连接替换旧连接时，被**主动**终结的旧代次待处理请求数。 */
@@ -117,6 +126,7 @@ function emptyMetrics(): PhoneSessionMetrics {
     timeouts: 0,
     disconnects: 0,
     pendingRejectedOverLimit: 0,
+    pendingRejectedDuplicate: 0,
     messagesRejected: 0,
     reconstructedPendingFailed: 0,
     pendingReplacedOnConnect: 0,
@@ -393,6 +403,34 @@ export class PhoneSession implements DurableObject {
         device_id: deviceId,
         error: { code: "phone_offline", message: "该设备当前没有已建立的连接" },
       });
+    }
+
+    // ── Gate 1 审计发现项 B：同一个 request_id 不得存在两个未完成请求 ──────
+    // 原实现直接 `this.pending.set(requestId, entry)`：第二个同 id 请求会把
+    // 第一个 entry **覆盖**掉。后果有两层 ——
+    //   1. 第一个请求的 `settle` 闭包再没有人持有，它的 Promise 永远不 resolve
+    //      （调用方永久挂起）；
+    //   2. `settlePending` 也就再也找不到它，于是那条镜像只能等 DO 重建才被清掉。
+    //
+    // 这里选择**显式拒绝**，而不是"让第二个请求搭第一个的便车"：搭便车意味着
+    // 两个调用方共享同一个结算结果，而它们的超时长度、deviceId 都可能不同，
+    // 语义上更糟。MCP 层每次都生成新的 UUID，所以正常情况下这条守卫不会触发。
+    if (this.pending.has(requestId)) {
+      this.metrics.pendingRejectedDuplicate += 1;
+      await this.bestEffort("flush_metrics", () => this.flushMetrics());
+      logEvent("warn", "phone_session.duplicate_request_id", { requestId, deviceId });
+      return json<PingFailure>(
+        {
+          ok: false,
+          request_id: requestId,
+          device_id: deviceId,
+          error: {
+            code: "duplicate_request_id",
+            message: "该 request_id 已有一个未完成的请求，拒绝覆盖",
+          },
+        },
+        409,
+      );
     }
 
     if (this.pending.size >= this.cfg.maxPendingRequests) {
@@ -731,23 +769,34 @@ export class PhoneSession implements DurableObject {
 
     delete this.storedPending[requestId];
 
-    // ── Gate 0.3 审计发现项 3 ────────────────────────────────────────────
-    // 这三步都是**记账**，不是结算本身。之前它们是裸 await：只要
-    // `ctx.storage.put` 抛一次（存储不可用 / DO 正在被驱逐），这一行之后的
-    // `entry.settle(...)` 就永远不会执行 —— 而 `this.pending` 里**已经删掉了**
-    // 这个请求，于是没有任何人还能再结算它。调用方（Worker → MCP 客户端）就
-    // 永久挂在那里。这是"请求永久挂起"的确切成因。
+    // ── Gate 0.3 审计发现项 3 + Gate 1 审计发现项 A ──────────────────────
     //
-    // 改成尽力而为：失败记一笔并继续，`entry.settle()` 必定被执行。
+    // 历史：这三步记账原本是裸 await。`ctx.storage.put` 抛一次（存储不可用 /
+    // DO 正在被驱逐），后面的 `entry.settle(...)` 就永远不执行 —— 而
+    // `this.pending` 里**已经删掉了**这个请求，于是没有任何人还能再结算它，
+    // 调用方（Worker → MCP 客户端）永久挂起。
+    //
+    // Gate 0.3 把它们降级成 `bestEffort`（不再抛错）。但"不抛错"不等于
+    // "一定会返回"：存储层若**永不 resolve**（长时间无响应、DO 正在被驱逐），
+    // 结算仍然被无限期推迟 —— 这正是 Gate 1 审计发现项 A 指出的残余缺陷。
+    //
+    // Gate 1 的修复是把顺序彻底倒过来：**先结算，后记账**。
+    //   · `entry.settle()` 只做一件事：resolve 那个 Promise。它不碰 I/O，
+    //     所以"调用方一定拿到结果"这条保证从此不依赖任何存储操作。
+    //   · 记账三步退化成"尽力而为的副作用"，失败记一笔，挂住也只挂住
+    //     当前这个 async 调用栈（最坏情况：镜像过期、指标只留在内存里）。
+    //
+    // 代价要说清楚：resolve 与 `storage.put` 之间不再有先后保证，DO 若在
+    // 写入落盘前被驱逐，镜像里的超时账可能丢。这可以接受 —— 镜像本来就只是
+    // "DO 重建时把遗留请求标记为失败"的辅助信息（见构造函数的残留处理），
+    // 而挂起调用方是不可接受的。
+    entry.settle(build({ ...entry }));
+
     await this.bestEffort("persist_pending", () =>
       this.ctx.storage.put(STORAGE_KEY_PENDING, this.storedPending),
     );
     await this.bestEffort("flush_metrics", () => this.flushMetrics());
     await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
-
-    // ⚠ 顺序**仍然**是"先记账、后 resolve"：调用方被唤醒时，指标与镜像都已经
-    //   尝试更新过了。区别只在于这些更新现在不会因为失败而把人永远挂着。
-    entry.settle(build({ ...entry }));
   }
 
   private async handleSocketGone(ws: WebSocket, cause: string, closeCode: number | null): Promise<void> {

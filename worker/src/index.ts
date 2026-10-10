@@ -9,12 +9,22 @@
 //    *    /mcp        MCP Streamable HTTP（POST / GET / DELETE）
 //    GET  /phone/ws   手机的 WebSocket 升级入口（带设备鉴权）
 //
+//  Gate 1 增加了 OAuth 授权服务器面（见 `./oauth/endpoints` 的 `OAUTH_PATHS`）：
+//
+//    GET  /.well-known/oauth-protected-resource[/mcp]   RFC 9728 资源元数据
+//    GET  /.well-known/oauth-authorization-server       RFC 8414 授权服务器元数据
+//    GET  /.well-known/openid-configuration             OIDC 风格别名
+//    *    /oauth/register                              RFC 7591 动态客户端注册
+//    GET|POST /oauth/authorize                         授权端点（同意页）
+//    POST /oauth/token                                 令牌端点（含刷新轮换）
+//    POST /oauth/revoke                                RFC 7009 撤销
+//
 //  其余一律 404。
 //
 //  ── 隔离声明（对应任务书「二、最高优先级：生产环境隔离」）───────────────
 //  这个模块**没有**任何 D1 / KV / R2 / Queue 的引用，也没有任何指向既有项目的
-//  常量、URL、账户 ID 或密钥名。它只认三个绑定：PHONE_SESSION、MCP_SESSION，
-//  以及从 env 读来的凭据。`env.ts` 里的类型定义是一道编译期断言：
+//  常量、URL、账户 ID 或密钥名。它只认三个绑定：PHONE_SESSION、MCP_SESSION、
+//  OAUTH_STORE，以及从 env 读来的凭据。`env.ts` 里的类型定义是一道编译期断言：
 //  如果有人往 wrangler.jsonc 里加了 D1 绑定，这里不会自动获得访问权。
 // ============================================================================
 
@@ -24,11 +34,13 @@ import type { Env } from "./env";
 import { PhoneSession, INTERNAL_DEVICE_HEADER, ROUTE_CONNECT } from "./phone/phone-session";
 import { McpSession } from "./mcp/session-do";
 import { handleMcpRequest, SERVER_NAME, SERVER_VERSION } from "./mcp/http";
+import { OAuthStore } from "./oauth/store-do";
+import { handleOAuthRequest, isOAuthPath } from "./oauth/endpoints";
 import { jsonResponse, notFound, textResponse } from "./util/http";
 import { logEvent } from "./util/log";
 import { sha256Hex, timingSafeEqual } from "./util/crypto";
 
-export { PhoneSession, McpSession };
+export { PhoneSession, McpSession, OAuthStore };
 
 /** 健康契约里的 schema 版本。改动持久化结构时同步 +1。 */
 const SCHEMA_VERSION = "gate0-do-v1";
@@ -43,6 +55,9 @@ export default {
       if (url.pathname === "/" ) return handleRoot();
       if (url.pathname === "/mcp") return await handleMcpRequest(request, env);
       if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config);
+      // OAuth 面。`isOAuthPath` 只认精确路径集合，不做前缀匹配 ——
+      // 前缀匹配会让 `/oauth/authorize/../../mcp` 这种形状落到错误的分支上。
+      if (isOAuthPath(url.pathname)) return await handleOAuthRequest(request, env, config);
       return notFound(url.pathname);
     } catch {
       // 审计 R2：**绝不**记录 `String(err)` 或 `err.stack`。
@@ -81,7 +96,7 @@ function handleHealthz(env: Env, config: AppConfig): Response {
     schema_version: SCHEMA_VERSION,
 
     // 本阶段允许的持久化只有 Durable Object 自带存储。
-    durable_object_bindings: ["PHONE_SESSION", "MCP_SESSION"],
+    durable_object_bindings: ["PHONE_SESSION", "MCP_SESSION", "OAUTH_STORE"],
 
     config_problems: config.problems,
     capabilities: {
@@ -89,11 +104,15 @@ function handleHealthz(env: Env, config: AppConfig): Response {
       phone_endpoint: "/phone/ws",
       tools: ["phone_ping"],
       server_initiated_notifications: false,
+      oauth_authorization_server: config.oauth.enabled,
+      oauth_metadata_endpoint: config.oauth.enabled ? "/.well-known/oauth-authorization-server" : null,
     },
     auth: {
       mcp_bearer_configured: config.hasMcpAccessToken,
       device_credentials_configured: config.credentials.length,
       device_tokens_configured: config.hasDeviceTokens,
+      // ⚠ 只说"配没配"，绝不说口令是什么、有多长、摘要是什么。
+      oauth_owner_secret_configured: config.oauth.enabled,
     },
     runtime: config.runtime,
   };

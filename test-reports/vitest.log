@@ -1,24 +1,23 @@
-==============================================================
- vitest：npx vitest run --config worker/vitest.config.ts
- 时间：2026-10-10T05:07:38+00:00
-==============================================================
 
  RUN  v4.1.11 /root/android-mcp-hub
 
- ✓ worker/test/mcp-session.test.ts (11 tests) 42ms
- ✓ worker/test/logging.test.ts (12 tests) 76ms
- ✓ worker/test/worker-index.test.ts (18 tests) 44ms
- ✓ worker/test/mcp-http.test.ts (31 tests) 102ms
- ✓ worker/test/tools.test.ts (19 tests) 172ms
- ✓ worker/test/security.test.ts (15 tests) 661ms
- ✓ worker/test/phone-session.test.ts (40 tests) 3688ms
+ ✓ worker/test/logging.test.ts (12 tests) 67ms
+ ✓ worker/test/tools.test.ts (19 tests) 150ms
+ ✓ worker/test/worker-index.test.ts (18 tests) 58ms
+ ✓ worker/test/mcp-http.test.ts (31 tests) 134ms
+ ✓ worker/test/oauth.test.ts (46 tests) 226ms
+ ✓ worker/test/mcp-session.test.ts (11 tests) 33ms
+ ✓ worker/test/security.test.ts (15 tests) 847ms
+ ✓ worker/test/phone-session.test.ts (46 tests) 4966ms
      ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  413ms
-     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  313ms
+     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  312ms
      ✓ alarm 处理器自己的记账失败不会向外抛，指标照常记一笔  312ms
+     ✓ 落盘永不返回：调用方仍在超时那一刻拿到 phone_timeout，而不是永远挂着  313ms
+     ✓ 同一个 request_id 的第二个未完成请求被拒绝为 409 duplicate_request_id  312ms
 
- Test Files  7 passed (7)
-      Tests  146 passed (146)
-   Start at  05:07:41
-   Duration  5.08s (transform 2.17s, setup 1.13s, import 2.76s, tests 4.78s, environment 1ms)
+ Test Files  8 passed (8)
+      Tests  198 passed (198)
+   Start at  05:47:52
+   Duration  6.56s (transform 2.93s, setup 1.45s, import 3.86s, tests 6.48s, environment 1ms)
 
-EXIT=0
+VITEST_EXIT=0

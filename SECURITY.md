@@ -1,10 +1,14 @@
-# SECURITY.md — Android MCP Hub（Gate 0）
+# SECURITY.md — Android MCP Hub（Gate 0 基线 + Gate 1 增量）
 
 > 这份文档描述的是 **Gate 0 的安全现状**，不是目标形态。
 > 每一节都落在一句可以验证的话上：要么指向仓库里的一行代码，要么指向一个会失败的测试。
 > 凡是没有验证过的，我会明写"**未验证**"，不拿"应该没问题"充数。
+>
+> **Gate 1 增量**：本文描述的那两处"阶段 2 该做的事"（共享 Bearer → OAuth、401 不带 `resource_metadata`）**已经实现**，
+> 但**没有在真实 Cloudflare 上验证过**。Gate 1 自己的威胁模型（T13–T26）、OAuth 设计决策与已知问题（G1-K1…G1-K6）
+> 在 **[docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md)**；验收状态在 **[docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md)**。
 
-相关文档：[ARCHITECTURE.md](ARCHITECTURE.md) · [docs/PROTOCOL.md](docs/PROTOCOL.md) · [docs/OAUTH-DESIGN.md](docs/OAUTH-DESIGN.md) · [TEST_REPORT.md](TEST_REPORT.md)
+相关文档：[ARCHITECTURE.md](ARCHITECTURE.md) · [docs/PROTOCOL.md](docs/PROTOCOL.md) · [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) · [docs/GATE1_DEPLOYMENT.md](docs/GATE1_DEPLOYMENT.md) · [TEST_REPORT.md](TEST_REPORT.md)
 
 ---
 
@@ -14,11 +18,11 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 
 | 缺口 | 现状 | 风险 | 阶段 2 该做什么 |
 | --- | --- | --- | --- |
-| MCP 入口用**共享** Bearer token | `worker/src/mcp/http.ts` 的 `verifyMcpAuth`：一个 `MCP_ACCESS_TOKEN`，谁拿到谁能用 | 令牌没法按客户端吊销、没法区分用户、泄漏即全失守 | OAuth 2.1 + PKCE + DCR，见 [docs/OAUTH-DESIGN.md](docs/OAUTH-DESIGN.md) |
-| **没有速率限制** | 无 | 暴力猜令牌、拿 phone_ping 当探针刷 RTT、把 DO 打爆 | 按 IP + 按设备双维度限流；`MAX_PENDING_REQUESTS` 只挡并发不挡频率 |
+| MCP 入口用**共享** Bearer token | `worker/src/mcp/http.ts` 的 `verifyMcpAuth`：一个 `MCP_ACCESS_TOKEN`，谁拿到谁能用 | 令牌没法按客户端吊销、没法区分用户、泄漏即全失守 | ✅ **Gate 1 已实现 OAuth 2.1 + PKCE + DCR**（`worker/src/oauth/`）；静态 Bearer 只在**没有**配置 OAuth 时才是唯一入口，真实部署时不设它 |
+| **没有速率限制** | 无 | 暴力猜令牌、拿 phone_ping 当探针刷 RTT、把 DO 打爆 | ⛔ **仍未做**（只有同意页口令的失败节流，且是全局计数，见 G1-K2 与 G1-K1）；按 IP + 按设备双维度限流仍是阶段 2 的事 |
 | **没有持久化审计** | 只用 `logEvent` 打单行 JSON | 日志随平台保留期消失，事后查不到"谁在什么时候连过" | 阶段 2 引入审计存储（**不得**复用既有生产项目的任何数据库，必须是独立资源） |
 | `/healthz` 公开 | `worker/src/index.ts` 无鉴权返回健康契约 | 暴露部署存在性、绑定名、开关布尔值 | 若要收紧：只回 `status`，细节另开带鉴权的端点 |
-| 401 不带 `resource_metadata` | `worker/src/mcp/http.ts` 故意省略 | 客户端无法自动发现授权服务器；现在**还没有**授权服务器，指过去只会更糟 | 阶段 2 补上，并**反向**那条断言（`worker/test/mcp-http.test.ts:102` 附近） |
+| 401 不带 `resource_metadata` | ✅ **Gate 1 已反转**：启用 OAuth 后**必须带**（`worker/src/mcp/http.ts` 的 `unauthorized()`）；未启用时**仍然不带** | —— | 已做；`worker/test/oauth.test.ts` B 组同时守着"未启用不带"与"启用必须带"两个方向 |
 | 手机端是 debug 签名 | `app-debug.apk` | 不能分发给真人用 | 走 release 签名与密钥托管 |
 
 **所以：** 本仓库当前**没有部署**到任何 Cloudflare 账户。`worker/wrangler.jsonc` 是"可供人工审核的配置"，不是"已生效的部署"。
@@ -144,11 +148,17 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 - **轮换**：配置里可以同时存在同一个 `deviceId` 的多条凭据，`candidates.some(...)` 任意一条匹配即可 —— 所以轮换是"先加新的、再删旧的"**重叠窗口**，手机端不需要停机。**未验证**：没有实际跑过这个流程。
 - **不在日志里**：日志只有 `deviceId` + `label`。
 
-### 3.2 MCP 访问令牌
+### 3.2 MCP 访问令牌（Gate 1 起有两条路径）
 
-- 一个共享 Bearer token，来自 secret `MCP_ACCESS_TOKEN`。
-- **失败关闭**：secret 没配 → `503`（而不是"没配就放行"）。这是个重要选择：配置缺失必须是**大声失败**，不能退化成无鉴权。
-- 缺失/错误 → `401` + `WWW-Authenticate: Bearer realm="android-mcp-hub", error="invalid_token"`，**故意不带** `resource_metadata`（理由见 §1 与 [docs/OAUTH-DESIGN.md](docs/OAUTH-DESIGN.md)）。
+- **主路径：OAuth 访问令牌**（`mcp_at_…`）。由本仓库自己实现的授权服务器签发，只存 `sha256` 摘要；
+  校验时除了存在性与过期，还要求令牌记录里的 `resource` **逐字节等于** `<origin>/mcp`（RFC 8707 受众绑定），并且 scope 必须含 `mcp:tools`。
+  细节与威胁分析见 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) 第 3 节。
+- **次路径：静态 Bearer token**（secret `MCP_ACCESS_TOKEN`），**只为本机 curl / e2e 保留**。
+  真实部署时**不要设置它** —— 那等于多一条长期凭据（G1-K4）。
+- **失败关闭**：两条路径都不可用（既没配 `MCP_ACCESS_TOKEN`、也没启用 OAuth）→ `503`，而不是"没配就放行"。
+- 缺失/错误 → `401` + `WWW-Authenticate: Bearer realm="android-mcp-hub", error="invalid_token"`；
+  **启用 OAuth 时**这个 challenge 里**必须**再带 `resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"`（客户端靠它发现授权服务器），
+  **未启用时仍然不带**。两个方向都有测试（`worker/test/oauth.test.ts` B 组）。
 
 ### 3.3 ★ 两套凭据必须完全分离
 
@@ -170,12 +180,18 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 
 ## 4. 日志纪律
 
-- 所有服务端日志走 `logEvent(level, event, fields)`，输出**单行 JSON**：`{ts, level, event, ...redact(fields)}`。
-- `SENSITIVE_KEY_PATTERN = /token|secret|authorization|password|credential|cookie|apikey/i`，**子串匹配**（所以 `tokenSha256`、`refreshToken`、`client_secret` 都会被命中）。
-- `MAX_DEPTH = 6`，超过就写 `"[depth-limit]"`（防止有人构造深度嵌套对象把日志变成炸弹）。
-- 键名保留、**只换值**——这样日志仍然可读（你知道这里有一个 token 字段），但值永远出不来。
-- **实测证据**：`{deviceId, Authorization, token, tokenSha256, apiKey, nested:{password, ok}}` → `deviceId` 与 `nested.ok` 原样，其余五个全变 `"[redacted]"`。
-- 测试基建：`worker/test/harness/setup.ts` 把 `console.log/warn/error` 收进缓冲区（默认**不打印**），`security.test.ts` 据此断言"任何令牌都不出现在日志里"。要看日志设 `GATE0_VERBOSE=1`。
+> ⚠ **本节在 Gate 0.1 的 R2 修复里被整体替换过**（原稿描述的"键名黑名单 + `redact()`"已经不在了）。
+> 下面是当前实现。设计的出发点是：**黑名单永远会漏**（新加一个 `refreshToken` 字段就得记得再加一条规则），
+> 而**白名单漏了只会少记，不会多记**。
+
+- 所有服务端日志走 `logEvent(level, event, fields)`，输出**单行 JSON**。
+- **四道闸门**（`worker/src/util/log.ts`）：
+  1. **安全字段白名单** `SAFE_FIELDS` —— 键名不在表里的字段**直接丢掉**（不是脱敏，是不记）；
+  2. **只收标量** —— 对象/数组一律写成 `NOT_A_SCALAR = "[not-a-scalar]"`，杜绝深度炸弹；
+  3. **固定错误类别** `ERROR_CATEGORIES` —— `errorCode` 不在闭集里就写 `"unclassified"`，**原始的异常文本永远不落盘**；
+  4. **整行终检** `CREDENTIAL_VALUE_PATTERN` —— 即使前三条都放行，只要整行里出现凭据形状的字符串（`ghp_`/`sk-`/PEM/`Bearer <长串>`/40+ 位 base62），**整行被替换**成 `{"event":"log_withheld","log_withheld":true,"reason":"credential_shaped_string_detected"}`。
+- **代价要说清楚**（这是 K6）：白名单的默认行为是"**默认不记**"。加新日志字段时必须先把它加进 `SAFE_FIELDS`，加新错误码时必须先加进 `ERROR_CATEGORIES`，否则信息会静默消失。这是刻意的取舍 —— 宁可少一条日志，也不要多一条带令牌的日志。
+- 测试基建：`worker/test/harness/setup.ts` 把 `console.log/warn/error` 收进缓冲区（默认**不打印**），`security.test.ts` 与 `oauth.test.ts` 据此断言"任何令牌都不出现在日志里"。要看日志设 `GATE0_VERBOSE=1`。
 
 ---
 
@@ -267,13 +283,14 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 
 ## 8. 安全相关的测试
 
-`worker/test/security.test.ts`（13 个用例，全部通过）把上文的"不许"变成了会失败的测试：令牌形状扫描、隔离扫描、无 D1 形状、日志脱敏（含嵌套）、敏感键模式。
+`worker/test/security.test.ts`（**15** 个用例，全部通过）把上文的"不许"变成了会失败的测试：凭据形状扫描、隔离扫描、无 D1/KV/R2/Queue 形状、**Env 只有三个 DO 绑定**（精确断言集合，新增绑定会立刻变红）、日志不出现明文令牌。
 
-其余章节对应的功能测试：连接代次与旧连接拒绝、超时清理、并发上限、重建后不产生虚假成功 —— 见 `worker/test/phone-session.test.ts`；MCP 鉴权失败关闭、方法/参数拒绝 —— 见 `worker/test/mcp-http.test.ts` 与 `worker/test/tools.test.ts`。
+其余章节对应的功能测试：连接代次与旧连接拒绝、超时清理、并发上限、重建后不产生虚假成功 —— 见 `worker/test/phone-session.test.ts`；MCP 鉴权失败关闭、方法/参数拒绝 —— 见 `worker/test/mcp-http.test.ts` 与 `worker/test/tools.test.ts`；**OAuth 全流程与安全性质（46 条）** —— 见 `worker/test/oauth.test.ts`，逐条对应见 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) 第 8 节。
 
 **明确 NOT RUN 的安全相关项**（原因见 [TEST_REPORT.md](TEST_REPORT.md)）：
 
 - 在**真实 workerd** 上跑任何安全测试 —— 本容器跑不了 workerd。
+- **真实 Cloudflare 上的 OAuth 全流程**（阶段 B 10 项）与 **ChatGPT 官方客户端接入**（阶段 C 6 项）—— 等用户批准部署，见 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md) 第 5、6 节。
 - 在**真机**上验证前台服务、权限、手动断开后不重连 —— 没有真机接入。
 - 任何**速率限制 / 压测 / 对抗性**实验（并发上限的爆炸半径、响应时间侧信道、超大 body）。
 - 跨凭据负向测试（§3.3 末尾说明的那条）。

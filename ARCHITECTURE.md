@@ -1,8 +1,8 @@
-# ARCHITECTURE.md — Android MCP Hub（Gate 0）
+# ARCHITECTURE.md — Android MCP Hub（Gate 0 基线 + Gate 1 的 OAuth 层）
 
 本文说明这套东西**为什么长这样**。凡是"我们选了 X 而不是 Y"的地方，我都把 **why** 写出来 —— 没有理由的架构决策会在下一次评审时被当成迷信。
 
-相关文档：[README.md](README.md) · [SECURITY.md](SECURITY.md) · [docs/PROTOCOL.md](docs/PROTOCOL.md) · [TEST_REPORT.md](TEST_REPORT.md)
+相关文档：[README.md](README.md) · [SECURITY.md](SECURITY.md) · [docs/PROTOCOL.md](docs/PROTOCOL.md) · [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) · [TEST_REPORT.md](TEST_REPORT.md)
 
 ---
 
@@ -10,12 +10,23 @@
 
 ```
 ChatGPT 官方客户端
-   │  HTTPS · MCP Streamable HTTP · POST /mcp
+   │  ① OAuth：GET /.well-known/* → POST /oauth/register → GET+POST /oauth/authorize → POST /oauth/token
+   │  ② HTTPS · MCP Streamable HTTP · POST /mcp（Authorization 头带访问令牌）
    ▼
 ┌──────────────────────── Cloudflare Worker ────────────────────────┐
-│  worker/src/index.ts       路由：/healthz  /  /mcp  /phone/ws      │
+│  worker/src/index.ts       路由：/healthz / /mcp /phone/ws          │
+│                            /.well-known/* /oauth/*                  │
+│  worker/src/oauth/*        OAuth 2.1：发现 / DCR / 同意页 / 令牌    │
 │  worker/src/mcp/http.ts    MCP 协议：鉴权 → 会话 → 方法分发        │
 │  worker/src/mcp/tools.ts   phone_ping 的定义 / 参数校验 / 结果映射 │
+└──────────────────────────────────────────────────────────────────┘
+   │  DO Binding（OAuth 状态，单实例 idFromName("oauth-global")）
+   ▼
+┌──────────────────── Durable Object: OAuthStore ───────────────────┐
+│  worker/src/oauth/store-do.ts                                     │
+│  · 单实例：授权码/刷新令牌"只能用一次"需要原子读—判—写           │
+│  · 只存 sha256 摘要：客户端 / 码 / 访问令牌 / 刷新令牌 / 同意记录  │
+│  · alarm() 定时清理过期的码与令牌；口令失败节流                    │
 └──────────────────────────────────────────────────────────────────┘
    │  DO Binding（平台内部 fetch，带 X-Phone-Session-Device）
    ▼
@@ -38,7 +49,9 @@ ChatGPT 官方客户端
 本地 MCP 应用        ⛔ Gate 0 未接入（本阶段不存在这一跳）
 ```
 
-另一个并行的 Durable Object 是 `McpSession`（`worker/src/mcp/session-do.ts`），它不在这条数据链路上，只负责 ChatGPT 那侧的会话生命周期。
+另外两个不在这条数据链路上的 Durable Object：
+`McpSession`（`worker/src/mcp/session-do.ts`）负责 ChatGPT 那侧的 MCP 会话生命周期；
+`OAuthStore`（`worker/src/oauth/store-do.ts`）负责授权服务器状态。**三个 DO 类，不多不少** —— `worker/test/security.test.ts` 里有精确断言守着这个集合。
 
 ---
 
@@ -223,3 +236,53 @@ worker/src/mcp/tools.ts 的 dispatchToolCall(config, name, rawArgs, callPhonePin
 3. **没有服务端主动通知**。`GET /mcp` 返回 `405 Allow: POST, DELETE` —— 明确关闭 SSE 通道。capabilities 里也**只声明 `tools.listChanged = false`**，不声明 resources / prompts / logging。**声明得少，就不欠**。
 4. **手机端没有工具管理 UI**、不扫描本地应用、不自动启动别的应用、不做跨设备控制 —— 任务书要求"不实现"的，就是没实现。
 5. **workerd 上未验证**（环境限制，见 TEST_REPORT.md）。这是 Gate 0 最大的未验证项。
+
+---
+
+## 7. Gate 1 的 OAuth 层：为什么是第三个 Durable Object
+
+### 7.1 为什么必须有 OAuth（而不是"给自己的 API 加个 Bearer 就行"）
+
+ChatGPT 的「Add custom MCP server」只提供两种认证方式：**OAuth** 与 **No authentication**。
+它**不接受**静态 Bearer、自定义 header、client credentials、service account、JWT bearer。
+任务书又明确禁止"为了省事禁用认证"。两条约束的交集只有一个解：**这个 Worker 自己当授权服务器**。
+
+### 7.2 为什么是 DO，不是 KV，也不是 D1
+
+| 候选 | 为什么不选 |
+| --- | --- |
+| D1 | 任务书明确禁止（且它会引入"另一个数据库绑定"，破坏"只有三个 DO 绑定"的隔离断言） |
+| KV | **最终一致**。"授权码只能用一次""刷新令牌只能用一次"是**原子读—判—写**，KV 的两个边缘节点可能同时读到"还没用过" —— 这就是重放 |
+| **Durable Object（选它）** | 单线程串行执行 + 强一致存储，天然把"读记录 → 判断 → 删除 + 写新记录"变成一个事务 |
+
+具体到这里是**单实例** `idFromName("oauth-global")` —— 本轮刻意单用户，不需要按键分片。
+代价是单点（可接受），收益是"一次性"语义不用自己造锁。
+
+### 7.3 为什么同意页要"先 peek 再验口令最后才消费"
+
+同意页是**唯一的人为闸门**（客户端是公开的，DCR 匿名）。它有三个动作：读记录、验口令、消费记录。
+
+如果按最自然的顺序写（消费 → 验口令），那么运维**输错一次口令**就把整个授权请求作废 —— 用户得回 ChatGPT 从头点一遍。
+这个代价会直接制造"把口令做得更简单一点""干脆加个跳过"的动机，而**削弱闸门比多绕一步危险得多**。
+所以顺序是 `consentGet`（只读）→ `constantTimeEqual(口令)` → `consentConsume`（一次性删除）。
+`worker/test/oauth.test.ts` 里有一条专测这个行为："口令输错一次 401 后，改对仍然能拿到码"。
+
+### 7.4 为什么未启用时回 404 而不是 5xx
+
+官方接入要求里写明：**未实现的发现路由必须回 404**。
+回 5xx 会被 ChatGPT 连接器判定为"基础设施故障"，它既不重试也不回退，结果是**永久失败**。
+所以没有配置 `OAUTH_OWNER_SECRET` 时，整个 OAuth 面（含发现元数据）统一回 404 —— 客户端可以据此走别的路。
+
+### 7.5 为什么结算顺序在 Gate 1 被倒过来
+
+`PhoneSession.settlePending()` 需要做两件事：**结算调用方的 Promise**、**记账**（落盘 / 指标 / alarm）。
+Gate 0.3 把记账降级成 `bestEffort()`（不再抛错），但**不抛错 ≠ 会返回**：存储调用若既不 resolve 也不 reject，调用方就被无限期挂住。
+
+Gate 1 把顺序改成 **先 `entry.settle(...)`，再记账**。代价写在代码注释里：resolve 与落盘之间不再有先后保证，DO 若在落盘前被驱逐，镜像里的超时账可能丢。这是可以接受的 —— 镜像只是"重建时标记遗留请求"的辅助信息，而**挂住调用方不可接受**。
+
+### 7.6 这一层**没有**解决什么
+
+- 没有限流（`/oauth/register` 匿名且客户端记录无上限，见 G1-K1）；
+- 没有持久化审计；
+- 没有多用户/多租户隔离（本轮刻意单用户）；
+- **没有在真实 Cloudflare 上跑过一次**（阶段 B/C BLOCKED，见 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md)）。

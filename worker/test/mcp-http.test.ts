@@ -318,12 +318,15 @@ describe("MCP / tools/call 转发链路", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP / JSON-RPC 错误处理", () => {
-  it("不支持的方法返回 -32601 method not found", async () => {
+  it("不支持的方法返回 404 + -32601 method not found", async () => {
     const rig = await makeRig();
     const sessionId = await initSession(rig);
 
     const response = await postMcp(rig, { jsonrpc: "2.0", id: 7, method: "resources/list", params: {} }, { sessionId });
-    expect(response.status).toBe(200);
+    // ⚠ HTTP 状态必须是 404，不能是 200 —— 即便 JSON-RPC 的 error.code 已经是
+    //    正确的 -32601。新版官方连接器把 "200 + -32601" 理解成"服务器实现了一个
+    //    我们读不懂的方法"，从而**永久失败**；只有 404 才会让它回退到 initialize。
+    expect(response.status).toBe(404);
     const body = await readRpc(response);
     expect(body["id"]).toBe(7);
     const error = body["error"] as Record<string, unknown>;

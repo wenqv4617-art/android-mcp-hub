@@ -11,6 +11,7 @@
 
 import { PhoneSession } from "../../src/phone/phone-session";
 import { McpSession } from "../../src/mcp/session-do";
+import { OAuthStore } from "../../src/oauth/store-do";
 import type { Env } from "../../src/env";
 import { sha256Hex } from "../../src/util/crypto";
 import { resetConfigCache } from "../../src/config";
@@ -31,6 +32,8 @@ export const TEST_DEVICE_ID = "test-phone-1";
 export const TEST_DEVICE_TOKEN = "gate0-local-test-device-token-not-a-secret";
 export const TEST_DEVICE_ID_2 = "test-phone-2";
 export const TEST_DEVICE_TOKEN_2 = "gate0-local-test-device-token-2-not-a-secret";
+/** OAuth 同意页的口令。同样是明显的假值。 */
+export const TEST_OAUTH_OWNER_SECRET = "gate1-local-test-owner-secret-not-a-secret";
 
 /** 与 worker/src/phone/phone-session.ts 里的内部路由保持一致。 */
 export const PHONE_ROUTES = {
@@ -51,20 +54,33 @@ export interface TestRig {
   env: Env;
   phone: ShimDurableObjectNamespace;
   mcp: ShimDurableObjectNamespace;
+  oauth: ShimDurableObjectNamespace;
 }
 
 export interface MakeRigOptions {
   mcpAccessToken?: string | null;
   deviceTokens?: Array<{ deviceId: string; token: string; revokedAt?: string | null; label?: string }> | null;
   vars?: Partial<Record<string, string>>;
+  /**
+   * OAuth 同意页口令。
+   *
+   * ⚠ 默认是 `undefined` = **不启用 OAuth**。这是刻意的：Gate 0 / 0.3 的既有
+   * 断言（例如 `mcp-http.test.ts:102`「未启用时不带 resource_metadata」）
+   * 必须继续在默认配置下成立。要测 OAuth 的用例显式传
+   * `oauthOwnerSecret: TEST_OAUTH_OWNER_SECRET`。
+   */
+  oauthOwnerSecret?: string | null;
+  /** 重定向主机白名单。默认与 wrangler.jsonc 一致（含 localhost，方便本地回环测试）。 */
+  oauthRedirectAllowlist?: string;
 }
 
-/** 组装一个"像生产 env"的对象，但两个 DO 绑定指向 shim。 */
+/** 组装一个"像生产 env"的对象，但三个 DO 绑定都指向 shim。 */
 export async function makeRig(options: MakeRigOptions = {}): Promise<TestRig> {
   resetConfigCache();
 
   const phoneNsHolder: { ns: ShimDurableObjectNamespace | null } = { ns: null };
   const mcpNsHolder: { ns: ShimDurableObjectNamespace | null } = { ns: null };
+  const oauthNsHolder: { ns: ShimDurableObjectNamespace | null } = { ns: null };
 
   const env = {
     get PHONE_SESSION(): ShimDurableObjectNamespace {
@@ -75,10 +91,18 @@ export async function makeRig(options: MakeRigOptions = {}): Promise<TestRig> {
       if (mcpNsHolder.ns === null) throw new Error("MCP_SESSION 用了但还没装配");
       return mcpNsHolder.ns;
     },
+    get OAUTH_STORE(): ShimDurableObjectNamespace {
+      if (oauthNsHolder.ns === null) throw new Error("OAUTH_STORE 用了但还没装配");
+      return oauthNsHolder.ns;
+    },
     ...(options.mcpAccessToken === null
       ? {}
       : { MCP_ACCESS_TOKEN: options.mcpAccessToken ?? TEST_MCP_TOKEN }),
     ...(await deviceTokensJson(options)),
+    OAUTH_REDIRECT_ALLOWLIST: options.oauthRedirectAllowlist ?? "chatgpt.com,localhost",
+    ...(options.oauthOwnerSecret === null || options.oauthOwnerSecret === undefined
+      ? {}
+      : { OAUTH_OWNER_SECRET: options.oauthOwnerSecret }),
     ...(options.vars ?? {}),
   } as unknown as Env;
 
@@ -90,12 +114,17 @@ export async function makeRig(options: MakeRigOptions = {}): Promise<TestRig> {
     (ctx: FakeDurableObjectState, e: unknown) => new McpSession(ctx as never, e as Env),
     env,
   );
+  const oauth = new ShimDurableObjectNamespace(
+    (ctx: FakeDurableObjectState, e: unknown) => new OAuthStore(ctx as never, e as Env),
+    env,
+  );
   phoneNsHolder.ns = phone;
   mcpNsHolder.ns = mcp;
+  oauthNsHolder.ns = oauth;
 
   // getter 每次都返回同一个实例，但 env 对象本身要保持稳定引用
   resetConfigCache();
-  return { env, phone, mcp };
+  return { env, phone, mcp, oauth };
 }
 
 async function deviceTokensJson(options: MakeRigOptions): Promise<Record<string, string>> {

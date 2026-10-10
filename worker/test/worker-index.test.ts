@@ -49,17 +49,21 @@ describe("Worker / 路由", () => {
     expect(body["database"]).toBe("not-used");
     expect(body["d1_bindings"]).toBe(0);
     expect(body["schema_version"]).toBe("gate0-do-v1");
-    expect(body["durable_object_bindings"]).toEqual(["PHONE_SESSION", "MCP_SESSION"]);
+    expect(body["durable_object_bindings"]).toEqual(["PHONE_SESSION", "MCP_SESSION", "OAUTH_STORE"]);
     expect(body["config_problems"]).toEqual([]);
 
     const capabilities = body["capabilities"] as Record<string, unknown>;
     expect(capabilities["tools"]).toEqual(["phone_ping"]);
     expect(capabilities["server_initiated_notifications"]).toBe(false);
+    // 默认 rig 不配置 OAUTH_OWNER_SECRET ⇒ OAuth 面整体不可用（回 404）。
+    expect(capabilities["oauth_authorization_server"]).toBe(false);
+    expect(capabilities["oauth_metadata_endpoint"]).toBeNull();
 
     const auth = body["auth"] as Record<string, unknown>;
     expect(auth["mcp_bearer_configured"]).toBe(true);
     expect(auth["device_credentials_configured"]).toBe(2);
     expect(auth["device_tokens_configured"]).toBe(true);
+    expect(auth["oauth_owner_secret_configured"]).toBe(false);
   });
 
   it("配置有问题时 healthz 变成 degraded 并列出问题（但不崩）", async () => {
