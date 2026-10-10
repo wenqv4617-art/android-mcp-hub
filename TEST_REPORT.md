@@ -924,7 +924,7 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 | 6 | Gate 0.3 遗留 ②：重复 `request_id` 覆盖 pending | `handlePingRequest` 在并发上限检查**之前**加守卫：已在 `pending` 里的同 id 直接 **409 + `duplicate_request_id`**，新增计数器 `pendingRejectedDuplicate` | `phone-session.test.ts` §14 两条 |
 | 7 | Gate 0.3 遗留 ③：DO 重建后遗留 pending | 产品代码**本来就已经正确**（重建时丢弃镜像、累加 `reconstructedPendingFailed`、不产生任何响应）；本轮补上会红的测试 | `phone-session.test.ts` §15 两条 |
 | 8 | 测试替身要能注入"不返回" | `worker/test/harness/runtime.ts` 新增 `hangNext(op, opts)` 与 `neverSettles()`，把 `maybeFail` 重构成 `hit` + `maybeFail` 两级 | 由 §13/§14/§15 六条用例驱动 |
-| 9 | Android 侧保留全部既有保护 | **只改版本号**（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5），行为一行未改；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条一条没删 + 新增 13 条 = **170** + `verifyManifestClasses` + `lintDebug` |
+| 9 | Android 侧保留全部既有保护 | **产品代码只改版本号**（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5），行为一行未改；另外新增了一个**测试类** `LinkBusTest`（§12.10，13 条），不碰产品代码；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条一条没删 + 新增 13 条 = **170** + `verifyManifestClasses` + `lintDebug` |
 
 ### 12.2 OAuth 面：新增了什么、为什么这么设计
 
