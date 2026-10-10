@@ -23,6 +23,7 @@ import {
   TEST_DEVICE_ID_2,
   TEST_DEVICE_TOKEN,
   TEST_MCP_TOKEN,
+  TEST_OAUTH_OWNER_SECRET,
   type TestRig,
 } from "./harness/env";
 
@@ -64,6 +65,28 @@ describe("Worker / 路由", () => {
     expect(auth["device_credentials_configured"]).toBe(2);
     expect(auth["device_tokens_configured"]).toBe(true);
     expect(auth["oauth_owner_secret_configured"]).toBe(false);
+  });
+
+  it("只配置 OAuth、不配置 MCP_ACCESS_TOKEN 时 healthz 仍然是 ok（Gate 1 的推荐配置）", async () => {
+    // 这条防的是"配置对了却被自己的健康检查报成 degraded"：
+    // 只配 OAuth 是 Gate 1 真实部署的**推荐做法**，/mcp 有可用的认证路径，不该报问题。
+    const rig = await makeRig({ mcpAccessToken: null, oauthOwnerSecret: TEST_OAUTH_OWNER_SECRET });
+    const body = (await (await get(rig, "/healthz")).json()) as Record<string, unknown>;
+    expect(body["status"]).toBe("ok");
+    expect(body["config_problems"]).toEqual([]);
+    const auth = body["auth"] as Record<string, unknown>;
+    expect(auth["mcp_bearer_configured"]).toBe(false);
+    expect(auth["oauth_owner_secret_configured"]).toBe(true);
+    const capabilities = body["capabilities"] as Record<string, unknown>;
+    expect(capabilities["oauth_authorization_server"]).toBe(true);
+  });
+
+  it("两条认证路径都没有配置时，healthz 明确说 /mcp 会 503", async () => {
+    const rig = await makeRig({ mcpAccessToken: null });
+    const body = (await (await get(rig, "/healthz")).json()) as Record<string, unknown>;
+    expect(body["status"]).toBe("degraded");
+    const problems = body["config_problems"] as string[];
+    expect(problems.some((p) => p.includes("MCP_ACCESS_TOKEN 与 OAUTH_OWNER_SECRET 都没有配置") && p.includes("503"))).toBe(true);
   });
 
   it("配置有问题时 healthz 变成 degraded 并列出问题（但不崩）", async () => {

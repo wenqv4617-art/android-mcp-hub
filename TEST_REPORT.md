@@ -14,7 +14,7 @@
 
 | 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | Gate 1（本轮） | 结果 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **198（8 个文件）** | ✅ 全过 |
+| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **200（8 个文件）** | ✅ 全过 |
 | Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
 | 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
 | Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
@@ -29,7 +29,7 @@
 | ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN（OAuth 已就绪，但没连过）** | §7 / §12.4 |
 | 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ **仍未执行，等用户批准** | §12.4 |
 
-**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→198）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
+**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→200）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
 
 ### 0.1 Gate 0.1 审计问题 → 修复 → 对应测试
 
@@ -758,7 +758,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | 类别 | 通过 | 失败 | 跳过 | NOT RUN |
 | --- | --- | --- | --- | --- |
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
-| Worker/DO 单元测试 | **198** | 0 | 0 | 6（workerd 相关，§5） |
+| Worker/DO 单元测试 | **200** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
 | Android JVM 单测 | **157** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
@@ -768,7 +768,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11.2） |
 | 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
 | ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
-| **合计（已执行）** | **380** | **0** | **0** | **45+** |
+| **合计（已执行）** | **382** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -999,3 +999,39 @@ Gate 0.3 的 `Android-MCP-Hub-Gate0.3-debug.apk` 已在本轮删除，避免"该
 ### 12.7 Gate 1 的已知问题
 
 见 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) 第 6 节：**G1-K1** 客户端注册记录无上限（DCR 匿名、`client:` 前缀没有过期时间，`alarm()` 也不清理它）；**G1-K2** 同意页口令节流是全局单计数器，可被用来锁死运维；**G1-K3** `OAUTH_OWNER_SECRET` 是共享秘密、不是多因素；**G1-K4** 静态 `MCP_ACCESS_TOKEN` 路径仍然保留（真实部署时不要设置）；**G1-K5** 鉴权结果绝不能被边缘缓存；**G1-K6** 过期清理依赖 DO 被唤醒（只影响容量，不影响安全）。
+
+### 12.8 部署前检查里发现并修掉的一处**假警报**（Gate 1 自己引入的）
+
+`worker/src/config.ts` 在老版本里无条件推一条问题：
+
+```
+MCP_ACCESS_TOKEN: 未配置 —— /mcp 会以 503 拒绝所有请求（失败关闭）
+```
+
+Gate 0 只有一条认证路径时这是对的。Gate 1 给 `/mcp` 加了第二条路径（OAuth）之后，**这条就成了假警报**：
+只配 OAuth、不配静态 `MCP_ACCESS_TOKEN` 恰好是 Gate 1 真实部署的**推荐配置**，但 `/healthz` 会一直报 `degraded`，
+部署的人看到"会 503"会以为自己配错了。
+
+修法是让这条问题只在**两条路径都没有**时出现，文案也改成
+`MCP_ACCESS_TOKEN 与 OAUTH_OWNER_SECRET 都没有配置 —— /mcp 没有可用的认证路径，会以 503 拒绝所有请求（失败关闭）`，
+并新增两条测试把这个判断的正反两个方向都钉住（`worker/test/worker-index.test.ts`：只配 OAuth → `status: ok` 且 `config_problems` 为空；两条都没配 → `degraded` 且问题文案里同时出现"都没有配置"和"503"）。
+
+**这条不是从审计清单里来的，是"部署前检查"这个动作自己逼出来的** —— 因为检查的第一步就是"按文档把凭据配好，然后看 `/healthz` 怎么说"，而那一步真的按文档配了一遍。
+
+### 12.9 部署前检查的另外两项实测证据
+
+| 检查 | 命令 | 结果 | 日志 |
+| --- | --- | --- | --- |
+| 部署配置能打包（不上传、不建资源） | `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run` | `Total Upload: 120.35 KiB / gzip: 31.40 KiB`；三个 DO binding 全部解析到真实导出类；`DRYRUN_EXIT=0` | [test-reports/wrangler-dryrun.log](test-reports/wrangler-dryrun.log) |
+| 凭据生成步骤自检 | `printf '%s' "$TOKEN" \| npm run check:credential -- --device-id my-android-phone` | 与 `sha256sum` 逐字节一致；`loadConfig` 接受该 `DEVICE_TOKENS` 形状（1 条生效凭据、`deviceId` 解析成功）；明文令牌填进 `tokenSha256` 被明确拒绝 | [test-reports/credential-check.log](test-reports/credential-check.log) |
+
+`tools/check-device-credential.ts` 是本轮新增的**只读**脚本：令牌只从 stdin 读（不进 shell history、不进 `ps`），
+输出只有摘要，且会用两条独立实现互检一次。它存在的直接理由是一个很常见的坑 ——
+
+```
+printf '%s' "$DEVICE_TOKEN" | sha256sum   → a51f0ee…9de42c   ← 与 Worker 一致
+echo        "$DEVICE_TOKEN" | sha256sum   → cd38083…0d737   ← 多了一个换行符，手机永远连不上
+```
+
+两条输出都记在上面那份日志里。这个坑的症状是"连接被拒，日志里只有 `token_mismatch`"，
+排查成本很高，所以值得做成一条命令。

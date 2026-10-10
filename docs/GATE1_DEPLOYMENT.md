@@ -71,7 +71,7 @@
 
 | # | 检查项 | 结论 | 证据 |
 |---|---|---|---|
-| 1 | Wrangler 配置 | ✅ 无 `account_id` / `route` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `queues`；`main` 与三个 DO 类一致 | `worker/wrangler.jsonc`；`worker/test/security.test.ts` 的隔离类用例 |
+| 1 | Wrangler 配置 | ✅ 无 `account_id` / `route` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `queues`；`main` 与三个 DO 类一致。**并且真的打包成功过一次**：`wrangler deploy --dry-run` → `Total Upload: 120.35 KiB / gzip: 31.40 KiB`，三个 DO binding 全部解析到真实导出类，`DRYRUN_EXIT=0`（`--dry-run` **不上传、不创建任何资源**） | `worker/wrangler.jsonc`；`worker/test/security.test.ts` 的隔离类用例；[test-reports/wrangler-dryrun.log](../test-reports/wrangler-dryrun.log) |
 | 2 | Durable Object 绑定与迁移 | ✅ 三个 binding（`PHONE_SESSION` / `MCP_SESSION` / `OAUTH_STORE`）；迁移 `v1` + 追加 `v2`，都是 `new_sqlite_classes` | 同上；`worker/test/worker-index.test.ts` 断言 `/healthz` 返回三个绑定 |
 | 3 | Worker 路由 | ✅ 只有 `/healthz`、`/`、`/mcp`、`/phone/ws` 与 OAuth 精确路径集合；**无前缀通配**，无公开调试接口以外的暴露面 | `worker/src/index.ts`；`worker/test/worker-index.test.ts` |
 | 4 | 环境变量与 Secrets | ✅ 敏感值**全部**走 secret，`vars` 里只有非敏感数字/清单；新增 env 字段已加入配置缓存键 | `worker/src/config.ts` 的 `cacheKey`；`worker/test/security.test.ts` 的凭据类用例 |
@@ -94,7 +94,20 @@
 DEVICE_TOKEN="$(openssl rand -base64 32 | tr -d '\n')"
 echo "设备令牌（填进手机 App）：$DEVICE_TOKEN"
 
-# 2) 算出它给 Worker 用的 sha256 摘要（Worker 只存摘要，不存明文）
+# 2) 让**和 Worker 完全同一份代码**把摘要算出来，并生成可以直接粘贴的那条记录
+printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone
+```
+
+第 2 步会打印一条 `DEVICE_TOKENS` 记录（**只有摘要，不回显令牌**），并做一次两条独立实现的一致性自检。
+实测输出与证据见 [test-reports/credential-check.log](../test-reports/credential-check.log)。
+
+> ⚠️ **一定要用 `printf '%s'`，不要用 `echo`。** `echo` 会在末尾多送一个换行符，于是算出来的摘要
+> 和 Worker 算的**不一样** —— 症状是"手机怎么都连不上，而日志里只看到 `token_mismatch`"。
+> 实测：同一条令牌，`printf '%s'` 得 `a51f0ee…9de42c`，`echo` 得 `cd38083…0d737`（见上面那份日志）。
+
+如果确实要手算，正确写法是：
+
+```bash
 printf '%s' "$DEVICE_TOKEN" | sha256sum | awk '{print $1}'
 ```
 

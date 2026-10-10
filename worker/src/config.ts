@@ -250,8 +250,12 @@ export function loadConfig(env: Env): AppConfig {
   problems.push(...creds.problems);
 
   const hasMcpAccessToken = (env.MCP_ACCESS_TOKEN ?? "").trim() !== "";
-  if (!hasMcpAccessToken) {
-    problems.push("MCP_ACCESS_TOKEN: 未配置 —— /mcp 会以 503 拒绝所有请求（失败关闭）");
+  // Gate 1：/mcp 现在有两条认证路径（静态 Bearer 与 OAuth）。
+  // 只有**两条都没有**时才是"谁都进不来"；只配了 OAuth 是 Gate 1 的**推荐配置**，不该报问题
+  // —— 否则部署时 /healthz 会一直挂着一条"会 503"的假警报。
+  const oauthEnabled = (env.OAUTH_OWNER_SECRET ?? "").trim() !== "";
+  if (!hasMcpAccessToken && !oauthEnabled) {
+    problems.push("MCP_ACCESS_TOKEN 与 OAUTH_OWNER_SECRET 都没有配置 —— /mcp 没有可用的认证路径，会以 503 拒绝所有请求（失败关闭）");
   }
 
   const config: AppConfig = {
@@ -264,7 +268,7 @@ export function loadConfig(env: Env): AppConfig {
       defaultDeviceId: env.DEFAULT_DEVICE_ID?.trim() || null,
     },
     oauth: {
-      enabled: (env.OAUTH_OWNER_SECRET ?? "").trim() !== "",
+      enabled: oauthEnabled,
       scope: (env.OAUTH_SCOPE ?? "").trim() || DEFAULT_OAUTH_SCOPE,
       accessTokenTtlMs: parseBoundedInt(env.OAUTH_ACCESS_TOKEN_TTL_MS, DEFAULTS.oauthAccessTokenTtlMs, CLAMPS.oauthAccessTokenTtlMs, "OAUTH_ACCESS_TOKEN_TTL_MS", problems),
       refreshTokenTtlMs: parseBoundedInt(env.OAUTH_REFRESH_TOKEN_TTL_MS, DEFAULTS.oauthRefreshTokenTtlMs, CLAMPS.oauthRefreshTokenTtlMs, "OAUTH_REFRESH_TOKEN_TTL_MS", problems),

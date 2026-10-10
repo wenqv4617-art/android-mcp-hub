@@ -1,0 +1,20 @@
+=== Gate 1 部署前检查：wrangler deploy --dry-run（本地打包 + 绑定校验，不上传、不创建任何资源）===
+$ npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run
+
+ ⛅️ wrangler 4.149.0
+────────────────────
+Total Upload: 120.50 KiB / gzip: 31.45 KiB
+Your Worker has access to the following bindings:
+Binding                                                                       Resource                  
+env.PHONE_SESSION (PhoneSession)                                              Durable Object            
+env.MCP_SESSION (McpSession)                                                  Durable Object            
+env.OAUTH_STORE (OAuthStore)                                                  Durable Object            
+env.PHONE_PING_TIMEOUT_MS ("10000")                                           Environment Variable      
+env.HEARTBEAT_INTERVAL_MS ("30000")                                           Environment Variable      
+env.MAX_PENDING_REQUESTS ("16")                                               Environment Variable      
+env.MAX_PHONE_MESSAGE_BYTES ("65536")                                         Environment Variable      
+env.SUPPORTED_MCP_PROTOCOL_VERSIONS ("2025-06-18,2025-03-26,2024-11-05")      Environment Variable      
+env.OAUTH_REDIRECT_ALLOWLIST ("chatgpt.com,localhost")                        Environment Variable      
+
+--dry-run: exiting now.
+DRYRUN_EXIT=0

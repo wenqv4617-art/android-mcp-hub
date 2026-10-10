@@ -85,10 +85,11 @@ android-mcp-hub/
 │       │   ├── session-do.ts      McpSession DO（会话生命周期）
 │       │   └── tools.ts           phone_ping 的定义、参数校验、结果映射
 │       └── util/                  ids / crypto / http / log（白名单式安全日志）
-├── worker/test/                   198 个自动化测试 + Workers 运行时 shim
+├── worker/test/                   200 个自动化测试 + Workers 运行时 shim
 │   ├── harness/                   Node 端 Workers 运行时替身（含故障注入，见 TEST_REPORT.md）
 │   └── *.test.ts                  8 个测试文件
 ├── tools/mock-phone/              模拟手机 WebSocket 客户端（可命令行、可被引用）
+├── tools/check-device-credential.ts  部署前检查：设备令牌 → DEVICE_TOKENS 记录（令牌只走 stdin）
 ├── e2e/run-local-e2e.ts           端到端：真 HTTP + 真 WebSocket + 官方 MCP SDK
 ├── android/                       Kotlin + Compose + OkHttp 手机端 App
 │   ├── README-ANDROID.md          前台服务类型选择理由、人工验证清单
@@ -126,8 +127,18 @@ npm run gate0        # = typecheck && test && e2e
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm run test         # 198 个用例（8 个测试文件）
+npm run test         # 200 个用例（8 个测试文件）
 npm run e2e          # 21 项端到端检查（真 HTTP + 真 WebSocket + 官方 MCP SDK）
+```
+
+部署前还想自查两件事（都**不上传、不创建任何云端资源**）：
+
+```bash
+# 1) 部署配置能不能打包（三个 DO 绑定都会在这里被解析一遍）
+npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run
+
+# 2) 设备令牌 → DEVICE_TOKENS 记录（令牌只从 stdin 读，输出只有摘要）
+printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone
 ```
 
 ### 4.2 手动起一个"手机"和一个网关

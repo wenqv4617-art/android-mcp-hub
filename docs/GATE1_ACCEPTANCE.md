@@ -39,20 +39,22 @@
 
 ---
 
-## 3. 阶段 A —— 本地自动化测试（**已执行**）
+## 3. 阶段 A —— 本地自动化测试与部署前检查（**已执行**）
 
 | # | 项目 | 命令 | 结果 | 证据文件 |
 | --- | --- | --- | --- | --- |
 | A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
-| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 198 passed (198)` | `test-reports/vitest.log` |
+| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 200 passed (200)` | `test-reports/vitest.log` |
 | A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
 | A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=157 failures=0 errors=0 skipped=0`（13 个测试类） | `test-reports/android-build.log` |
 | A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
 | A6 | Android Lint 门禁（`abortOnError = true`） | `./gradlew --no-daemon :app:lintDebug` | **PASS** — `0 errors / 29 warnings`；注入故障时 `BUILD FAILED`（证明门禁真的会红） | `test-reports/lint-gate.log` |
 | A7 | Debug APK 构建 | `./gradlew --no-daemon clean :app:assembleDebug` | **PASS**（`ASSEMBLE_EXIT=0`，两次重建 `REPRODUCIBLE=YES`） | `test-reports/android-build.log` |
 | A8 | APK 内不含凭据形状字符串 | 解包 + `grep` 10 个模式 | **PASS** — 全部 `命中文件数=0` | `test-reports/android-build.log` §8 |
+| A9 | **部署配置能打包**（`--dry-run`，不上传、不创建资源） | `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run` | **PASS** — `Total Upload: 120.35 KiB / gzip: 31.40 KiB`，三个 DO binding 全部解析到真实导出类，`DRYRUN_EXIT=0` | `test-reports/wrangler-dryrun.log` |
+| A10 | **凭据生成步骤自检**（第 4.1 节的命令真的产出 Worker 认的摘要） | `printf '%s' "$TOKEN" \| npm run check:credential -- --device-id my-android-phone` | **PASS** — 与 `sha256sum` 逐字节一致；`loadConfig` 接受该 `DEVICE_TOKENS` 形状（1 条生效凭据、`deviceId` 解析成功）；把明文令牌填进 `tokenSha256` 会被明确拒绝 | `test-reports/credential-check.log` |
 
-### A2 明细（`worker/test/` 8 个文件，198 条）
+### A2 明细（`worker/test/` 8 个文件，200 条）
 
 | 文件 | 条数 | 覆盖 |
 | --- | --- | --- |
@@ -60,12 +62,12 @@
 | `worker/test/phone-session.test.ts` | 46 | DO 状态机、超时、断线、重建、**发现项 A/B/C 的故障注入** |
 | `worker/test/mcp-http.test.ts` | 31 | `/mcp` 传输层、鉴权、会话、方法派发 |
 | `worker/test/tools.test.ts` | 19 | `phone_ping` 参数校验与结果形状 |
-| `worker/test/worker-index.test.ts` | 18 | 路由、`/healthz` 契约 |
+| `worker/test/worker-index.test.ts` | 20 | 路由、`/healthz` 契约、OAuth 开启/关闭时的认证路径自检 |
 | `worker/test/security.test.ts` | 15 | 仓库凭据扫描、隔离性、DO 绑定数 |
 | `worker/test/logging.test.ts` | 12 | 日志白名单 / 错误类别 / 凭据形状终检 |
 | `worker/test/mcp-session.test.ts` | 11 | `McpSession` 生命周期与 TTL |
 
-> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+19+18+15+12+11 = **198**，与 vitest 自报的 `198 passed` 逐条吻合。
+> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+20+19+15+12+11 = **200**，与 vitest 自报的 `200 passed` 逐条吻合。
 
 ### A4 明细（Android 13 个类，157 条）
 
@@ -136,10 +138,10 @@
 
 | 阶段 | PASS | FAIL | NOT RUN | BLOCKED | 合计 |
 | --- | --- | --- | --- | --- | --- |
-| A 本地自动化 | **8** | 0 | 5 | 0 | 13 |
+| A 本地自动化（含 A9/A10 两项部署前检查） | **10** | 0 | 5 | 0 | 15 |
 | B 真实 Cloudflare 联调 | 0 | 0 | 0 | **10** | 10 |
 | C ChatGPT 官方验收 | 0 | 0 | 0 | **6** | 6 |
-| **合计** | **8** | **0** | **5** | **16** | **29** |
+| **合计** | **10** | **0** | **5** | **16** | **31** |
 
 ---
 
