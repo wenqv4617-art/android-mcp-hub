@@ -401,12 +401,13 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - `PhoneLinkClientTest`：用 **MockWebServer** 在 JVM 上跑**真实 WebSocket 链路**，验证请求头、hello、pong 的回包、401 认证失败、地址无效与令牌为空时的拒绝连接；另有 3 条覆盖 R4：令牌从未配置 / 令牌解不开时**拒绝建连且服务端收不到任何请求**，以及"每次建连都重新读凭据"。
 - `ConnectGateTest`（21 条，R3）：失败类别闭集与"只按类名分类"、每个类别都有中文文案、`Started→建连` / `Failed→终止`、**前台失败时 `startLink` 一次都没被调用**、调用顺序不可交换、终止路径不安排重连、错误要活过 `resetLink()`。
 - `DeviceTokenStoreTest`（18 条，R4）：三态区分、落盘的是密文且明文片段不出现、畸形密文/解密失败/非 UTF-8/空白各自归到固定类别、加密或落盘失败返回 `Failed` 且**什么都不写**、编码器对任意输入只返回 `null` 不抛异常（含 500 次随机字符串 fuzz）。
+- `LinkBusTest`（**13 条，Gate 1**）：验收标准里"手机端能显示 Ping 记录"读的就是 `LinkBus`。覆盖 `publishPing` 的写入/覆盖/清空、重复 ping（`frame == null`）也照样刷新展示、收到 Ping 不改连接状态、`publishServiceRunning` 与 `resetLink()` 的分工、`Reconnecting`/`Idle` 不清 `lastError`、日志写入同步到 `logs` 流（级别、最新在前）、写 250 条后流上恰好 200 条且丢最老的、`clear()` 立刻变空。**它测的是状态总线自己的规则，不是真机上界面把字画出来了**（Compose 渲染与 `HubViewModel` 订阅仍需真机验证，见 §8）。
 - `ManifestComponentTest`（**2 条，Gate 0.2**）：Manifest 里每个组件类都能在**本次编译产物**里找到；每个 `.kt` 的 `package` 声明与所在目录一致。这两条就是 Gate 0.1 闪退的防回归 —— 故意把错误包名打回去时它们会红（`../TEST_REPORT.md` §6.6.5 有实测输出）。
 - `PhoneLinkProtocolTest` 里的 `APP_VERSION 与 Gradle 的 versionName 必须一致`（**Gate 0.2 新增的 1 条**）：版本号也是"一个事实两处记录"（`gradle/libs.versions.toml` 的 `appVersionName` 与 `PhoneLinkProtocol.kt:10` 的 `APP_VERSION`），它们平时互不校验。
 - `SocketFailureTest`（**9 条，Gate 0.3**）：`SocketFailure` 的类别闭集恰好 10 个且值形状固定、常见异常类名映射到预期类别、9 种垃圾输入（含完整 URL、令牌形状的串）**一律落在闭集里且不原样返回**、每个类别都有非空且两两不同的中文描述、`normalize()` 只放行闭集、500 次随机 fuzz 不抛。
 - `LogRedactionTest`（**13 条，Gate 0.3**）：9 条**行为**测试（把带假令牌的地址真的喂进 `PhoneLink`，断言日志里只有主机名、令牌的**每 8 字符片段**都不出现、异常原文只变成固定类别、错误帧的 `message` 与未知帧的 `type` 都不记）+ 4 条**静态扫描**（源码里没有 `printStackTrace`/`stackTraceToString`；没有 `<异常变量>.message` 拼字符串；日志调用窗口里不出现 `${config.serverUrl}`/`${url}`/`${frame.*}`/`${raw}`；所有 `SocketFailure.classify(` 都只传 `javaClass.simpleName`）。
 
-合计 **157** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135）。
+合计 **170** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >

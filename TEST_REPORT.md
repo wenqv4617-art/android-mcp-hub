@@ -18,7 +18,7 @@
 | Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
 | 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
 | Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
-| Android JVM 单测 | 90 | 132（10 个类） | 135（11 个类） | 157（13 个类） | **157**（13 个类，未新增） | ✅ 全过 |
+| Android JVM 单测 | 90 | 132（10 个类） | 135（11 个类） | 157（13 个类） | **170**（14 个类，+13） | ✅ 全过 |
 | Android Lint（阻塞式门禁） | — | — | ❌ **被 `abortOnError = false` 静音** | ✅ **会红** | ✅ 保留，未回退 | ✅ 见 **§6.7** |
 | Manifest 组件类名 ↔ 真实 APK 的 dex | — | ❌ **漏了 —— Gate 0.1 启动即闪退** | ✅ **新增（两层检查）** | ✅ 保留，未回退 | ✅ 保留，未回退 | ✅ 见 **§6.6** |
 | Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 不变 | ✅ 不变 | ✅ 不变 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
@@ -381,7 +381,7 @@ VERIFY_EXIT=0
 
 证据：`test-reports/android-build.log`（含上面三段全部输出）。APK 的校验值、大小与元信息见 §11。Gate 0.2 新增的这层检查为什么必须存在，见 **§6.6**。
 
-### 6.2 JVM 单元测试：157/157 通过（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135）
+### 6.2 JVM 单元测试：170/170 通过（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）
 
 | 测试类 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | 结果 |
 | --- | --- | --- | --- | --- | --- |
@@ -398,7 +398,8 @@ VERIFY_EXIT=0
 | `protocol.PhoneLinkTest` | 35 | 35 | 35 | 35 | ✅ |
 | `protocol.PingResponderTest` | 9 | 9 | 9 | 9 | ✅ |
 | `service.ConnectGateTest` | — | 21 | 21 | 21 | ✅ 新增（R3） |
-| **合计** | **90** | **132** | **135** | **157**（13 个类） | ✅ **0 失败 / 0 错误 / 0 跳过** |
+| `service.LinkBusTest` | — | — | — | — | **13** | ✅ 新增（Gate 1，见 §12.10） |
+| **合计** | **90** | **132** | **135** | **157**（13 个类） | **170**（14 个类） | ✅ **0 失败 / 0 错误 / 0 跳过** |
 
 数字来自解析 `android/app/build/test-results/testDebugUnitTest/*.xml`（`tests` / `failures` / `errors` / `skipped` 四个属性求和），不是从控制台肉眼数的。
 
@@ -418,6 +419,7 @@ VERIFY_EXIT=0
 | --- | --- |
 | `ConnectGate`（R3） | 异常**只按类名**归类且结果落在闭集；前台失败时 `startLink` 的调用次数 **== 0**；每个失败类别走同一条终止路径；副作用序列恰好是 `["abort:…"]`（**证明没有安排重连**）；调用顺序 `["foreground","start"]` 不可交换 |
 | `DeviceTokenStore`（R4） | 落盘的字符串里**不含明文令牌及任何可读片段**；10 种畸形密文全部 `Unreadable(MALFORMED_BLOB)`；解密失败 → `DECRYPT_FAILED`；非法 UTF-8 → `BAD_ENCODING`；加密失败 → `Failed` 且**什么都不写**；所有 `Unreadable.reason` 都在闭集内；500 次随机 fuzz 不抛 |
+| `LinkBus`（Gate 1，§12.10） | 验收标准里"界面显示 Ping 记录"读的就是它：`publishPing` 写入/覆盖/清空、重复 ping（`frame == null`）也刷新展示、收到 Ping 不改连接状态、`Reconnecting`/`Idle` 不清 `lastError`、日志流 200 条上限 |
 | `PhoneLinkClient`（R4） | `Absent` / `Unreadable` / `Present` 但空白 三种情况**都拒绝建连**，并且断言 `server.requestCount == 0`（MockWebServer 真的一个请求都没收到）；"中途读不出来就不再发起新连接" |
 
 **没有覆盖（这是关键）**：`AndroidSecretCipher` 的 **Keystore 代码路径**、`PrefsSecretStorage` 的 `commit()` 真实落盘、明文迁移的真实行为 —— **JVM 单测跑不到 Android Keystore，本工程也没有引 Robolectric**。被单测覆盖的是它们**周围**的纯逻辑（三态区分、编解码、失败不吞）。这几条在 `android/README-ANDROID.md` §8 的真机清单里（第 14/14b/14c/14e 条），**一律标 NOT RUN**。
@@ -760,7 +762,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
 | Worker/DO 单元测试 | **200** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
-| Android JVM 单测 | **157** | 0 | 0 | 0 |
+| Android JVM 单测 | **170** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
 | Android Lint 门禁（Gate 0.3 新增，实测会红 + 放行） | **2（注入故障 / 恢复）** | 0 | 0 | 0 |
 | Android 真机行为 | 0 | 0 | 0 | 7（§6.4）+ 9（§6.5） |
@@ -768,7 +770,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11.2） |
 | 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
 | ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
-| **合计（已执行）** | **382** | **0** | **0** | **45+** |
+| **合计（已执行）** | **395** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -825,7 +827,7 @@ $ git log --oneline
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest        # 157/157
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest        # 170/170
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:lintDebug                # Gate 0.3：0 errors
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses    # Manifest 类名 ↔ dex
 ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug
@@ -922,7 +924,7 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 | 6 | Gate 0.3 遗留 ②：重复 `request_id` 覆盖 pending | `handlePingRequest` 在并发上限检查**之前**加守卫：已在 `pending` 里的同 id 直接 **409 + `duplicate_request_id`**，新增计数器 `pendingRejectedDuplicate` | `phone-session.test.ts` §14 两条 |
 | 7 | Gate 0.3 遗留 ③：DO 重建后遗留 pending | 产品代码**本来就已经正确**（重建时丢弃镜像、累加 `reconstructedPendingFailed`、不产生任何响应）；本轮补上会红的测试 | `phone-session.test.ts` §15 两条 |
 | 8 | 测试替身要能注入"不返回" | `worker/test/harness/runtime.ts` 新增 `hangNext(op, opts)` 与 `neverSettles()`，把 `maybeFail` 重构成 `hit` + `maybeFail` 两级 | 由 §13/§14/§15 六条用例驱动 |
-| 9 | Android 侧保留全部既有保护 | **只改版本号**（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5），行为一行未改；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条不变 + `verifyManifestClasses` + `lintDebug` |
+| 9 | Android 侧保留全部既有保护 | **只改版本号**（`0.1.3-gate0.3`/4 → `0.1.4-gate1`/5），行为一行未改；Keystore 凭据保护、主动连接/断开、前台服务、自动重连、状态显示、最近一次 Ping 记录、日志脱敏、Manifest 类名校验、Lint 门禁全部保留 | Android 单测 157 条一条没删 + 新增 13 条 = **170** + `verifyManifestClasses` + `lintDebug` |
 
 ### 12.2 OAuth 面：新增了什么、为什么这么设计
 
@@ -1038,3 +1040,36 @@ echo        "$DEVICE_TOKEN" | sha256sum   → cd38083…0d737   ← 多了一个
 
 两条输出都记在上面那份日志里。这个坑的症状是"连接被拒，日志里只有 `token_mismatch`"，
 排查成本很高，所以值得做成一条命令。
+
+---
+
+### 12.10 给「服务 → 界面」这条粘合链路补了 13 条单测（`LinkBusTest`）
+
+**为什么现在补**：Gate 1 的唯一验收标准里有一条是"手机端能显示对应 Ping 记录"，而界面拿到的每一个值都要经过
+`android/app/src/main/java/com/androidmcphub/app/service/PhoneLinkService.kt:44` 的 `LinkBus`。
+在此之前它是**零自动化覆盖**的粘合代码（正是 §6.3 点名的那个缺口）。阶段 B/C 在等用户批准，
+但这件事不需要部署、不需要真机，所以先做掉。
+
+`LinkBus` 是这条链路里唯一纯 Kotlin 的部分（只依赖 `MutableStateFlow` / `StateFlow`，无 Android 类型），
+所以能在 JVM 单测里直接跑。`PhoneLinkService` / `HubViewModel` / `HubScreen` 都依赖 Android framework，
+**本工程没有引 Robolectric，这三处仍然没有测**。
+
+| 断言要点 | 为什么这条重要 |
+| --- | --- |
+| `publishPing(outcome)` → `lastPing` 的 `requestId` / `rttMs` / `oneWayMs` / `duplicate` 都对 | 这就是"界面显示 Ping 记录"读的那个值 |
+| 第二次 Ping 覆盖第一次 | 界面显示的是**最近一次**，不是第一次 |
+| `frame == null` 的重复 ping **也照样刷新展示** | 去重只决定回不回 pong，不决定要不要显示（与 `PhoneLink` 的 R2 设计一致） |
+| `publishPing(null)` 清空 | 断开后界面不该继续显示上一次的 RTT |
+| 收到 Ping **不改动**连接状态 | 两件事解耦，互不覆盖 |
+| `publishServiceRunning(true/false)`；`resetLink()` **不清**它 | `resetLink()` 只负责"连接相关"的展示状态，分工明确 |
+| `Connected` / `Reconnecting` / `Idle` 都不清 `lastError` | R3：用户重连时仍看得见上次为什么失败。（`ConnectGateTest` 只覆盖了 `Error` / `AuthFailed` / `Connected`，这里补上另外两个状态） |
+| `log.info/warn/error` → `logs` 流的级别与顺序（最新在前） | 界面日志栏 |
+| 写 250 条后 `logs` 流恰好 200 条，丢掉的是最老的（首条 `第250条`、末条 `第51条`） | 环形上限在**流**上也成立，不只是内部缓冲 |
+| `log.clear()` → `logs` 立刻变空 | 界面「清空日志」按钮 |
+
+实测：`ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest`
+→ `BUILD SUCCESSFUL`，`TOTAL tests=170 failures=0 errors=0 skipped=0`（14 个类）。
+
+**边界（不要读多）**：它证明的是**状态总线自己的规则**，不是真机上界面真的把字画出来了 ——
+Compose 的渲染、`HubViewModel` 的订阅、`PhoneLinkService` 往总线上写的**时机**，仍然全部 NOT RUN（§6.4）。
+所以 §6.4 里"收到 ping 并返回 pong（真机）"那一行**照旧是 NOT RUN**，只是它背后的"值传对了没有"这一层不再是空白。

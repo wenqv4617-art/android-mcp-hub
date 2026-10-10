@@ -46,7 +46,7 @@
 | A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
 | A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 200 passed (200)` | `test-reports/vitest.log` |
 | A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
-| A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=157 failures=0 errors=0 skipped=0`（13 个测试类） | `test-reports/android-build.log` |
+| A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=170 failures=0 errors=0 skipped=0`（14 个测试类） | `test-reports/android-build.log` |
 | A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
 | A6 | Android Lint 门禁（`abortOnError = true`） | `./gradlew --no-daemon :app:lintDebug` | **PASS** — `0 errors / 29 warnings`；注入故障时 `BUILD FAILED`（证明门禁真的会红） | `test-reports/lint-gate.log` |
 | A7 | Debug APK 构建 | `./gradlew --no-daemon clean :app:assembleDebug` | **PASS**（`ASSEMBLE_EXIT=0`，两次重建 `REPRODUCIBLE=YES`） | `test-reports/android-build.log` |
@@ -69,7 +69,7 @@
 
 > 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+20+19+15+12+11 = **200**，与 vitest 自报的 `200 passed` 逐条吻合。
 
-### A4 明细（Android 13 个类，157 条）
+### A4 明细（Android 14 个类，170 条）
 
 `PhoneLinkTest` 35 / `ConnectGateTest` 21 / `DeviceTokenStoreTest` 18 / `PhoneLinkProtocolTest` 15 / `LogRedactionTest` 13 / `BackoffTest` 9 / `PingResponderTest` 9 / `SocketFailureTest` 9 / `WsUrlTest` 8 / `HubConfigTest` 7 / `PhoneLinkClientTest` 7 / `HubLogTest` 4 / `ManifestComponentTest` 2
 
