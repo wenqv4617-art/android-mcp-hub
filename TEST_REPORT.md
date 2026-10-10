@@ -986,7 +986,7 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 | applicationId | `com.androidmcphub.app`（debug 变体后缀见 `android/app/build.gradle.kts`） |
 | versionName / versionCode | `0.1.4-gate1` / `5` |
 | minSdk / targetSdk | 26 / 35 |
-| 构建提交 | `080ead8`（`ASSEMBLE_EXIT=0`，两次构建 SHA 一致 `REPRODUCIBLE=YES`） |
+| 构建提交 | `080ead8`（`ASSEMBLE_EXIT=0`，两次构建 SHA 一致 `REPRODUCIBLE=YES`）。**另外在 HEAD `6205b75` 上重新构建过，SHA-256 仍然是同一个值** —— 因为从 `080ead8` 到 HEAD 只改了 Worker 与文档，Android 源码一行未动 |
 | 构建命令 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug` |
 | 签名 | debug 证书 SHA-256 `b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429` |
 | 权限 | 5 个自有权限（INTERNET / ACCESS_NETWORK_STATE / POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_SPECIAL_USE）+ AndroidX 自动加的 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` |
