@@ -105,6 +105,14 @@ describe("安全 / 仓库里不许有真实凭据", () => {
       for (const match of text.matchAll(/\b[A-Za-z0-9_-]{40}\b/g)) {
         if (allow.test(text.slice(Math.max(0, match.index - 60), match.index + 60))) continue;
         if (/^[0-9a-f]{40}$/.test(match[0])) continue; // sha256 hex 之类
+        // 必须含至少一位数字才算"像随机 base62 凭据"。
+        // 理由：这条规则要抓的是 40 位**随机**串；而恰好 40 个字符的**标识符**（全大写加下划线、
+        // 或者纯驼峰）不含数字，会被误报 —— 本仓库的文档里就引用了
+        // DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION（AndroidX 自动加的自定义权限）和
+        // defaultExpressiveNavigationBarItemColors（Compose 内部类名）这两个正好 40 字符的名字。
+        // 代价是量化的：随机 base62 的 40 位串一位数字都没有的概率是 (52/62)^40 ≈ 0.06%，
+        // 也就是这条规则会漏掉约万分之六的真令牌。用"文件路径白名单"去消误报会开出更大的口子。
+        if (!/[0-9]/.test(match[0])) continue;
         hits.push(`${rel(f)}: ${match[0].slice(0, 6)}…`);
       }
     }
