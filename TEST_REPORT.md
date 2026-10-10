@@ -447,14 +447,54 @@ $ git log --oneline
 
 ## 11. APK 交付
 
+**构建所用的提交**：`9dc2d24253559446ce323cba2bc6f95ae608668f`（在 `git status --porcelain` 为 0，即工作区干净的前提下构建 —— 所以这个 APK 与这份提交一一对应，不是"某个改了但没提交的版本"）。
+
 **构建命令**（可复制重跑）：
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 132/132
+ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug
 # 产物：android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+**§11.1 交付的 APK**
+
+| 项 | 值 |
+| --- | --- |
+| 文件名 | `Android-MCP-Hub-Gate0.1-debug.apk` |
+| **SHA-256** | `f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10` |
+| 大小 | 10 318 566 字节（9.84 MiB） |
+| 仓库内位置 | `dist/Android-MCP-Hub-Gate0.1-debug.apk`（同目录另有 `dist/SHA256SUMS.txt`） |
+| 构建日志 | `test-reports/android-build.log` |
+| 签名证书 SHA-256 | `b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429`（`CN=Android Debug, O=Android, C=US`） |
+
+安装（自备 `adb`）：
+
+```bash
+adb install -r dist/Android-MCP-Hub-Gate0.1-debug.apk
+```
+
+**APK 元信息（用 `aapt2 dump badging` 从 APK 本体读出，不是从源码推断）**：
+
+```
+package: name='com.androidmcphub.app' versionCode='2' versionName='0.1.1-gate0.1'
+compileSdkVersion='35'
+sdkVersion:'26'
+targetSdkVersion:'35'
+application-label:'Android MCP Hub'
+application-icon-320:'res/mipmap-anydpi-v26/ic_launcher.xml'   ← 自适应图标真的进包了
+launchable-activity: name='com.androidmcphub.app.MainActivity'
+```
+
+**权限（`aapt2 dump permissions`，同样是读 APK）**：源码里声明 5 个 —— `INTERNET`、`ACCESS_NETWORK_STATE`、`POST_NOTIFICATIONS`、`FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_SPECIAL_USE`。打包后多出一条 `com.androidmcphub.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`，那是 **AndroidX 在合并 manifest 时自动加的自定义权限**（给自己进程内动态注册的 receiver 打标记），不是新增的系统权限，也不涉及任何用户数据。
+
+**这个 APK 里"没有"东西 —— 逐条扫过，不是声称**：
+
+- 解包后对全部 6 个 dex 与所有资源做正则扫描：`ghp_…` 0 处、PEM 私钥 0 处、`gate0-local-test`（e2e 用的假令牌）0 处、`wrangler` 0 处、`cloudflare` 0 处。
+- 扫描命中了 426 处"40 位 base62"形状，逐个人工确认全部是 Compose 内部标识符（`defaultExpressiveNavigationBarItemColors` 之类），**没有一处是凭据**。
+- 没有设备令牌、没有硬编码服务器地址（由用户在界面上填）、没有生产环境地址。
+- 注意 `device_token_v1` 也不是常量 —— 那个键名只在 `core/DeviceTokenStore.kt` 里拼出来，包内搜不到。
 
 **元信息**：
 
@@ -467,10 +507,12 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug
 | APK 内 `app_version`（与手机握手时上报） | `0.1.1-gate0.1`（`protocol/PhoneLinkProtocol.kt:10`） |
 | 冷启动图标 | 自适应图标（前景/单色层 + 底色 `#F0F0F1`），五个密度全套 |
 
-**交付的两条路径**（任务书允许任选，两条都给了）：
+**交付的第二条路径**（任务书允许任选，两条都给了）：
 
-1. **本地构建的文件**：校验值与大小记录在下一次提交的 §11.1（原因见 §10 的说明）。
+1. **本地构建的文件** —— 见上表 §11.1，文件就在仓库的 `dist/` 里。
 2. **GitHub Actions 手动工作流**：`.github/workflows/android-debug-apk.yml` —— 在 Actions 页面手动点一次 `Run workflow`，产出的构建产物名为 **`Android-MCP-Hub-Gate0.1-debug-apk`**（含 `app-debug.apk` 与 `sha256.txt`，保留 30 天）。
    ⚠ **这个工作流从未被执行过**（本环境没有 Actions runner）。它是否真的能跑通、`android-actions/setup-android@v3` 拉下来的 SDK 版本是否与 `compileSdk 35` 匹配，**都还没有验证**。这是 §8.1 第 4 条。
 
-**APK 里没有的东西**（按任务书逐条核对）：没有设备令牌、没有任何 Cloudflare 凭据、没有生产环境地址、没有硬编码的服务器地址（服务器地址由用户在界面上填）。
+**这个 APK 能做什么、不能做什么**：能装、能启动、能填地址与令牌并手动连接。**它从未在真机上运行过** —— 界面的观感、Keystore 的真实加解密、前台服务的实际表现都属于 §8 的 NOT RUN，不得当成已验证。
+
+⚠ 这是 **debug 签名**的包，只适合人工验证；不要用它做任何发布。

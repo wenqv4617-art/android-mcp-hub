@@ -14,7 +14,7 @@ worker/.wrangler/
 *.dev.vars
 
 # 构建产物
-dist/
+dist/*          # 但交付用的那个 APK 例外，见文件末尾
 build/
 coverage/
 
@@ -51,3 +51,9 @@ e2e/.tmp/
 !test-reports/e2e.log
 !test-reports/android-build.log
 !test-reports/workerd-not-run.log
+
+# 例外：交付用的 Debug APK 本体（任务书要求"可安装的 APK"，而 Release 是被禁止的，
+# 所以只能放进仓库里；用户与审计员要能直接下载，而不是只能相信 SHA-256）。
+# 这两个例外必须写在 *.apk / dist/* 之后 —— gitignore 是"最后一条匹配的规则生效"。
+!dist/Android-MCP-Hub-Gate0.1-debug.apk
+!dist/SHA256SUMS.txt
