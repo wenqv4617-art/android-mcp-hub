@@ -63,7 +63,7 @@ jobs:
           ls -l "$APK"
           sha256sum "$APK" | tee sha256.txt
           {
-            echo "## Android MCP Hub · Gate 0.2 Debug APK"
+            echo "## Android MCP Hub · Debug APK"
             echo
             echo '```'
             sha256sum "$APK"

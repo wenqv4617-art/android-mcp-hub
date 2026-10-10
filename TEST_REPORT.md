@@ -795,7 +795,8 @@ $ git log --oneline
 | `69daba5` | **Gate 0.2：修启动闪退 + 两层 Manifest 类名检查 + 新 APK**（本文件随后还有一个只改文档的收尾提交） |
 | `18f05e5` | **Gate 0.3：①手机端日志脱敏 ②Lint 门禁恢复阻塞 ③DO 结算路径故障注入 + 新 APK**（APK 已在该提交上重建比对，见 §11） |
 | `8196d2e` | Gate 0.3 收尾：把 APK 绑定的提交哈希写进本文件 §11（只改文档） |
-| （本次 Gate 1 提交） | **Gate 1：OAuth 2.1 授权服务器（第三个 DO `OAuthStore`）+ Gate 0.3 遗留三项修复 + 46 条 OAuth 测试 + 三份 Gate 1 文档 + 新 APK**（完整哈希见 §12.6，由紧随其后的一个只改文档的提交补上） |
+| `080ead8` | **Gate 1：OAuth 2.1 授权服务器（第三个 DO `OAuthStore`）+ Gate 0.3 遗留三项修复 + 46 条 OAuth 测试 + 三份 Gate 1 文档 + 新 APK**（完整哈希 `080ead8c631bcd405cc2f5abe89580ad8b4032ee`，见 §12.6） |
+| （本次 Gate 1 收尾提交） | 把上面那个提交的完整哈希与本轮 APK 的 SHA-256 写进本节与 §12.6（只改文档） |
 
 > 刻意**不**在本文件里写死"当前 HEAD"的哈希：哈希一旦被写进文件，任何后续提交都会让它变成一句假话。要引用最新哈希，请用 `git rev-parse HEAD`。
 >
@@ -969,7 +970,31 @@ launchable-activity: name='com.androidmcphub.app.MainActivity'
 
 ### 12.6 本轮的提交与产物
 
-（提交哈希在写这一节时还没有生成 —— 本节与代码一同入库，紧接着有一个只改文档的提交把哈希补上，与 Gate 0.2/0.3 的做法一致。）
+**代码提交**：`080ead8c631bcd405cc2f5abe89580ad8b4032ee`（短 `080ead8`），分支 `gate0`，基于 Gate 0.3 的 `18f05e5`。
+**只改文档的收尾提交**：把本节与 §10 的哈希补上（该提交自身的哈希不在本文内，出于同样的原因 —— 一个提交无法包含自己的哈希）。
+
+**测试 APK（Gate 1）**：
+
+| 项 | 值 |
+| --- | --- |
+| 文件 | `dist/Android-MCP-Hub-Gate1-debug.apk`（`dist/SHA256SUMS.txt` 里有同一份断言） |
+| SHA-256 | `c3539295b2d09026d5e45cf6d78f2a7f0a28153c212602046c41a726301ff674` |
+| 大小 | 10,318,558 字节（约 9.84 MiB） |
+| applicationId | `com.androidmcphub.app`（debug 变体后缀见 `android/app/build.gradle.kts`） |
+| versionName / versionCode | `0.1.4-gate1` / `5` |
+| minSdk / targetSdk | 26 / 35 |
+| 构建提交 | `080ead8`（`ASSEMBLE_EXIT=0`，两次构建 SHA 一致 `REPRODUCIBLE=YES`） |
+| 构建命令 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug` |
+| 签名 | debug 证书 SHA-256 `b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429` |
+| 权限 | 5 个自有权限（INTERNET / ACCESS_NETWORK_STATE / POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_SPECIAL_USE）+ AndroidX 自动加的 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` |
+| 内容扫描 | 解包 125 个文件，10 个凭据形状模式**全部 0 命中**（`test-reports/` 里有完整日志） |
+| 完整日志 | [test-reports/android-build.log](test-reports/android-build.log) · [test-reports/lint-gate.log](test-reports/lint-gate.log) |
+
+**`dist/` 的当前内容**：只有两个文件 —— `dist/Android-MCP-Hub-Gate1-debug.apk`（就是上表的 APK，SHA-256 与 `dist/SHA256SUMS.txt` 一致）与 `dist/SHA256SUMS.txt`。
+Gate 0.3 的 `Android-MCP-Hub-Gate0.3-debug.apk` 已在本轮删除，避免"该装哪个"变得含糊（它的 SHA-256 仍留在 §11 里可查）。
+**若要复现上表的 SHA-256**：在 `080ead8` 上跑上面那条构建命令即可 —— 两次构建已被验证过逐字节一致（`REPRODUCIBLE=YES`），所以复现值与本表一致，而不是"另一个 APK"。
+
+**本轮没有新建任何云端资源**：没有部署、没有 `wrangler deploy`、没有创建 DO 命名空间、没有配置 Secret、没有开 GitHub Actions 自动部署。
 
 ### 12.7 Gate 1 的已知问题
 
