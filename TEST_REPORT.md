@@ -470,6 +470,7 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon clean :app:assembleDebug
 | 仓库内位置 | `dist/Android-MCP-Hub-Gate0.1-debug.apk`（同目录另有 `dist/SHA256SUMS.txt`） |
 | 构建日志 | `test-reports/android-build.log` |
 | 签名证书 SHA-256 | `b73f783c579622944c969d1cc5689daf789589ac8fd2e035a548dc8506f36429`（`CN=Android Debug, O=Android, C=US`） |
+| 构建可复现 | ✅ 重跑一次 `clean :app:assembleDebug`，产出 APK 的 SHA-256 **与本表完全一致**（同一个值 `f16226b5…c6a10`），即这份交付件不依赖「构建了几次」「在哪台机器上构建」 |
 
 安装（自备 `adb`）：
 

@@ -1,18 +1,15 @@
-=== Gate 0.1 Android 最终验证 2026-10-10T02:58:33Z ===
+=== Gate 0.1 Android 最终验证 2026-10-10T03:07:36Z ===
+提交: 52eb63e420b1039d66ed47503d88cd2243192783
+工作区改动（不含本日志）: 0 项
+
 $ cd android && ./gradlew --no-daemon :app:testDebugUnitTest
-> Task :app:processDebugUnitTestJavaRes
-> Task :app:testDebugUnitTest
+> Task :app:testDebugUnitTest FROM-CACHE
 
-BUILD SUCCESSFUL in 47s
-24 actionable tasks: 5 executed, 19 up-to-date
+BUILD SUCCESSFUL in 26s
+24 actionable tasks: 3 executed, 3 from cache, 18 up-to-date
 UNITTEST_EXIT=0
-$ cd android && ./gradlew --no-daemon :app:assembleDebug
-> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
-> Task :app:assembleDebug UP-TO-DATE
 
-BUILD SUCCESSFUL in 30s
-37 actionable tasks: 37 up-to-date
-ASSEMBLE_EXIT=0
+=== 逐类单测计数（解析 app/build/test-results/testDebugUnitTest/*.xml） ===
   BackoffTest              tests=9 failures=0 errors=0 skipped=0
   DeviceTokenStoreTest     tests=18 failures=0 errors=0 skipped=0
   HubConfigTest            tests=7 failures=0 errors=0 skipped=0
@@ -24,3 +21,15 @@ ASSEMBLE_EXIT=0
   PingResponderTest        tests=9 failures=0 errors=0 skipped=0
   ConnectGateTest          tests=21 failures=0 errors=0 skipped=0
 TOTAL tests=132 failures=0 errors=0 skipped=0
+
+$ cd android && ./gradlew --no-daemon clean :app:assembleDebug
+> Task :app:assembleDebug
+
+BUILD SUCCESSFUL in 32s
+38 actionable tasks: 17 executed, 21 from cache
+ASSEMBLE_EXIT=0
+
+=== 构建可复现性：本次重新构建的 APK 与 dist/ 里交付的那个比较 ===
+f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10  app/build/outputs/apk/debug/app-debug.apk
+f16226b5e1b0c297934ea072ee85a6179b44811f1f8193d259e34a69448c6a10  ../dist/Android-MCP-Hub-Gate0.1-debug.apk
+✅ 字节完全一致：换台机器/重跑一次 clean build 得到同一个 APK
