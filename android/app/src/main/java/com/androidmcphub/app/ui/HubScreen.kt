@@ -85,6 +85,7 @@ fun HubScreen(vm: HubViewModel = viewModel()) {
     val advancedExpanded by vm.advancedExpanded.collectAsState()
     val message by vm.message.collectAsState()
     val serviceRunning by vm.serviceRunning.collectAsState()
+    val lastError by vm.lastError.collectAsState()
 
     val palette = statusPalette()
     val darkTheme = isSystemInDarkTheme()
@@ -186,7 +187,7 @@ fun HubScreen(vm: HubViewModel = viewModel()) {
             }
         }
 
-        item { PingCard(lastPing) }
+        item { PingCard(lastPing = lastPing, lastError = lastError, onClearError = vm::clearLastError) }
 
         item {
             AdvancedSettingsCard(
@@ -197,6 +198,7 @@ fun HubScreen(vm: HubViewModel = viewModel()) {
                 onToggleTokenVisible = vm::toggleTokenVisible,
                 onToggleExpanded = vm::toggleAdvanced,
                 onSave = vm::save,
+                onClearToken = vm::clearToken,
             )
         }
 
@@ -305,7 +307,7 @@ private fun StatusCard(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PingCard(lastPing: PingOutcome?) {
+private fun PingCard(lastPing: PingOutcome?, lastError: String?, onClearError: () -> Unit) {
     val context = LocalContext.current
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -319,49 +321,75 @@ private fun PingCard(lastPing: PingOutcome?) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
-                return@Column
+            } else {
+                Text(
+                    text = "长按 request_id 可复制",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Text(
+                    text = lastPing.requestId,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(8.dp)
+                        .fillMaxWidth()
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                    as? ClipboardManager
+                                clipboard?.setPrimaryClip(
+                                    ClipData.newPlainText("request_id", lastPing.requestId),
+                                )
+                                Toast.makeText(context, "已复制 request_id", Toast.LENGTH_SHORT).show()
+                            },
+                        ),
+                )
+
+                PingRow("RTT（估算）", "${lastPing.rttMs} ms")
+                PingRow("单向延迟（估算）", "${lastPing.oneWayMs} ms")
+                PingRow("服务端时间戳", "${lastPing.serverTimestampMs}（${formatTime(lastPing.serverTimestampMs)}）")
+                PingRow("本机收到时刻", formatTime(lastPing.receivedAtMs))
+
+                Text(
+                    text = "RTT 由「本机收到时刻 − ping 里的服务端时间戳」×2 估算，需要两端时钟已同步。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
 
-            Text(
-                text = "长按 request_id 可复制",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Text(
-                text = lastPing.requestId,
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .padding(top = 4.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(8.dp)
-                    .fillMaxWidth()
-                    .combinedClickable(
-                        onClick = {},
-                        onLongClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                                as? ClipboardManager
-                            clipboard?.setPrimaryClip(
-                                ClipData.newPlainText("request_id", lastPing.requestId),
-                            )
-                            Toast.makeText(context, "已复制 request_id", Toast.LENGTH_SHORT).show()
-                        },
-                    ),
-            )
-
-            PingRow("RTT（估算）", "${lastPing.rttMs} ms")
-            PingRow("单向延迟（估算）", "${lastPing.oneWayMs} ms")
-            PingRow("服务端时间戳", "${lastPing.serverTimestampMs}（${formatTime(lastPing.serverTimestampMs)}）")
-            PingRow("本机收到时刻", formatTime(lastPing.receivedAtMs))
-
-            Text(
-                text = "RTT 由「本机收到时刻 − ping 里的服务端时间戳」×2 估算，需要两端时钟已同步。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp),
-            )
+            // 「最近一次错误」独立于当前状态：状态会被断开/服务销毁复位成「已断开」，
+            // 而失败原因必须留得下来 —— 否则用户永远看不到连接为什么失败。
+            if (lastError != null) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(top = 12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "最近一次错误",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onClearError) { Text("清除") }
+                }
+                Text(
+                    text = lastError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isSystemInDarkTheme()) Color(0xFFEF9A9A) else Color(0xFFC62828),
+                )
+            }
         }
     }
 }
@@ -392,6 +420,7 @@ private fun AdvancedSettingsCard(
     onToggleTokenVisible: () -> Unit,
     onToggleExpanded: () -> Unit,
     onSave: () -> Unit,
+    onClearToken: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -447,11 +476,20 @@ private fun AdvancedSettingsCard(
                         Text(if (tokenVisible) "隐藏" else "显示")
                     }
                 },
-                supportingText = { Text("只保存在本机私有存储里，仅用于 Authorization 请求头。") },
+                supportingText = {
+                    Text("用 Android Keystore 里的密钥加密后存本机私有存储（不留明文），仅用于 Authorization 请求头。")
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
             )
+
+            TextButton(
+                onClick = onClearToken,
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                Text("清除已保存的令牌")
+            }
 
             NumberField(
                 label = "ping 超时（毫秒）",

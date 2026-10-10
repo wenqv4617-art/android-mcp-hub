@@ -44,12 +44,16 @@ export default {
       if (url.pathname === "/mcp") return await handleMcpRequest(request, env);
       if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config);
       return notFound(url.pathname);
-    } catch (err) {
+    } catch {
+      // 审计 R2：**绝不**记录 `String(err)` 或 `err.stack`。
+      // 异常 message 会把上游响应体、请求头、甚至凭据原样带进来
+      // （"failed to fetch https://…/token?client_secret=…" 这种形状真实存在），
+      // 堆栈更会把整个调用链的局部变量摊在日志里。
+      // 这里只留一个固定类别；要追细节请用 trace，不要用日志。
       logEvent("error", "worker.unhandled_error", {
         path: url.pathname,
         method: request.method,
-        error: String(err),
-        stack: err instanceof Error ? err.stack : undefined,
+        errorCode: "unhandled_exception",
       });
       return jsonResponse(
         { error: "internal_error", message: "服务端内部错误，已记录日志" },

@@ -143,7 +143,7 @@ class PhoneLinkProtocolTest {
         assertEquals("hello", hello.getString("type"))
         assertEquals("test-phone-1", hello.getString("device_id"))
         assertEquals("phone-link-v1", hello.getString("protocol_version"))
-        assertEquals("0.1.0", hello.getString("app_version"))
+        assertEquals("0.1.1-gate0.1", hello.getString("app_version"))
         assertEquals(35, hello.getInt("android_sdk"))
     }
 
@@ -164,8 +164,8 @@ class PhoneLinkProtocolTest {
     @Test
     fun `常量与契约一致`() {
         assertEquals("phone-link-v1", PROTOCOL_VERSION)
-        assertEquals("0.1.0", APP_VERSION)
-        assertEquals("android-mcp-hub/0.1.0", CLIENT_VERSION)
+        assertEquals("0.1.1-gate0.1", APP_VERSION)
+        assertEquals("android-mcp-hub/0.1.1-gate0.1", CLIENT_VERSION)
         assertEquals(256, PING_DEDUP_CAPACITY)
     }
 }

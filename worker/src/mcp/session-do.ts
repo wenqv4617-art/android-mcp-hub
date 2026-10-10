@@ -82,10 +82,11 @@ export class McpSession implements DurableObject {
     //    根本走不到这条分支；这里写死是为了让这条不变量由**拥有状态的这一层**保证，
     //    而不是依赖调用方永远记得换 id。）
     if (existing !== undefined && existing.protocolVersion !== protocolVersion) {
+      // 审计 R2：`sessionId` 是**能用来劫持会话的载体**，不进日志。
+      //   版本号本身是协议常量，不是秘密，可以记。
       logEvent("warn", "mcp_session.protocol_version_ignored", {
-        sessionId,
-        established: existing.protocolVersion,
-        offered: protocolVersion,
+        negotiatedProtocolVersion: existing.protocolVersion,
+        requestedProtocolVersion: protocolVersion,
       });
     }
     const record: McpSessionRecord = {
@@ -138,7 +139,10 @@ export class McpSession implements DurableObject {
   private async handleTerminate(): Promise<Response> {
     const record = await this.ctx.storage.get<McpSessionRecord>(KEY_SESSION);
     await this.ctx.storage.deleteAll();
-    logEvent("info", "mcp_session.terminated", { sessionId: record?.sessionId ?? null });
+    // 审计 R2：不记 sessionId —— 它等价于一张能继续使用该会话的凭证。
+    //   "哪台设备的会话被终止了"这个问题应该由调用方在请求上下文里回答，
+    //   而不是靠日志里留下一串可直接复用的 id。
+    logEvent("info", "mcp_session.terminated", {});
     return json({ ok: true, deleted: record !== undefined });
   }
 
@@ -150,7 +154,7 @@ export class McpSession implements DurableObject {
     const idleMs = now - record.lastSeenAt;
     if (idleMs >= MCP_SESSION_TTL_MS) {
       await this.ctx.storage.deleteAll();
-      logEvent("info", "mcp_session.expired", { sessionId: record.sessionId, idleMs });
+      logEvent("info", "mcp_session.expired", { idleMs });
       return;
     }
     await this.ctx.storage.setAlarm(record.lastSeenAt + MCP_SESSION_TTL_MS);

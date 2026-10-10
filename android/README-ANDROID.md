@@ -144,6 +144,21 @@ e: java.nio.file.InvalidPathException: Malformed input or input contains unmappa
 **启动**：只有一种方式 —— 用户在前台点界面上的「连接」按钮，
 由 `MainActivity` → `HubViewModel.connect()` → `PhoneLinkService.connect(context)` 触发 `startForegroundService`。
 
+**进入前台失败就绝不建连**（Gate 0.1 审计 R3）。顺序被 [ConnectGate.kt](app/src/main/java/com/androidmcphub/app/service/ConnectGate.kt)
+的 `ConnectStartupSequence` 钉死：
+
+```
+enterForeground()  ──Started──▶  startLink()
+                   ──Failed───▶  onAbort(category)   // startLink 一次都不会被调用
+```
+
+- `goForeground()` 返回 `ForegroundResult`（`Started` / `Failed(category)`），失败类别是**固定闭集**
+  （`fgs_start_not_allowed` / `fgs_missing_type` / `security_exception` / `illegal_state` /
+  `runtime_exception` / `unknown_exception`），只按**异常类名**分类，绝不把异常 message 写进日志。
+- 失败时：丢掉连接对象、把状态置为「出错」（文案来自 `strings.xml`，不是异常原文）、
+  撤掉通知、`stopSelf()`，并且**不安排任何重连** —— 唯一恢复路径是用户回到前台再点一次。
+  否则会变成"每退避一次就失败一次"的空转循环。
+
 - **不做**开机自启（没有 `RECEIVE_BOOT_COMPLETED`，也没有 `BootReceiver`）。
 - **不会**被系统在后台悄悄拉起：服务在 `onStartCommand` 里返回 `START_NOT_STICKY`，
   进程被杀掉后系统不会重建它。
@@ -243,8 +258,16 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 | `maxFrameBytes` | `65536` |
 
 - 这些配置存在 `SharedPreferences("hub_settings")`（`MODE_PRIVATE`），键值映射是纯函数 `HubConfig.toMap() / fromMap()`，因此可 JVM 单测。
-- **设备令牌单独存**（键 `device_token`），不属于 `HubConfig`：
-  不进 `toString()`、不写日志、不出现在任何日志文本里，连接日志只记录 `host` 与设备 ID。
+- **设备令牌单独存，并且加密后存**（Gate 0.1 审计 R4）：
+  - 磁盘上只有键 `device_token_v1`，内容是 `v1.<base64url(iv)>.<base64url(AES-256-GCM 密文)>`；
+    密钥由 Android Keystore 生成且**不可导出**（`core/AndroidSecretCipher.kt`）。
+  - **明文绝不落盘**：旧版本（Gate 0）用的是明文键 `device_token`，App 启动读令牌时会做一次性迁移 ——
+    加密写入新键、`commit()` 成功后才删明文键。迁移失败**不删明文**（宁可多留一会儿也不能让用户丢凭据），
+    但会明确报「无法解密」而不是假装"没配置"。
+  - 读令牌返回的是三态（`Present` / `Absent` / `Unreadable`）而不是字符串：
+    解不开时**拒绝建连**，绝不用空令牌去撞一次 401（单测断言此路径下服务端收不到任何请求）。
+  - `HubPrefs.load()` 会把两个密钥键从读出来的 map 里剔掉 —— 哪怕键里只有密文。
+  - 令牌不进 `HubConfig`：不进 `toString()`、不写日志、不出现在任何日志文本里，连接日志只记录 `host` 与设备 ID。
 - `android:allowBackup="false"`：禁止 Android 自动备份，令牌不会被云备份带走。
 - `res/xml/network_security_config.xml` 里默认 `cleartextTrafficPermitted="false"`：
   生产环境走 `wss://`。**本地联调 `ws://`（明文）需要自己改这个文件**，不要为了让明文连通就长期开着。
@@ -257,9 +280,38 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 
 1. 「连接」/「断开」按钮（按状态互斥）。
 2. 状态卡片：已断开 / 连接中 / 已连接（代次 N）/ 重连等待（第 N 次，Xs 后）/ 认证失败 / 出错，配不同颜色。
-3. 「最近一次 ping」卡片：`request_id`（等宽字体，**长按复制**）、RTT（毫秒）、服务端时间戳。
+3. 「最近一次 ping」卡片：`request_id`（等宽字体，**长按复制**）、RTT（毫秒）、服务端时间戳、本机收到时刻；
+   下面附「最近一次错误」——它独立于当前状态，因为状态会被断开/服务销毁复位成「已断开」，
+   而失败原因必须留得下来，否则用户永远看不到连接为什么失败。
 4. 「最近连接日志」列表（时间 + 级别 + 文本，最多 200 条，可清空）。
-5. 可折叠「高级设置」：服务器 URL、设备 ID、设备令牌（密码框，带显示/隐藏切换）、上述数值参数、一个「保存」按钮。
+5. 可折叠「高级设置」：服务器 URL、设备 ID、设备令牌（密码框，带显示/隐藏切换 + 「清除已保存的令牌」）、
+   上述数值参数、一个「保存」按钮。
+
+### 5.1 图标
+
+启动器图标是**自适应图标**（`res/mipmap-anydpi-v26/ic_launcher.xml` + `ic_launcher_round.xml`），三层：
+
+| 层 | 资源 | 说明 |
+| --- | --- | --- |
+| `background` | `@color/ic_launcher_background` = `#F0F0F1` | 从原始图标卡片内部采到的中位色 |
+| `foreground` | `@mipmap/ic_launcher_foreground`（mdpi→xxxhdpi 五档 PNG） | 蓝色 M/C + 云 + 锁的线条图案；**只占画布中央 72%**，所以圆角方形与圆形遮罩都不会切到内容 |
+| `monochrome` | `@mipmap/ic_launcher_monochrome` | Android 13+ 的**主题图标**层：系统拿它当蒙版自己上色，所以它必须是**纯色剪影**（这里用图案的 alpha 通道做成黑色），不能直接复用彩色前景 |
+
+前景/单色层由 [art/make_adaptive_icon.py](art/make_adaptive_icon.py) 从 [art/ic_launcher_source.png](art/ic_launcher_source.png)（设计稿）生成，**脚本与源图都在仓库里**，所以这一步是可复现的：
+
+```bash
+python3 android/art/make_adaptive_icon.py    # 只需要 Pillow，不需要 Android SDK
+```
+
+实测该脚本重跑一遍，五个密度的 PNG **字节完全一致**（改脚本请连 `res/values/colors.xml` 里的 `ic_launcher_background` 一起改，脚本会把它测出来的中位色打印出来）。
+
+### 5.2 边到边（edge-to-edge）
+
+`MainActivity.onCreate` 显式调用 `enableEdgeToEdge()`。理由：Android 15/16 对 `targetSdk 35+` **强制**边到边，而且 Android 16 上 `windowOptOutEdgeToEdgeEnforcement` **已弃用且被禁用**（想退出也退不出）。显式调用让低版本走同一条布局路径，避免"在 Android 14 上正常、在 16 上被系统栏盖住"这类只在新机上出现的差异。
+
+内边距**只在 `ui/HubScreen.kt:123` 的根部应用一次**（`Modifier.safeDrawingPadding()`），没有 `Scaffold`、没有 `imePadding()` —— 这样就不会出现"两处叠加导致双倍内边距"的经典坑（`safeDrawing` 本身已经包含 `ime`）。
+
+逐项官方规范核对（通知权限、FGS 类型与权限、启动限制、超时、Doze/锁屏、网络切换、断开释放、进程被杀、返回手势）见 [COMPATIBILITY-ANDROID-13-16.md](COMPATIBILITY-ANDROID-13-16.md)。
 
 ---
 
@@ -271,7 +323,9 @@ app/src/main/java/com/androidmcphub/app/
 ├── HubApplication.kt            # 进程启动打一条日志
 ├── core/
 │   ├── HubConfig.kt             # 配置 + 表单草稿 + toMap/fromMap（纯逻辑）
-│   ├── HubPrefs.kt              # SharedPreferences 读写（令牌单独存）
+│   ├── HubPrefs.kt              # SharedPreferences 读写（令牌加密后单独存）
+│   ├── AndroidSecretCipher.kt   # Keystore AES-256-GCM + prefs 密文存储（Android API，未在 JVM 测过）
+│   ├── DeviceTokenStore.kt      # 令牌三态读取 / 编解码 / 失败不吞（纯逻辑）
 │   ├── Backoff.kt               # 指数退避 + 抖动（纯函数，注入 Random）
 │   ├── HubLog.kt                # 200 条环形日志
 │   └── WsUrl.kt                 # ws/wss → http/https 规范化
@@ -280,7 +334,9 @@ app/src/main/java/com/androidmcphub/app/
 │   ├── PingResponder.kt         # request_id 去重 LRU + pong 生成（纯逻辑）
 │   └── PhoneLink.kt             # 连接状态机（纯逻辑，输出 LinkAction 让网络层执行）
 ├── net/PhoneLinkClient.kt       # OkHttp WebSocket 封装，把 LinkAction 落到真实 socket
-├── service/PhoneLinkService.kt  # 前台服务 + 通知 + 网络回调 + 看门狗（LinkBus 做进程内状态总线）
+├── service/
+│   ├── PhoneLinkService.kt      # 前台服务 + 通知 + 网络回调 + 看门狗（LinkBus 做进程内状态总线）
+│   └── ConnectGate.kt           # 「进入前台成功才允许建连」的顺序约束（纯逻辑）
 └── ui/                          # HubViewModel / HubScreen / Theme
 ```
 
@@ -304,11 +360,19 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - `PhoneLinkProtocolTest`：welcome / phone_ping / heartbeat_ack / error / 未知 type / 非法 JSON / 缺 type / 缺 request_id；`encodePong` 的 `request_id` 逐字符相同与转义。
 - `PingResponderTest`：去重、RTT 计算、LRU 淘汰顺序、容量上限、reset、时钟未同步时不出现负数。
 - `PhoneLinkTest`：R1–R6 与整个生命周期（退避递增、401 不重连、用户断开后不再重连、网络恢复重置退避、握手超时、心跳超时、静默计时被任意服务端帧刷新）。
-- `PhoneLinkClientTest`：用 **MockWebServer** 在 JVM 上跑**真实 WebSocket 链路**，验证请求头、hello、pong 的回包、401 认证失败、地址无效与令牌为空时的拒绝连接。
+- `PhoneLinkClientTest`：用 **MockWebServer** 在 JVM 上跑**真实 WebSocket 链路**，验证请求头、hello、pong 的回包、401 认证失败、地址无效与令牌为空时的拒绝连接；另有 3 条覆盖 R4：令牌从未配置 / 令牌解不开时**拒绝建连且服务端收不到任何请求**，以及"每次建连都重新读凭据"。
+- `ConnectGateTest`（21 条，R3）：失败类别闭集与"只按类名分类"、每个类别都有中文文案、`Started→建连` / `Failed→终止`、**前台失败时 `startLink` 一次都没被调用**、调用顺序不可交换、终止路径不安排重连、错误要活过 `resetLink()`。
+- `DeviceTokenStoreTest`（18 条，R4）：三态区分、落盘的是密文且明文片段不出现、畸形密文/解密失败/非 UTF-8/空白各自归到固定类别、加密或落盘失败返回 `Failed` 且**什么都不写**、编码器对任意输入只返回 `null` 不抛异常（含 500 次随机字符串 fuzz）。
+
+合计 **132** 条（Gate 0 是 90 条）。
 
 之所以能在 JVM 上跑 org.json 与 WebSocket：`org.json` 在 Android 运行时是自带的，但在 JVM 单测里是抛异常的 stub，
 所以 `testImplementation` 里额外引了 `org.json:json:20240303`（真实现）与 `okhttp3:mockwebserver:4.12.0`。
 这两条依赖**只进单元测试**，不进 APK。
+
+**没被自动化覆盖的部分**（写在 TEST_REPORT 的 NOT RUN 里）：`AndroidSecretCipher` 的 Keystore 代码路径、
+`PrefsSecretStorage` 的 `commit()` 真实落盘、`HubPrefs` 的明文迁移、前台服务的真实生命周期、
+以及 UI 的 Compose 组合。这些都需要真机（或 Robolectric，本工程没引）。
 
 ---
 
@@ -332,7 +396,11 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 | 11 | 从最近任务里划掉 App | 服务停止、通知消失，不会出现幽灵连接（服务返回 `START_NOT_STICKY`） | 进程优先级与系统回收策略 |
 | 12 | 深色模式切换 | 界面文字与状态色仍可读，启动不白屏 | 系统主题切换 |
 | 13 | 屏幕旋转 | 状态、日志、输入框内容不丢（`ViewModel` 持有） | 系统配置变更 |
-| 14 | 令牌是否泄露 | `adb logcat` 里搜不到令牌；`SharedPreferences` 文件里有令牌但不出现在任何日志/崩溃信息中 | 需要抓真实日志确认 |
+| 14 | 令牌是否泄露 | `adb logcat` 里搜不到令牌；`adb shell run-as com.androidmcphub.app cat shared_prefs/hub_settings.xml` 里**只有 `device_token_v1` 的密文**（`v1.…`），**没有** `device_token` 明文键 | 需要抓真实文件与日志确认 |
+| 14b | 令牌确实被加密（R4） | 上一条里那串密文用肉眼/十六进制看**不含**令牌的任何可读片段；把令牌改成明文写回同一文件后重启 App，应显示「无法解密」而不是静默连不上 | 需要真机文件系统 |
+| 14c | 旧版明文迁移（R4） | 先用 Gate 0 的 APK 存一个令牌，再用本版覆盖安装：首次读取应自动迁移（明文键消失、出现密文键），连接照常可用 | 需要两个版本先后安装 |
+| 14d | 前台服务启动失败（R3） | 用 `adb shell am start-foreground-service` 之外的路径很难造；可测：先按 Home 回到桌面再通过 `adb` 拉起 `ACTION_CONNECT`，观察是否出现「系统不允许在后台启动前台服务」且**没有**建立任何 WebSocket | 后台启动限制只在真机生效 |
+| 14e | Keystore 密钥失效（R4） | 在系统设置里改锁屏密码/清除凭据后回来连接，应显示「设备令牌无法解密」并让用户重填，而不是崩溃或拿空令牌重试 | Keystore 失效只在真机发生 |
 | 15 | 会话看门狗 | 服务端静默 5 分钟以上 → 服务自动停止并显示「会话超时」 | 需要长时间运行 |
 | 16 | 明文联调（可选） | 若用 `ws://` 直连本地服务端，需要先改 `network_security_config.xml`，确认改动只影响本地 | 网络安全配置只在真机生效 |
 

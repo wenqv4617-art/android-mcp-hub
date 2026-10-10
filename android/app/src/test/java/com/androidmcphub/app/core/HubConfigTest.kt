@@ -46,13 +46,13 @@ class HubConfigTest {
     @Test
     fun `fromMap 忽略不认识的键（例如令牌）`() {
         val map = HubConfig().toMap().toMutableMap()
-        map[HubPrefs.KEY_TOKEN] = "test-token-not-a-secret"
+        map[HubPrefs.LEGACY_KEY_TOKEN] = "test-token-not-a-secret"
 
         val restored = HubConfig.fromMap(map)
 
         assertEquals(HubConfig(), restored)
         // 令牌不该出现在配置的序列化结果里
-        assertFalse(restored.toMap().containsKey(HubPrefs.KEY_TOKEN))
+        assertFalse(restored.toMap().containsKey(HubPrefs.LEGACY_KEY_TOKEN))
         assertFalse(restored.toString().contains("test-token-not-a-secret"))
     }
 

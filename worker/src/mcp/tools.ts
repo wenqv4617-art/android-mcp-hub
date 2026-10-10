@@ -230,7 +230,10 @@ export async function dispatchToolCall(
     return {
       protocolError: {
         code: RPC_ERRORS.invalidParams,
-        message: err instanceof ToolArgumentError ? err.message : String(err),
+        // 审计 R2：只回我们**自己写死**的校验文案。`ToolArgumentError.message`
+        // 全部是本仓库构造的字符串（例如"phone_ping.echo 必须是字符串"），
+        // 不含任何外部输入；其余异常一律换成固定文案，不外泄内部字符串。
+        message: err instanceof ToolArgumentError ? err.message : "参数校验失败",
       },
     };
   }
@@ -254,15 +257,20 @@ export async function dispatchToolCall(
   try {
     const outcome = await callPhonePing(resolved.deviceId, args.timeout_ms);
     return { result: pingOutcomeToResult(outcome, args.echo) };
-  } catch (err) {
-    logEvent("error", "tool.phone_ping_threw", { deviceId: resolved.deviceId, error: String(err) });
+  } catch {
+    // 审计 R2：`String(err)` 既会进日志、也会顺着 tool result 回到模型上下文。
+    //   两条路都不该出现内部字符串，所以这里两边都用固定文案。
+    logEvent("error", "tool.phone_ping_threw", {
+      deviceId: resolved.deviceId,
+      errorCode: "tool_dispatch_failed",
+    });
     return {
       result: {
-        content: [{ type: "text", text: `phone_ping 失败：internal_error — ${String(err)}` }],
+        content: [{ type: "text", text: "phone_ping 失败：internal_error" }],
         structuredContent: {
           ok: false,
           error_code: "internal_error",
-          error_message: String(err),
+          error_message: "内部错误：转发到手机时发生异常，详情见服务端日志",
           ...(args.echo !== undefined ? { echo: args.echo } : {}),
         },
         isError: true,

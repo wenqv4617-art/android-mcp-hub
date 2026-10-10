@@ -41,6 +41,7 @@ export type PhoneErrorCode =
   | "phone_offline"
   | "phone_timeout"
   | "phone_disconnected"
+  | "phone_replaced"
   | "too_many_pending_requests"
   | "unknown_device"
   | "ambiguous_device"
@@ -81,6 +82,8 @@ export interface PhoneSessionMetrics {
   pendingRejectedOverLimit: number;
   messagesRejected: number;
   reconstructedPendingFailed: number;
+  /** Gate 0.1 / R1：新连接替换旧连接时，被**主动**终结的旧代次待处理请求数。 */
+  pendingReplacedOnConnect: number;
   lastRttMs: number | null;
   lastPingAt: number | null;
   lastPongAt: number | null;
@@ -102,6 +105,7 @@ function emptyMetrics(): PhoneSessionMetrics {
     pendingRejectedOverLimit: 0,
     messagesRejected: 0,
     reconstructedPendingFailed: 0,
+    pendingReplacedOnConnect: 0,
     lastRttMs: null,
     lastPingAt: null,
     lastPongAt: null,
@@ -268,10 +272,28 @@ export class PhoneSession implements DurableObject {
       [STORAGE_KEY_METRICS]: this.metrics,
     });
 
+    // ★ Gate 0.1 审计 R1：**主动**终结旧代次遗留的待处理请求。
+    //
+    //   改之前只依赖两条被动路径：旧 socket 的 close 事件，或者超时。
+    //   两条都不可靠 ——
+    //     · close 事件可能很晚才到（或根本不到：手机直接被替换、进程没了、
+    //       网络黑洞），而 handleSocketGone 看到代次不符还会**直接返回**，
+    //       于是这些请求一直挂在 `pending` 里占着并发额度，直到自己超时；
+    //     · 在那段窗口里，它们的 request_id 仍然在表里，一个来自旧连接的
+    //       畸形/迟到 pong 就有了配对对象。
+    //   现在改成在这一刻就结算：调用方立刻拿到明确的 phone_replaced，
+    //   而不是等 10 秒后拿到一个含糊的 phone_timeout。这也符合 R8
+    //   ——我们**没有**把旧请求重放到新连接上，只是明确地告诉它失败了。
+    //
+    //   实现上刻意复用 settlePending()：它是唯一的结算入口，因此
+    //   pending 内存表、落盘镜像、setTimeout、alarm 四者一定同时收敛。
+    const replacedPending = await this.failStalePending(generation);
+
     logEvent("info", "phone_session.connected", {
       deviceId,
       generation,
       replaced: this.metrics.connectionReplaced,
+      discarded: replacedPending,
     });
 
     try {
@@ -287,11 +309,46 @@ export class PhoneSession implements DurableObject {
           protocol_version: PHONE_LINK_PROTOCOL_VERSION,
         }),
       );
-    } catch (err) {
-      logEvent("warn", "phone_session.welcome_send_failed", { deviceId, error: String(err) });
+    } catch {
+      // 审计 R2：不记 String(err)。
+      logEvent("warn", "phone_session.welcome_send_failed", {
+        deviceId,
+        errorCode: "welcome_send_failed",
+      });
     }
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * 把所有**非当前代次**的待处理请求显式判失败（审计 R1）。
+   *
+   * 返回被终结的个数，供日志/指标使用。
+   *
+   * 为什么按 `entry.generation !== currentGeneration` 筛，而不是"清空全部"：
+   * 新连接刚刚建立的那一刻，理论上不可能存在属于新代次的请求（还没有人
+   * 用新 socket 发过 ping），但按代次筛选让这个函数在**任何调用时机**都安全
+   * —— 将来若有人在别处复用它会得到正确的语义，而不是把好请求一起杀掉。
+   */
+  private async failStalePending(currentGeneration: number): Promise<number> {
+    const staleIds = [...this.pending.values()]
+      .filter((entry) => entry.generation !== currentGeneration)
+      .map((entry) => entry.requestId);
+
+    for (const requestId of staleIds) {
+      this.metrics.pendingReplacedOnConnect += 1;
+      await this.settlePending(requestId, (r) => ({
+        ok: false,
+        request_id: r.requestId,
+        device_id: r.deviceId,
+        error: {
+          code: "phone_replaced",
+          message: `连接已被更新的连接替换（请求代次 ${r.generation}，当前代次 ${currentGeneration}）`,
+        },
+      }), "replaced");
+    }
+
+    return staleIds.length;
   }
 
   private async handlePingRequest(request: Request): Promise<Response> {
@@ -373,12 +430,14 @@ export class PhoneSession implements DurableObject {
 
     try {
       socket.send(encodeServerFrame({ type: "phone_ping", request_id: requestId, timestamp: sentAt }));
-    } catch (err) {
+    } catch {
+      // 审计 R2：这个 message 会一路回到 MCP 客户端（模型上下文里），
+      // 所以也不能带 `String(err)`。
       await this.settlePending(requestId, (r) => ({
         ok: false,
         request_id: r.requestId,
         device_id: r.deviceId,
-        error: { code: "phone_disconnected", message: `发送 phone_ping 失败：${String(err)}` },
+        error: { code: "phone_disconnected", message: "发送 phone_ping 失败" },
       }), "send_failed");
       return json<PingFailure>({
         ok: false,
@@ -482,8 +541,8 @@ export class PhoneSession implements DurableObject {
           this.metrics.messagesRejected += 1;
           await this.flushMetrics();
           logEvent("warn", "phone_session.hello_device_mismatch", {
-            authenticated: att.deviceId,
-            claimed: frame.device_id,
+            authenticatedDeviceId: att.deviceId,
+            claimedDeviceId: frame.device_id,
           });
         } else {
           logEvent("info", "phone_session.hello", {
@@ -518,14 +577,18 @@ export class PhoneSession implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string, _wasClean: boolean): Promise<void> {
+  async webSocketClose(ws: WebSocket, code: number, _reason: string, _wasClean: boolean): Promise<void> {
     await this.ready;
-    await this.handleSocketGone(ws, `close:${code}`, reason);
+    // 审计 R2：**不**把 close 的 reason 字符串记进日志。它来自对端，是任意的
+    // 自由文本 —— 一台被改造过的手机完全可以把令牌塞在里面喂给我们的日志。
+    // 我们只留自己生成的原因标签和数值关闭码。
+    await this.handleSocketGone(ws, "close", code);
   }
 
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+  async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
     await this.ready;
-    await this.handleSocketGone(ws, "error", String(error));
+    // 同理：`String(error)` 是未经处理的异常字符串，不记。
+    await this.handleSocketGone(ws, "error", null);
   }
 
   /**
@@ -575,22 +638,21 @@ export class PhoneSession implements DurableObject {
 
     if (entry.generation !== this.generation || socketGeneration !== this.generation) {
       // R5：旧连接的响应不得完成新连接的请求。
+      //
+      // 这里也走 settlePending 而不是手写一遍删除逻辑（Gate 0.1 / R1）：
+      // 手写版本漏掉了 rescheduleAlarm()，会让一个已经没人在等的 alarm 继续挂着。
+      // 全部结算路径收敛到一个函数，是"内存表 / 落盘镜像 / 定时器三者一致"
+      // 唯一能长期成立的写法。
       this.metrics.pongsStaleGeneration += 1;
-      this.pending.delete(requestId);
-      if (entry.timer !== null) clearTimeout(entry.timer);
-      entry.timer = null;
-      delete this.storedPending[requestId];
-      await this.ctx.storage.put(STORAGE_KEY_PENDING, this.storedPending);
-      await this.flushMetrics();
-      entry.settle({
+      await this.settlePending(requestId, (r) => ({
         ok: false,
-        request_id: requestId,
-        device_id: entry.deviceId,
+        request_id: r.requestId,
+        device_id: r.deviceId,
         error: {
           code: "invalid_pong",
-          message: `pong 来自过期连接（请求代次 ${entry.generation}，当前信号代次 ${this.generation}，socket 代次 ${socketGeneration}）`,
+          message: `pong 来自过期连接（请求代次 ${r.generation}，当前信号代次 ${this.generation}，socket 代次 ${socketGeneration}）`,
         },
-      });
+      }), "stale_pong");
       return;
     }
 
@@ -611,11 +673,18 @@ export class PhoneSession implements DurableObject {
     }), "pong");
   }
 
-  /** 统一的"结算"入口：保证指标只加一次、镜像只删一次、定时器只清一次。 */
+  /**
+   * 统一的"结算"入口：保证指标只加一次、镜像只删一次、定时器只清一次。
+   *
+   * 这是**唯一**允许把请求从 `pending` 里拿走的地方。`this.pending.delete()`
+   * 出现在本函数之外，就意味着"内存表、落盘镜像、定时器"这三样有办法不同步。
+   * 开头的 `entry === undefined → return` 就是"不允许重复结算"的守卫：
+   * 第二次调用什么也不做，`metrics` 也不会被加第二遍。
+   */
   private async settlePending(
     requestId: string,
     build: (record: StoredPending) => PingOutcome,
-    cause: "pong" | "timeout" | "timeout_alarm" | "disconnect" | "send_failed",
+    cause: "pong" | "timeout" | "timeout_alarm" | "disconnect" | "send_failed" | "replaced" | "stale_pong",
   ): Promise<void> {
     const entry = this.pending.get(requestId);
     if (entry === undefined) return;
@@ -634,7 +703,7 @@ export class PhoneSession implements DurableObject {
     entry.settle(build({ ...entry }));
   }
 
-  private async handleSocketGone(ws: WebSocket, cause: string, detail: string): Promise<void> {
+  private async handleSocketGone(ws: WebSocket, cause: string, closeCode: number | null): Promise<void> {
     const att = ws.deserializeAttachment() as SocketAttachment | null;
     const socketGeneration = att?.generation ?? -1;
 
@@ -643,13 +712,17 @@ export class PhoneSession implements DurableObject {
 
     logEvent("info", "phone_session.socket_gone", {
       cause,
-      detail,
+      closeCode,
       socketGeneration,
       currentGeneration: this.generation,
     });
 
     if (socketGeneration !== this.generation) {
       // 被替换掉的老连接的关闭事件 —— 与当前连接无关，不要动当前的待处理请求。
+      //
+      // Gate 0.1 / R1 之后，属于老代次的待处理请求**已经在 handleConnect 里
+      // 被结算掉了**，所以这里"什么都不做"不再意味着"它们要干等到超时"。
+      // 这个 early return 现在只负责一件事：别去碰新代次的请求。
       return;
     }
 
@@ -668,8 +741,9 @@ export class PhoneSession implements DurableObject {
   private safeSend(ws: WebSocket, frame: Parameters<typeof encodeServerFrame>[0]): void {
     try {
       ws.send(encodeServerFrame(frame));
-    } catch (err) {
-      logEvent("warn", "phone_session.send_failed", { error: String(err) });
+    } catch {
+      // 审计 R2：只记固定类别，不记 String(err)。
+      logEvent("warn", "phone_session.send_failed", { errorCode: "socket_send_failed" });
     }
   }
 

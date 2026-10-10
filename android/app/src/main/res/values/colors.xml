@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0D3B66</color>
+    <!-- 自适应图标的底色：取自图标卡片内部的中位色 #F0F0F1。
+         图案（前景）是从那张卡片里抠出来的，所以底色与卡片观感一致。 -->
+    <color name="ic_launcher_background">#F0F0F1</color>
 </resources>

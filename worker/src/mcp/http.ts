@@ -247,7 +247,8 @@ async function handlePost(
 
   // ---- 通知 ---------------------------------------------------------------
   if (parsed.kind === "notification") {
-    logEvent("debug", "mcp.notification", { method: rpc.method, sessionId: sessionIdHeader });
+    // 审计 R2：故意**不**记 sessionId（它是一张可复用该会话的凭证）。
+    logEvent("debug", "mcp.notification", { method: rpc.method });
     return rpcResponse(null, 202, accept, sessionIdHeader);
   }
 
@@ -338,20 +339,23 @@ async function handleInitialize(
 
   try {
     await createSession(env, sessionId, negotiated, clientInfo);
-  } catch (err) {
-    logEvent("error", "mcp.initialize_session_failed", { error: String(err) });
+  } catch {
+    // 审计 R2：日志记固定类别；回给客户端的 message 也用固定文案。
+    // `String(err)` 会顺着 JSON-RPC 错误回到客户端 —— 那是把内部细节
+    // （DO 名字、存储错误、甚至绑定信息）送出去，比写进日志更糟。
+    logEvent("error", "mcp.initialize_session_failed", { errorCode: "initialize_session_failed" });
     return {
-      payload: failure(id, RPC_SERVER_ERRORS.misconfigured, `无法创建 MCP 会话：${String(err)}`),
+      payload: failure(id, RPC_SERVER_ERRORS.misconfigured, "无法创建 MCP 会话"),
       status: 500,
     };
   }
 
   logEvent("info", "mcp.initialize", {
-    sessionId,
+    // 审计 R2：不记 sessionId（可复用会话的凭证）。
+    //   也不记 clientInfo.name / clientInfo.version —— 它们是**客户端自报的自由文本**，
+    //   属于请求体内容，按审计要求"不记录请求体"一律不落日志。
     requestedProtocolVersion: requested,
     negotiatedProtocolVersion: negotiated,
-    clientName: clientInfo?.name,
-    clientVersion: clientInfo?.version,
   });
 
   return {

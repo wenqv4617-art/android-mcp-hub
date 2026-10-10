@@ -14,7 +14,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { redact } from "../src/util/log";
+import { ERROR_CATEGORIES, sanitizeLogFields, UNCLASSIFIED_ERROR, WITHHELD } from "../src/util/log";
 import { loadConfig } from "../src/config";
 import {
   capturedLogs,
@@ -208,23 +208,47 @@ describe("安全 / 令牌不进日志", () => {
     expect(logs).not.toContain("this-is-a-wrong-token-value");
   });
 
-  it("日志里出现 deviceId 是可以的（不是秘密），但令牌字段一律脱敏", () => {
-    const redacted = redact({
+  it("日志只记录白名单字段：不在白名单里的键一个都不出现（即使它看起来很无辜）", () => {
+    // Gate 0.1 / R2：这条测试取代了 Gate 0 那条"按键名脱敏"的测试。
+    // 断言强度是**变强**不是变弱：旧版只证明"名字起对了的字段会被替换"，
+    // 新版直接证明"没被显式允许的字段根本不会出现在输出里" ——
+    // 后者才防得住 `payload: token` 这类事故。
+    const { safe } = sanitizeLogFields({
       deviceId: TEST_DEVICE_ID,
       Authorization: `Bearer ${TEST_DEVICE_TOKEN}`,
       token: TEST_DEVICE_TOKEN,
       tokenSha256: "abc",
       nested: { password: "hunter2", apiKey: "k", ok: "fine" },
-    }) as Record<string, unknown>;
+    });
 
-    expect(redacted["deviceId"]).toBe(TEST_DEVICE_ID);
-    expect(redacted["Authorization"]).toBe("[redacted]");
-    expect(redacted["token"]).toBe("[redacted]");
-    expect(redacted["tokenSha256"]).toBe("[redacted]");
-    const nested = redacted["nested"] as Record<string, unknown>;
-    expect(nested["password"]).toBe("[redacted]");
-    expect(nested["apiKey"]).toBe("[redacted]");
-    expect(nested["ok"]).toBe("fine");
+    expect(safe["deviceId"]).toBe(TEST_DEVICE_ID);
+    for (const forbidden of ["Authorization", "token", "tokenSha256", "nested"]) {
+      expect(safe, `${forbidden} 不该出现在日志字段里`).not.toHaveProperty(forbidden);
+    }
+    expect(JSON.stringify(safe)).not.toContain("hunter2");
+  });
+
+  it("白名单字段的值再被扫一遍：凭据形状的字符串一律替换", () => {
+    const shaped = `ghp_${"A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"}`;
+    const { safe } = sanitizeLogFields({ deviceId: shaped, reason: "token_mismatch" });
+
+    expect(safe["deviceId"]).toBe(WITHHELD);
+    expect(safe["reason"]).toBe("token_mismatch");
+    expect(JSON.stringify(safe)).not.toContain("ghp_");
+  });
+
+  it("错误类别必须来自固定表，不在表里的一律降级成 unclassified", () => {
+    // 这条是"不记录未经处理的异常字符串"的机械保证：
+    // 有人若想 logEvent(..., { errorCode: String(err) })，值会被换掉。
+    const { safe } = sanitizeLogFields({
+      errorCode: "Error: connect ECONNREFUSED 10.0.0.1:5432",
+    });
+    expect(safe["errorCode"]).toBe(UNCLASSIFIED_ERROR);
+    expect(JSON.stringify(safe)).not.toContain("ECONNREFUSED");
+
+    // 反过来，合法类别原样保留。
+    expect(sanitizeLogFields({ errorCode: "storage_failure" }).safe["errorCode"]).toBe("storage_failure");
+    expect(ERROR_CATEGORIES.has("unclassified")).toBe(true);
   });
 
   it("配置里读出来的凭据只有摘要，没有明文", async () => {

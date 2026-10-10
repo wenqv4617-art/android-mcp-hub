@@ -2,6 +2,7 @@ package com.androidmcphub.app.net
 
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
+import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.core.hostOf
 import com.androidmcphub.app.core.normalizeWebSocketUrl
 import com.androidmcphub.app.protocol.CLIENT_VERSION
@@ -32,7 +33,14 @@ import kotlin.random.Random
  */
 class PhoneLinkClient(
     private val configProvider: () -> HubConfig,
-    private val tokenProvider: () -> String,
+    /**
+     * 读设备令牌（Gate 0.1 审计 R4）。
+     *
+     * 返回三态而不是字符串：**"没设过"和"存过但解不开"必须分开处理**。
+     * 前者是"用户还没填"，后者是"存储坏了"，两者给用户的提示完全不同；
+     * 而把后者压成空串再往下走，就变成"静默用空凭据重试"。
+     */
+    private val credentialProvider: () -> TokenLoadResult,
     private val androidSdk: Int,
     private val log: (LogLevel, String) -> Unit = { _, _ -> },
     private val onStateChanged: (LinkState) -> Unit = {},
@@ -107,8 +115,8 @@ class PhoneLinkClient(
             execute(link.onLocalError("服务器地址无效，请在「高级设置」里填写形如 wss://<host>/phone/ws 的地址"))
             return
         }
-        if (tokenProvider().isBlank()) {
-            execute(link.onLocalError("设备令牌为空，请在「高级设置」里填写服务端下发的令牌"))
+        credentialProblem()?.let { problem ->
+            execute(link.onLocalError(problem))
             return
         }
         cfg.validate()?.let { problem ->
@@ -165,18 +173,43 @@ class PhoneLinkClient(
         )
     }
 
+    /**
+     * 判断凭据"能不能拿去建连"。返回 `null` 表示可以用。
+     *
+     * 三种不能用的情况必须给出**不同**的话，用户才知道该去填、该去重新保存、还是该检查输入。
+     * 其中 [TokenLoadResult.Unreadable] 是最要紧的一种：它看起来最像"没有令牌"，
+     * 但也最不能当成"没有令牌"处理。
+     */
+    private fun credentialProblem(): String? = credentialProblem(credentialProvider())
+
+    private fun credentialProblem(result: TokenLoadResult): String? = when (result) {
+        is TokenLoadResult.Present ->
+            if (result.token.isBlank()) "设备令牌为空，请在「高级设置」里重新填写" else null
+
+        TokenLoadResult.Absent ->
+            "还没有配置设备令牌，请在「高级设置」里填写服务端下发的令牌"
+
+        // reason 取自 TokenFailure 的闭集，不含令牌内容，可以安全地显示与记录。
+        is TokenLoadResult.Unreadable ->
+            "设备令牌无法解密（${result.reason}），请重新填写并保存"
+    }
+
     private fun openSocket() {
         val cfg = configProvider()
-        val token = tokenProvider()
         val url = normalizeWebSocketUrl(cfg.serverUrl)
         if (url == null) {
             execute(link.onLocalError("服务器地址无效，无法建连"))
             return
         }
-        if (token.isBlank()) {
-            execute(link.onLocalError("设备令牌为空，无法建连"))
+        // 每次真正建连前都重新读一次凭据：它是可能在这期间被改坏或失效的。
+        // 读不出来就**不建连**，而不是拿空令牌去撞一次 401。
+        val credential = credentialProvider()
+        val problem = credentialProblem(credential)
+        if (problem != null) {
+            execute(link.onLocalError(problem))
             return
         }
+        val token = (credential as TokenLoadResult.Present).token
 
         closeSocket()
 

@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.androidmcphub.app.core.HubDraft
 import com.androidmcphub.app.core.HubPrefs
+import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.service.LinkBus
 import com.androidmcphub.app.service.PhoneLinkService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,7 +21,20 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = HubPrefs(application)
 
-    private val _draft = MutableStateFlow(HubDraft.from(prefs.load(), prefs.loadToken()))
+    /**
+     * 一进界面就得知道的事：令牌到底读不读得出来（Gate 0.1 审计 R4）。
+     *
+     * 读不出来**必须**当场告诉用户，不能等用户点「连接」之后再说 ——
+     * 那时候他只会看到一句"认证失败"，根本想不到是自己那串令牌没被读出来。
+     */
+    private val initialCredential: TokenLoadResult = prefs.loadTokenResult()
+
+    private val _draft = MutableStateFlow(
+        HubDraft.from(
+            prefs.load(),
+            (initialCredential as? TokenLoadResult.Present)?.token.orEmpty(),
+        ),
+    )
 
     /** 「高级设置」表单草稿。 */
     val draft: StateFlow<HubDraft> = _draft.asStateFlow()
@@ -35,9 +49,12 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
     /** 「高级设置」是否展开。 */
     val advancedExpanded: StateFlow<Boolean> = _advancedExpanded.asStateFlow()
 
-    private val _message = MutableStateFlow<String?>(null)
+    private val _message = MutableStateFlow(
+        (initialCredential as? TokenLoadResult.Unreadable)
+            ?.let { "设备令牌无法解密（${it.reason}），请重新填写并保存" },
+    )
 
-    /** 一次性提示（保存成功 / 校验失败原因）。 */
+    /** 一次性提示（保存成功 / 校验失败原因 / 令牌读不出来）。 */
     val message: StateFlow<String?> = _message.asStateFlow()
 
     /** 连接状态（来自前台服务）。 */
@@ -51,6 +68,12 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 前台服务是否在运行。 */
     val serviceRunning = LinkBus.serviceRunning
+
+    /**
+     * 最近一次错误。来自 [LinkBus]，**不会**被"断开/服务销毁"清掉 ——
+     * 否则用户永远看不到连接为什么失败。
+     */
+    val lastError = LinkBus.lastError
 
     fun updateDraft(transform: (HubDraft) -> HubDraft) {
         _draft.value = transform(_draft.value)
@@ -73,8 +96,12 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
     fun save() {
         val config = _draft.value.toConfig()
         prefs.save(config)
-        prefs.saveToken(_draft.value.token.trim())
-        _message.value = "已保存"
+        // 令牌写失败必须说出来 —— 静默失败会让用户以为已经存好了。
+        _message.value = if (prefs.saveToken(_draft.value.token.trim())) {
+            "已保存"
+        } else {
+            "设置已保存，但设备令牌写入失败（存储不可用），请重试"
+        }
     }
 
     /**
@@ -94,9 +121,25 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         prefs.save(config)
-        prefs.saveToken(_draft.value.token.trim())
+        if (!prefs.saveToken(_draft.value.token.trim())) {
+            _message.value = "设备令牌写入失败（存储不可用），未发起连接"
+            return
+        }
         _message.value = null
+        LinkBus.clearLastError()
         PhoneLinkService.connect(getApplication())
+    }
+
+    /** 清掉"最近一次错误"，不动连接状态。 */
+    fun clearLastError() {
+        LinkBus.clearLastError()
+    }
+
+    /** 清空设备令牌（同时删掉磁盘上的密文）。 */
+    fun clearToken() {
+        _draft.value = _draft.value.copy(token = "")
+        prefs.clearToken()
+        _message.value = "设备令牌已清除"
     }
 
     /** 用户点「断开」：停掉服务，禁止自动重连。 */

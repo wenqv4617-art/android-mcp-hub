@@ -89,8 +89,12 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 
 #### T6 — 令牌出现在日志里
 把 `Authorization` 头或令牌打进日志，被平台日志、错误上报或人看到。
-**缓解**：①`logEvent` 所有字段过 `redact()`，敏感键模式 `/token|secret|authorization|password|credential|cookie|apikey/i`，子串匹配、任意深度、值替换为 `"[redacted]"`（`worker/src/util/log.ts`）；②日志里只出现 `deviceId` 和 `label`，从不出现令牌本身（`worker/src/index.ts:170`）；③**这条是被测试守着的**：`worker/test/security.test.ts` 用捕获的 console 缓冲区断言"任何令牌都不出现在日志里"。改坏 `redact` 会让测试红。
-**残余风险**：模式是"键名匹配"，如果哪天有人把令牌塞进一个叫 `payload` 的键，`redact` 不会救他。这是模式的固有弱点，**已知**。
+**缓解（Gate 0.1 审计 R2 之后改成白名单机制）**：`worker/src/util/log.ts` 现在有四道闸门 ——
+①**键名白名单** `SAFE_FIELDS`：不在名单里的键**整个丢弃、不递归**（`payload`、`message`、`error`、`body`、`headers` 这类名字天然不在名单里，所以"起对了名字才安全"的反过来了）；②只接受标量（`string`/`number`/`boolean`/`null`），对象与数组一律记成 `"[not-a-scalar]"`；③`errorCode` 必须落在 `ERROR_CATEGORIES` 闭集里，否则降级成 `"unclassified"`；④整行终检 —— 序列化后的**整行**若命中凭据形状（`CREDENTIAL_VALUE_PATTERN`：GitHub/OpenAI 令牌、PEM 私钥、`Bearer <长串>`、40+ 位 base64-ish 串），整行替换成 `{event:"log_withheld", log_withheld:true, reason:"credential_shaped_string_detected"}`，连 `event` 名都不原样保留。
+另外全仓库**不再有任何 `String(err)` 或 `err.stack`**：所有调用点改成固定错误类别（有静态扫描测试守着），顶层 catch 也不记堆栈。
+**已验证**：`worker/test/logging.test.ts`（12 条）把令牌分别塞进 `payload` / `message` / `error` / 嵌套对象 / 数组 / 异常信息 / **event 名**，断言捕获到的日志文本里不出现令牌；`worker/test/security.test.ts` 另有 3 条守着白名单、凭据形状替换与 `errorCode` 越界降级。
+**残余风险**：白名单是"默认不记"，代价是**调试信息变少**（想知道某个字段为什么没记下来，得先把它加进 `SAFE_FIELDS`）。这是刻意的取舍：漏记一条诊断信息的成本，远低于漏出一个凭据。
+（Gate 0 版本的键名黑名单法已经删除，`redact()` 不再存在 —— 如果你在别处看到它，那是过期的文档。）
 
 #### T7 — 非 WebSocket 请求打升级端点
 用普通 GET 打 `/phone/ws` 试图拿到非 socket 的响应或探测实现。
@@ -210,13 +214,38 @@ Gate 0 要证明的是**链路能通且不说谎**，不是"安全上线"。以�
 
 用 `specialUse` 是因为**没有更贴切的类型**：这个服务的职责是"维持一条被用户手动开启的、与用户自己服务器的长连接"。它不属于 `dataSync`（不是同步数据）、不属于 `connectedDevice`（连接的设备是用户自己这台）、不属于 `location`/`mediaPlayback`/`phoneCall`。
 
-任务书明令"**不使用虚假的前台服务类型绕过系统限制**"。所以：宁可走 `specialUse`（Play 商店会人工审核这个 subtype 的说明文字），也不去挑一个"看起来更像、但其实在撒谎"的类型。这个选择的完整论证与人工验证清单在 [android/README-ANDROID.md](android/README-ANDROID.md)。
+任务书明令"**不使用虚假的前台服务类型绕过系统限制**"。所以：宁可走 `specialUse`（Play 商店会人工审核这个 subtype 的说明文字），也不去挑一个"看起来更像、但其实在撒谎"的类型。这个选择的完整论证与人工验证清单在 [android/README-ANDROID.md](android/README-ANDROID.md)，
+逐版本（Android 13/14/15/16）的兼容性核对在 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md)。
 
-### 6.3 明文流量默认关闭
+**进入前台失败就不建连**（Gate 0.1 审计 R3）：`ServiceCompat.startForeground(...)` 可能抛
+`ForegroundServiceStartNotAllowedException`（后台启动限制）或 `MissingForegroundServiceTypeException`
+（类型/权限缺失）。这些异常**只按类名**归类成固定闭集（`android/app/src/main/java/com/androidmcphub/app/service/ConnectGate.kt`），
+失败时丢掉连接对象、置「出错」、撤通知、`stopSelf()`，并且**不安排任何重连** ——
+否则就变成"每退避一次就失败一次"的空转。异常 message 不进日志（与 §4 同一条纪律）。
+
+### 6.3 设备令牌在手机上怎么存（Gate 0.1 审计 R4）
+
+| 要求 | 实现 | 证据 |
+| --- | --- | --- |
+| 不明文落盘 | 磁盘上只有 `device_token_v1`，内容是 `v1.<base64url(iv)>.<base64url(AES-256-GCM 密文)>` | `core/DeviceTokenStore.kt` 的 `SecretCodec`；单测断言落盘内容不含明文片段 |
+| 密钥不可导出 | Android Keystore 生成 AES-256 密钥（`setUserAuthenticationRequired(false)`），别名 `android-mcp-hub.device-token.v1` | `core/AndroidSecretCipher.kt` |
+| 不进日志 | 令牌只出现在 WebSocket 的 `Authorization` 头里；错误路径只报**固定类别**（`token_decrypt_failed` 等） | `TokenFailure.ALL` 闭集 + 单测断言类别里不含令牌 |
+| 不进通知 | 通知文案只含 host 与状态；`buildNotification()` 不接触凭据 | `service/PhoneLinkService.kt` |
+| 不被备份导出 | `android:allowBackup="false"`（Manifest 第 22 行） | Manifest |
+| 不在 APK 里硬编码 | APK 里没有任何令牌；用户在界面里填 | `worker/test/security.test.ts` 的凭据形状扫描 |
+| 可以手动更换 | 界面上「清除已保存的令牌」+ 重新填写；Keystore 密钥**不**因清空令牌而删除 | `HubViewModel.clearToken()` |
+| 解密失败安全处理 | 返回 `Unreadable` 三态之一，**拒绝建连**，绝不用空令牌去撞一次 401 | `PhoneLinkClient.credentialProblem()`；单测断言此路径下服务端收不到任何请求 |
+| 明文迁移 | Gate 0 的明文键 `device_token` 在首次读取时加密迁移；**迁移失败不删明文**，但明确报"无法解密" | `HubPrefs.migrateLegacyPlaintextIfNeeded()` |
+
+**没有验证的部分**（不许当成已验证）：`AndroidSecretCipher` 的 Keystore 代码路径、`PrefsSecretStorage` 的 `commit()` 真实落盘、
+以及明文迁移，**都没有在任何设备或模拟器上跑过** —— JVM 单测跑不到 Keystore，本工程也没引 Robolectric。
+被单测覆盖的是它们**周围**的纯逻辑（三态区分、编解码、失败不吞）。真机验证项见 `android/README-ANDROID.md` 第 8 节的 14/14b/14c/14e。
+
+### 6.4 明文流量默认关闭
 
 `android/app/src/main/res/xml/network_security_config.xml`：`cleartextTrafficPermitted="false"`，只有系统信任锚。协议是 `wss://`，不需要明文例外。文件注释里写明了：本地联调要用 `ws://` 时，**改这个 XML**，不要在代码里加 `usesCleartextTraffic`。
 
-### 6.4 服务不被外部启动
+### 6.5 服务不被外部启动
 
 `android/app/src/main/AndroidManifest.xml:49`：`android:exported="false"`。只有本应用能启动/停止它，别的 App 调不起这个服务。
 

@@ -15,4 +15,16 @@
     <string name="notif_error">连接出错：%1$s</string>
     <string name="notif_idle">未连接</string>
     <string name="action_disconnect">断开</string>
+
+    <!--
+      前台服务启动失败（审计 R3）。这些文案刻意只说明"没能开始连接"，
+      不带任何技术细节 —— 具体原因走日志里的固定类别（ForegroundFailure.*）。
+    -->
+    <string name="fgs_error_start_not_allowed">系统不允许在后台启动前台服务，请回到应用界面后再点「连接」</string>
+    <string name="fgs_error_missing_type">前台服务类型声明不正确，无法开始连接</string>
+    <string name="fgs_error_security">权限不足，无法启动前台服务</string>
+    <string name="fgs_error_generic">无法启动前台服务，连接已取消</string>
+
+    <!-- 会话僵死看门狗 -->
+    <string name="link_error_stale_session">长时间没有收到服务端消息，已停止连接</string>
 </resources>

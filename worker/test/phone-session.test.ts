@@ -332,7 +332,7 @@ describe("PhoneSession / 6. 断线后重连", () => {
 });
 
 describe("PhoneSession / 7. 旧连接的响应被拒绝", () => {
-  it("代次变更后，来自旧连接的 pong 不得完成任何请求，只能得到 invalid_pong", async () => {
+  it("新连接一建立，旧代次的待处理请求立刻被判为 phone_replaced；迟到的 pong 不能再结算任何东西", async () => {
     const rig = await makeRig();
     // 代次 1：故意不回 pong，好让请求挂在 pending 里
     await connectMockPhone(rig, DEVICE, "no-response");
@@ -348,12 +348,53 @@ describe("PhoneSession / 7. 旧连接的响应被拒绝", () => {
     await connectMockPhone(rig, DEVICE, "normal");
     await settle();
 
+    // ★ Gate 0.1 审计 R1 之后，这里**不再**依赖旧 socket 的关闭事件、也不等 5 秒超时：
+    //   新连接建立的那一刻，旧代次的请求就已经被主动结算了。
+    const outcome = await pending;
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("phone_replaced");
+    expect(outcome.error.message).toContain("替换");
+
     // 模拟"旧连接在网络里还在飞的 pong 现在才到"：直接把它投给 DO。
     // 这是白盒注入 —— 真实场景里这条帧的 socket 已经被关掉了。
     const instance = rig.phone.instanceFor(DEVICE);
     await instance.webSocketMessage?.(
       gen1ServerSocket as never,
       JSON.stringify({ type: "phone_pong", request_id: "req-stale-1", timestamp: Date.now() }),
+    );
+    await settle();
+
+    const status = await phoneStatus(rig, DEVICE);
+    const metrics = status["metrics"] as Record<string, number>;
+    // 请求已经被结算过，所以这条迟到的 pong 只能落到"未知请求"上 ——
+    // 它**不可能**第二次结算同一个 request_id（"不允许重复结算"）。
+    expect(metrics["pongsMatched"]).toBe(0);
+    expect(metrics["pongsUnknown"]).toBe(1);
+    expect(metrics["pendingReplacedOnConnect"]).toBe(1);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+  });
+
+  it("旧 socket 上送来的 pong 不得完成**新代次**的请求（socket 代次二次校验）", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const state = rig.phone.ctxOf(DEVICE);
+    const gen1ServerSocket = state.getWebSockets("gen:1")[0]!;
+
+    // 代次 2 的新连接。同样让它故意不回，好把新代次的请求留在 pending 里。
+    await connectMockPhone(rig, DEVICE, "no-response");
+    await settle();
+
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-new-1", timeoutMs: 5_000 });
+    await settle();
+
+    // 请求属于代次 2（entry.generation === this.generation），所以第一个条件不成立；
+    // 唯一能挡住它的是"pong 来的那条 socket 不是当前代次"。
+    const instance = rig.phone.instanceFor(DEVICE);
+    await instance.webSocketMessage?.(
+      gen1ServerSocket as never,
+      JSON.stringify({ type: "phone_pong", request_id: "req-new-1", timestamp: Date.now() }),
     );
     await settle();
 
@@ -368,6 +409,233 @@ describe("PhoneSession / 7. 旧连接的响应被拒绝", () => {
     expect(metrics["pongsStaleGeneration"]).toBe(1);
     expect(metrics["pongsMatched"]).toBe(0);
     expect(status["pending_requests"]).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Gate 0.1 审计 R1：重连竞态
+// ---------------------------------------------------------------------------
+
+describe("PhoneSession / 11. 重连竞态（Gate 0.1 审计 R1）", () => {
+  it("旧请求未完成时建立新连接：旧请求立刻拿到 phone_replaced，而不是干等到超时", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+
+    // 给一个很长的超时（30s）。如果实现是"靠超时或 close 事件清理"，
+    // 这个 await 就会挂住 30 秒；R1 要求它必须**立刻**返回。
+    const started = Date.now();
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-r1-fast", timeoutMs: 30_000 });
+    await settle();
+
+    await connectMockPhone(rig, DEVICE, "normal");
+    await settle();
+
+    const outcome = await pending;
+    const elapsed = Date.now() - started;
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("phone_replaced");
+    // 断言"远早于超时"，把"其实还是走了超时路径"这种假通过排除掉。
+    expect(elapsed).toBeLessThan(2_000);
+
+    const metrics = (await phoneStatus(rig, DEVICE))["metrics"] as Record<string, number>;
+    expect(metrics["timeouts"]).toBe(0);
+    expect(metrics["pendingReplacedOnConnect"]).toBe(1);
+  });
+
+  it("旧连接的关闭事件**延迟**到达时，不会误伤新连接的待处理请求", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const gen1ServerSocket = rig.phone.ctxOf(DEVICE).getWebSockets("gen:1")[0]!;
+
+    // 旧请求：会被替换时结算掉
+    const stale = pingPhoneDirect(rig, DEVICE, { requestId: "req-old", timeoutMs: 30_000 });
+    await settle();
+
+    // 新连接（normal 场景：会正常回 pong）
+    await connectMockPhone(rig, DEVICE, "normal");
+    await settle();
+    expect((await stale).ok).toBe(false);
+
+    // 新代次的请求，先挂在 pending 上
+    const fresh = pingPhoneDirect(rig, DEVICE, { requestId: "req-fresh", timeoutMs: 5_000 });
+    await settle();
+
+    // ★ 现在才投递旧 socket 的 close 事件（现实中它可能晚几秒、甚至永远不到）。
+    const instance = rig.phone.instanceFor(DEVICE);
+    await instance.webSocketClose?.(gen1ServerSocket as never, 4001, "replaced by a newer connection", true);
+    await settle();
+
+    // 新请求必须**毫发无损**：它属于当前代次，旧 socket 的关闭与它无关。
+    const outcome = await fresh;
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.request_id).toBe("req-fresh");
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+  });
+
+  it("替换**之前**就已完成的请求不受影响（不会误杀已经答完的请求）", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "normal");
+
+    // 这一条在旧连接上正常答完了
+    const early = await pingPhoneDirect(rig, DEVICE, { requestId: "req-early", timeoutMs: 5_000 });
+    expect(early.ok).toBe(true);
+
+    await connectMockPhone(rig, DEVICE, "normal");
+    await settle();
+
+    const status = await phoneStatus(rig, DEVICE);
+    const metrics = status["metrics"] as Record<string, number>;
+    // 已经结算掉的请求不该被替换流程再碰一次 —— pendingReplacedOnConnect 必须是 0，
+    // 否则说明 failStalePending 把"全部 pending"清空了，而不是只清旧代次。
+    expect(metrics["pendingReplacedOnConnect"]).toBe(0);
+    expect(metrics["pongsMatched"]).toBe(1);
+    expect(metrics["pongsUnknown"]).toBe(0);
+    expect(status["pending_requests"]).toBe(0);
+  });
+
+  it("新旧连接并发响应：只有属于当前代次的那一条被接受，另一条不能复活旧请求", async () => {
+    const rig = await makeRig();
+    // 两侧都用 no-response：响应完全由测试注入，这样"哪一条先到"是确定的。
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const gen1ServerSocket = rig.phone.ctxOf(DEVICE).getWebSockets("gen:1")[0]!;
+
+    const stale = pingPhoneDirect(rig, DEVICE, { requestId: "req-both-old", timeoutMs: 30_000 });
+    await settle();
+
+    await connectMockPhone(rig, DEVICE, "no-response");
+    await settle();
+
+    const fresh = pingPhoneDirect(rig, DEVICE, { requestId: "req-both-new", timeoutMs: 5_000 });
+    await settle();
+
+    // 两条响应几乎同时到：一条从旧 socket 来（想复活已经被替换掉的旧请求），
+    // 一条从新 socket 来（合法）。
+    const instance = rig.phone.instanceFor(DEVICE);
+    const gen2ServerSocket = rig.phone.ctxOf(DEVICE).getWebSockets("gen:2")[0]!;
+    await instance.webSocketMessage?.(
+      gen1ServerSocket as never,
+      JSON.stringify({ type: "phone_pong", request_id: "req-both-old", timestamp: Date.now() }),
+    );
+    await instance.webSocketMessage?.(
+      gen2ServerSocket as never,
+      JSON.stringify({ type: "phone_pong", request_id: "req-both-new", timestamp: Date.now() }),
+    );
+    await settle();
+
+    const staleOutcome = await stale;
+    const freshOutcome = await fresh;
+
+    // 旧请求：在替换那一刻就已经被判失败了，旧 pong **不能**把它复活。
+    expect(staleOutcome.ok).toBe(false);
+    if (!staleOutcome.ok) expect(staleOutcome.error.code).toBe("phone_replaced");
+    // 新请求：正常成功，且 RTT / 代次都对。
+    expect(freshOutcome.ok).toBe(true);
+    if (freshOutcome.ok) {
+      expect(freshOutcome.request_id).toBe("req-both-new");
+      expect(freshOutcome.connection_generation).toBe(2);
+    }
+
+    const metrics = (await phoneStatus(rig, DEVICE))["metrics"] as Record<string, number>;
+    expect(metrics["pongsMatched"]).toBe(1);
+    expect(metrics["pendingReplacedOnConnect"]).toBe(1);
+  });
+
+  it("重连后新请求正常成功（替换没有把新连接弄坏）", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const stale = pingPhoneDirect(rig, DEVICE, { requestId: "req-c1", timeoutMs: 30_000 });
+    await settle();
+
+    const second = await connectMockPhone(rig, DEVICE, "normal");
+    expect((await stale).ok).toBe(false);
+
+    // 新连接上连发三次，全部成功，代次都是 2。
+    for (const id of ["req-c2", "req-c3", "req-c4"]) {
+      const outcome = await pingPhoneDirect(rig, DEVICE, { requestId: id, timeoutMs: 5_000 });
+      expect(outcome.ok, `${id} 应成功`).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.connection_generation).toBe(2);
+        expect(outcome.rtt_ms).toBeGreaterThanOrEqual(0);
+      }
+    }
+
+    const metrics = (await phoneStatus(rig, DEVICE))["metrics"] as Record<string, number>;
+    expect(metrics["pongsMatched"]).toBe(3);
+    expect(metrics["pongsStaleGeneration"]).toBe(0);
+    expect(metrics["connectionsAccepted"]).toBe(2);
+    expect(framesOfType(second.socket, "phone_ping")).toHaveLength(3);
+  });
+
+  it("同一个 request_id 绝不重复结算：指标只加一次，镜像与 alarm 同步收敛", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+    const gen1ServerSocket = rig.phone.ctxOf(DEVICE).getWebSockets("gen:1")[0]!;
+
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-once", timeoutMs: 30_000 });
+    await settle();
+
+    // 结算路径 1：新连接替换
+    await connectMockPhone(rig, DEVICE, "normal");
+    await settle();
+    const first = await pending;
+    expect(first.ok).toBe(false);
+
+    // 结算路径 2：同一条 request_id 的迟到 pong（此时表里已经没有它了）
+    const instance = rig.phone.instanceFor(DEVICE);
+    await instance.webSocketMessage?.(
+      gen1ServerSocket as never,
+      JSON.stringify({ type: "phone_pong", request_id: "req-once", timestamp: Date.now() }),
+    );
+    await settle();
+
+    // 结算路径 3：alarm 兜底再跑一遍（存储镜像里已经没有它了）
+    await instance.alarm?.();
+    await settle();
+
+    const status = await phoneStatus(rig, DEVICE);
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["pendingReplacedOnConnect"]).toBe(1);
+    expect(metrics["pongsMatched"]).toBe(0);
+    expect(metrics["timeouts"]).toBe(0);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
+    // alarm 必须被清掉：没有待处理请求就不该留着定时器。
+    expect(await rig.phone.ctxOf(DEVICE).storage.getAlarm()).toBeNull();
+  });
+
+  it("替换多个待处理请求时，每一个都各自拿到 phone_replaced（不会只处理第一个）", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+
+    const ids = ["req-m1", "req-m2", "req-m3", "req-m4", "req-m5"];
+    const pendings = ids.map((requestId) => pingPhoneDirect(rig, DEVICE, { requestId, timeoutMs: 30_000 }));
+    // 上面这些是并发发出的：先让 DO 把 5 个请求都登记好。
+    await settle(24);
+    expect((await phoneStatus(rig, DEVICE))["pending_requests"]).toBe(5);
+
+    await connectMockPhone(rig, DEVICE, "normal");
+    await settle(24);
+
+    const outcomes = await Promise.all(pendings);
+    for (let i = 0; i < outcomes.length; i += 1) {
+      const outcome = outcomes[i]!;
+      expect(outcome.ok, `${ids[i]} 应失败`).toBe(false);
+      if (!outcome.ok) {
+        expect(outcome.error.code).toBe("phone_replaced");
+        expect(outcome.request_id).toBe(ids[i]);
+      }
+    }
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect((status["metrics"] as Record<string, number>)["pendingReplacedOnConnect"]).toBe(5);
+    expect(status["pending_requests"]).toBe(0);
+    expect(status["pending_mirror"]).toBe(0);
   });
 });
 

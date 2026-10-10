@@ -1,6 +1,8 @@
 package com.androidmcphub.app.net
 
 import com.androidmcphub.app.core.HubConfig
+import com.androidmcphub.app.core.TokenFailure
+import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.protocol.LinkState
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -9,6 +11,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -67,7 +70,7 @@ class PhoneLinkClientTest {
         val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
         val client = PhoneLinkClient(
             configProvider = { config },
-            tokenProvider = { "test-token-not-a-secret" },
+            credentialProvider = { TokenLoadResult.Present("test-token-not-a-secret") },
             androidSdk = 35,
             onStateChanged = { states += it },
         )
@@ -83,7 +86,7 @@ class PhoneLinkClientTest {
             assertEquals("hello", hello.getString("type"))
             assertEquals("test-phone-1", hello.getString("device_id"))
             assertEquals("phone-link-v1", hello.getString("protocol_version"))
-            assertEquals("0.1.0", hello.getString("app_version"))
+            assertEquals("0.1.1-gate0.1", hello.getString("app_version"))
             assertEquals(35, hello.getInt("android_sdk"))
 
             // 随后必须用同一个 request_id 回 phone_pong
@@ -106,7 +109,7 @@ class PhoneLinkClientTest {
             assertNotNull(request)
             assertEquals("Bearer test-token-not-a-secret", request!!.getHeader("Authorization"))
             assertEquals("test-phone-1", request.getHeader("X-Device-Id"))
-            assertEquals("android-mcp-hub/0.1.0", request.getHeader("X-Client-Version"))
+            assertEquals("android-mcp-hub/0.1.1-gate0.1", request.getHeader("X-Client-Version"))
             assertEquals("GET", request.method)
             assertTrue("按契约不带 query", request.path == "/phone/ws")
 
@@ -133,7 +136,7 @@ class PhoneLinkClientTest {
         val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
         val client = PhoneLinkClient(
             configProvider = { config },
-            tokenProvider = { "test-token-not-a-secret" },
+            credentialProvider = { TokenLoadResult.Present("test-token-not-a-secret") },
             androidSdk = 35,
             onStateChanged = { states += it },
         )
@@ -156,7 +159,7 @@ class PhoneLinkClientTest {
         val config = HubConfig(serverUrl = "", deviceId = "test-phone-1")
         val client = PhoneLinkClient(
             configProvider = { config },
-            tokenProvider = { "test-token-not-a-secret" },
+            credentialProvider = { TokenLoadResult.Present("test-token-not-a-secret") },
             androidSdk = 35,
             onStateChanged = { states += it },
         )
@@ -182,7 +185,7 @@ class PhoneLinkClientTest {
         val config = HubConfig(serverUrl = "wss://example.test/phone/ws", deviceId = "test-phone-1")
         val client = PhoneLinkClient(
             configProvider = { config },
-            tokenProvider = { "" },
+            credentialProvider = { TokenLoadResult.Present("") },
             androidSdk = 35,
             onStateChanged = { states += it },
         )
@@ -195,6 +198,136 @@ class PhoneLinkClientTest {
             )
         } finally {
             client.shutdown()
+        }
+    }
+
+    // ── Gate 0.1 审计 R4：凭据读不出来时绝不建连 ──────────────────────────────
+
+    @Test
+    fun `令牌从未配置时拒绝连接，服务端一个请求都收不到`() {
+        val server = MockWebServer()
+        server.start()
+
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            credentialProvider = { TokenLoadResult.Absent },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue(
+                "没配置令牌必须拒绝连接，实际 $states",
+                awaitState(states, timeoutMs = 2_000L) { it is LinkState.Error },
+            )
+            assertEquals(
+                "不能拿空令牌去撞服务器",
+                0,
+                server.requestCount,
+            )
+        } finally {
+            client.shutdown()
+            runCatching { server.shutdown() }
+        }
+    }
+
+    @Test
+    fun `令牌解不开时拒绝连接，且提示与「从未配置」不同`() {
+        val server = MockWebServer()
+        server.start()
+
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            credentialProvider = { TokenLoadResult.Unreadable(TokenFailure.DECRYPT_FAILED) },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue(
+                "解不开的令牌必须拒绝连接，实际 $states",
+                awaitState(states, timeoutMs = 2_000L) { it is LinkState.Error },
+            )
+            // 关键：**不能**退化成"空令牌重试" —— 也就是一个请求都不该发出去。
+            assertEquals(0, server.requestCount)
+
+            val error = states.filterIsInstance<LinkState.Error>().first()
+            assertTrue(
+                "提示必须说清是解不开，而不是没配置：${error.message}",
+                error.message.contains("无法解密"),
+            )
+            assertTrue(
+                "提示里应当带上固定类别，便于排查：${error.message}",
+                error.message.contains(TokenFailure.DECRYPT_FAILED),
+            )
+            assertFalse("提示里不该出现令牌本身", error.message.contains("token-"))
+        } finally {
+            client.shutdown()
+            runCatching { server.shutdown() }
+        }
+    }
+
+    @Test
+    fun `每次建连都重新读凭据：中途读不出来就不再发起新连接`() {
+        val server = MockWebServer()
+        val serverOpened = CountDownLatch(1)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        serverOpened.countDown()
+                    }
+                },
+            ),
+        )
+        server.start()
+
+        var reads = 0
+        var credentialUsable = true
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(serverUrl = server.url("/phone/ws").toString(), deviceId = "test-phone-1")
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            credentialProvider = {
+                reads += 1
+                if (credentialUsable) {
+                    TokenLoadResult.Present("test-token-not-a-secret")
+                } else {
+                    TokenLoadResult.Absent
+                }
+            },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue("第一次建连应当成功", serverOpened.await(10, TimeUnit.SECONDS))
+            assertEquals(1, server.requestCount)
+
+            // 凭据在这期间坏掉了（密钥被系统作废、存储被改）。
+            // 再点一次「连接」：必须**不**发起新的网络请求，而不是拿空令牌去撞一次 401。
+            val readsBefore = reads
+            credentialUsable = false
+            client.start()
+
+            assertTrue(
+                "第二次应当因凭据不可用而报错，实际 $states",
+                awaitState(states, timeoutMs = 2_000L) { state ->
+                    state is LinkState.Error && state.message.contains("还没有配置设备令牌")
+                },
+            )
+            assertEquals("凭据读不出来就不该再有新的建连请求", 1, server.requestCount)
+            assertTrue("凭据必须每次建连都重新读（含 openSocket 那一次）", reads > readsBefore)
+        } finally {
+            client.shutdown()
+            runCatching { server.shutdown() }
         }
     }
 }

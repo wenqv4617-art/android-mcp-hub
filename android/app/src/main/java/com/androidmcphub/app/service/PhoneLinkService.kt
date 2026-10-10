@@ -51,6 +51,18 @@ object LinkBus {
     private val _lastPing = MutableStateFlow<PingOutcome?>(null)
     val lastPing: StateFlow<PingOutcome?> = _lastPing.asStateFlow()
 
+    private val _lastError = MutableStateFlow<String?>(null)
+
+    /**
+     * 最近一次错误（用户可读文案），与当前状态**解耦**。
+     *
+     * 为什么单独存一份：服务在 `onDestroy` 里会把连接状态复位成 [LinkState.Idle]，
+     * 如果错误只活在 `state` 里，用户看到的就是"莫名其妙变回未连接"，
+     * 「最近一次错误」那一栏也永远是空的。审计 R3 要求失败必须反映到界面状态上，
+     * 所以错误要能活过状态复位。这里是内存态，不落盘。
+     */
+    val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
     private val _serviceRunning = MutableStateFlow(false)
     val serviceRunning: StateFlow<Boolean> = _serviceRunning.asStateFlow()
 
@@ -60,6 +72,13 @@ object LinkBus {
 
     fun publishState(state: LinkState) {
         _state.value = state
+        // 只在错误类状态上写入；连接成功/重连中**不**清空它 ——
+        // 否则用户一重连就再也看不到上一次失败的原因了。
+        when (state) {
+            is LinkState.Error -> _lastError.value = state.message
+            is LinkState.AuthFailed -> _lastError.value = state.detail
+            else -> Unit
+        }
     }
 
     fun publishPing(outcome: PingOutcome?) {
@@ -70,7 +89,12 @@ object LinkBus {
         _serviceRunning.value = running
     }
 
-    /** 服务停止后把「连接相关」的展示状态复位（日志保留，方便用户回看刚才发生了什么）。 */
+    /** 用户主动清空「最近一次错误」（界面上的「清空日志」顺带做这件事）。 */
+    fun clearLastError() {
+        _lastError.value = null
+    }
+
+    /** 服务停止后把「连接相关」的展示状态复位（日志与最近错误保留，方便用户回看刚才发生了什么）。 */
     fun resetLink() {
         _state.value = LinkState.Idle
         _lastPing.value = null
@@ -148,11 +172,23 @@ class PhoneLinkService : Service() {
     // ---- 用户动作 ----------------------------------------------------------
 
     private fun handleConnect() {
-        goForeground(buildNotification(LinkState.Connecting))
+        // ★ 审计 R3 的核心修复：用 ConnectStartupSequence 把「进入前台 → 是否建连」
+        //   的顺序固定下来。旧实现直接调用 goForeground(...) 并忽略结果，失败之后
+        //   代码继续往下走建了 WebSocket —— 那是系统已经拒绝的路径。
+        //   顺序约束本身由 ConnectGateTest 在 JVM 上验证。
+        LinkBus.log.info("用户点击「连接」")
+        ConnectStartupSequence(
+            enterForeground = { goForeground(buildNotification(LinkState.Connecting)) },
+            startLink = { startLink() },
+            onAbort = { category -> abortStartup(category) },
+        ).run()
+    }
 
+    /** 真正创建并启动连接。**只可能**由 [ConnectStartupSequence] 在进入前台成功后调用。 */
+    private fun startLink() {
         val link = client ?: PhoneLinkClient(
             configProvider = { prefs.load() },
-            tokenProvider = { prefs.loadToken() },
+            credentialProvider = { prefs.loadTokenResult() },
             androidSdk = Build.VERSION.SDK_INT,
             log = { level, text -> LinkBus.log.add(level, text) },
             onStateChanged = { state ->
@@ -165,8 +201,27 @@ class PhoneLinkService : Service() {
             startedAtMs = System.currentTimeMillis()
         }
 
-        LinkBus.log.info("用户点击「连接」")
         link.start()
+    }
+
+    /**
+     * 前台服务启动失败后的收尾（审计 R3）。
+     *
+     * 关键点：
+     *  - 不创建、不启动 [PhoneLinkClient]（调用方已经 `return`，这里是兜底清理）；
+     *  - 把已有的连接对象丢掉，不留下一个"没进前台却在后台重连"的状态；
+     *  - 撤掉前台状态与通知，然后 `stopSelf()`，让服务不要挂在那里；
+     *  - **不安排任何重连**：失败发生在任何一次连接尝试之前，自动重试只会在
+     *    完全相同的条件下再失败一遍，变成用户看不见的循环。唯一的恢复路径是
+     *    用户回到前台再点一次「连接」。
+     */
+    private fun abortStartup(category: String) {
+        LinkBus.log.error("前台服务启动失败，已取消连接（errorCode=$category）")
+        client?.shutdown()
+        client = null
+        LinkBus.publishState(LinkState.Error(getString(ForegroundFailure.userMessageRes(category))))
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun handleDisconnect() {
@@ -218,7 +273,7 @@ class PhoneLinkService : Service() {
         if (silent < STALE_SESSION_TIMEOUT_MS) return
 
         LinkBus.log.warn("连续 ${silent / 1000} 秒没有服务端帧，判定会话已僵死，主动停止前台服务")
-        LinkBus.publishState(LinkState.Error("会话超时，已停止连接"))
+        LinkBus.publishState(LinkState.Error(getString(R.string.link_error_stale_session)))
         client?.stop()
         client = null
         stopForegroundService()
@@ -239,18 +294,25 @@ class PhoneLinkService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun goForeground(notification: Notification) {
-        runCatching {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-            )
-        }.onFailure {
-            // 例如系统限制后台启动前台服务（本应用只在用户前台点击时进入这里）
-            LinkBus.log.error("进入前台服务失败：${it.javaClass.simpleName}: ${it.message}")
-        }
+    /**
+     * 进入前台（审计 R3：返回**明确结果**，而不是把异常吞掉）。
+     *
+     * 失败时只带回一个固定类别（[ForegroundFailure]），
+     * 异常的 `message` 与堆栈都不进日志 —— 它们可能夹带与用户数据相关的原文。
+     */
+    private fun goForeground(notification: Notification): ForegroundResult = try {
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+        )
+        ForegroundResult.Started
+    } catch (error: RuntimeException) {
+        // ForegroundServiceStartNotAllowedException（API 31+）与
+        // MissingForegroundServiceTypeException（API 34+）都是 RuntimeException 的子类，
+        // 这里不需要为它们写 `is` 判断 —— 那样在低版本设备上会去加载不存在的类。
+        ForegroundResult.Failed(ForegroundFailure.classify(error))
     }
 
     private fun updateNotification(state: LinkState) {
