@@ -54,11 +54,19 @@ export class FakeWebSocket {
   readonly sent: string[] = [];
   /** 这个端点**收到**过的帧（测试断言服务端回了什么）。 */
   readonly receivedFrames: string[] = [];
+  /**
+   * 收到的**二进制**帧，单独放一个数组。
+   *
+   * 不并进 `receivedFrames`：那个数组的消费方（`framesOfType`、几个测试里的
+   * `.includes(...)` / `JSON.parse(...)`）都假定里面是文本。为了不惊动它们，
+   * 二进制单独记账。存在理由见 `deliver()` 上的注释。
+   */
+  readonly receivedBinaryFrames: ArrayBuffer[] = [];
   closeInfo: { code: number; reason: string } | null = null;
 
   private attachment: unknown = null;
   private readonly listeners = new Map<string, Set<SocketEventListener>>();
-  private readonly queued: string[] = [];
+  private readonly queued: Array<string | ArrayBuffer> = [];
 
   accept(): void {
     if (this.readyState === 0) {
@@ -73,19 +81,33 @@ export class FakeWebSocket {
     for (const data of pending) this.deliver(data);
   }
 
-  /** 把一条帧投给自己：先记账，再触发 message 事件。 */
-  deliver(data: string): void {
-    this.receivedFrames.push(data);
+  /**
+   * 把一条帧投给自己：先记账，再触发 message 事件。
+   *
+   * ⚠ 必须能投**二进制**帧。workerd 的 `webSocketMessage` 对二进制帧给的是
+   * `ArrayBuffer`，被测代码正是靠 `typeof message !== "string"` 拒绝它的
+   * （worker/src/phone/phone-session.ts:576-585）。如果这里只接受字符串、
+   * 把二进制悄悄转成文本，那条协议约束就永远走不到，"测过了"是假的。
+   */
+  deliver(data: string | ArrayBuffer): void {
+    if (typeof data === "string") this.receivedFrames.push(data);
+    else this.receivedBinaryFrames.push(data);
     this.dispatch("message", { data });
   }
 
   send(data: string | ArrayBuffer | ArrayBufferView): void {
     if (this.readyState !== 1) throw new Error("WebSocket is not open (readyState=" + this.readyState + ")");
-    const text = typeof data === "string" ? data : "<binary>";
-    this.sent.push(text);
+    // `sent` 里只留一个可读占位（断言时关心的是"发了几帧、发的是什么帧"）；
+    // 但**投给对端的仍是原始负载**，二进制不能被降级成字符串。
+    const payload: string | ArrayBuffer =
+      typeof data === "string"
+        ? data
+        : data instanceof ArrayBuffer
+          ? data
+          : (data.buffer as ArrayBuffer);
+    this.sent.push(typeof payload === "string" ? payload : "<binary>");
     const peer = this.peer;
     if (peer === null) return;
-    const payload = text;
     queueMicrotask(() => {
       if (peer.readyState === 0) peer.queued.push(payload);
       else if (peer.readyState === 1) peer.deliver(payload);
@@ -248,9 +270,49 @@ export class FakeDurableObjectStorage {
     return failure;
   }
 
+  /**
+   * "慢存储"注入（Gate 1.5 阶段 1A 新增）。
+   *
+   * 与 `failNext` / `hangNext` 是**三条互相独立**的注入通道：
+   *   - `failNext`  → 抛错
+   *   - `hangNext`  → 永不返回
+   *   - `delayNext` → 等一会再正常返回
+   *
+   * 存在的理由：`handlePingRequest` 里有一段明确的竞态 —— 定时器在记账**之前**武装，
+   * 所以"超时先于记账完成"是可能发生的（代码里对应 `pingsSettledBeforeSend` 分支与
+   * "既然已经结算，**绝对不能**再发这一帧"的注释）。没有"让存储变慢"的手段，
+   * 这条分支就只能靠读代码相信它存在，永远没法被测试真的走到。
+   */
+  readonly delays: Array<{ op: InjectedFailure["op"]; key?: string; times: number; delayMs: number; hits: number }> = [];
+
+  /** 登记一次"慢存储"注入：接下来 [times] 次匹配 (op, key) 的调用先等 delayMs 毫秒。 */
+  delayNext(op: InjectedFailure["op"], opts: { key?: string; times?: number; delayMs: number }): void {
+    this.delays.push({
+      op,
+      ...(opts.key !== undefined ? { key: opts.key } : {}),
+      times: opts.times ?? 1,
+      delayMs: opts.delayMs,
+      hits: 0,
+    });
+  }
+
+  /** 命中就 await 一下；没命中立刻返回。 */
+  private async applyDelay(op: InjectedFailure["op"], key: string | undefined): Promise<void> {
+    for (const d of this.delays) {
+      if (d.op !== op) continue;
+      if (d.key !== undefined && d.key !== key) continue;
+      if (d.times <= 0) continue;
+      d.times -= 1;
+      d.hits += 1;
+      await new Promise((r) => setTimeout(r, d.delayMs));
+      return;
+    }
+  }
+
   /** 清空所有还没用完的故障注入。 */
   clearInjectedFailures(): void {
     this.injected.length = 0;
+    this.delays.length = 0;
   }
 
   /** 命中检查：返回命中的那条注入（并消耗一次），没命中返回 null。 */
@@ -284,12 +346,14 @@ export class FakeDurableObjectStorage {
     if (Array.isArray(keyOrKeys)) {
       const out = new Map<string, T>();
       for (const key of keyOrKeys) {
+        await this.applyDelay("get", key);
         if (this.maybeFail("get", key) !== null) return neverSettles<Map<string, T>>();
         const value = this.map.get(key);
         if (value !== undefined) out.set(key, structuredClone(value) as T);
       }
       return out;
     }
+    await this.applyDelay("get", keyOrKeys);
     if (this.maybeFail("get", keyOrKeys) !== null) return neverSettles<T>();
     const value = this.map.get(keyOrKeys);
     return value === undefined ? undefined : (structuredClone(value) as T);
@@ -297,6 +361,7 @@ export class FakeDurableObjectStorage {
 
   async put<T>(keyOrEntries: string | Record<string, unknown>, value?: T): Promise<void> {
     if (typeof keyOrEntries === "string") {
+      await this.applyDelay("put", keyOrEntries);
       if (this.maybeFail("put", keyOrEntries) !== null) return neverSettles<void>();
       this.map.set(keyOrEntries, structuredClone(value));
       this.writes.push(keyOrEntries);
@@ -304,6 +369,7 @@ export class FakeDurableObjectStorage {
     }
     let hanging = false;
     for (const k of Object.keys(keyOrEntries)) {
+      await this.applyDelay("put", k);
       if (this.maybeFail("put", k) !== null) hanging = true;
     }
     for (const [k, v] of Object.entries(keyOrEntries)) {
@@ -338,6 +404,7 @@ export class FakeDurableObjectStorage {
   }
 
   async list<T>(options?: { prefix?: string; limit?: number }): Promise<Map<string, T>> {
+    await this.applyDelay("get", options?.prefix);
     const out = new Map<string, T>();
     const prefix = options?.prefix ?? "";
     const limit = options?.limit ?? Infinity;
@@ -350,16 +417,19 @@ export class FakeDurableObjectStorage {
   }
 
   async getAlarm(): Promise<number | null> {
+    await this.applyDelay("getAlarm", undefined);
     if (this.maybeFail("getAlarm", undefined) !== null) return neverSettles<number | null>();
     return this.alarmAt;
   }
 
   async setAlarm(scheduledTime: number | Date): Promise<void> {
+    await this.applyDelay("setAlarm", undefined);
     if (this.maybeFail("setAlarm", undefined) !== null) return neverSettles<void>();
     this.alarmAt = scheduledTime instanceof Date ? scheduledTime.getTime() : scheduledTime;
   }
 
   async deleteAlarm(): Promise<void> {
+    await this.applyDelay("deleteAlarm", undefined);
     if (this.maybeFail("deleteAlarm", undefined) !== null) return neverSettles<void>();
     this.alarmAt = null;
   }

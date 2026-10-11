@@ -563,4 +563,46 @@ class PhoneLinkTest {
 
         assertEquals(h.now + 1_000L, (h.link.state as LinkState.Reconnecting).deadlineMs)
     }
+
+    // ---- C3：重连定时器与网络恢复事件的竞争 ---------------------------------
+
+    @Test
+    fun `C3 网络恢复之后，那次已经被唤醒的过期重连定时器不得再开一次连接`() {
+        val h = Harness()
+        h.link.start()
+
+        // 断线：安排重连，此刻定时器已经在飞（真实实现里 ScheduledExecutorService
+        // 不会因为逻辑上撤销了安排就消失，到点仍然会回调一次）。
+        h.link.onSocketFailure("没有网络", null)
+        assertTrue(h.link.state is LinkState.Reconnecting)
+
+        // 网络在退避到点之前恢复：立即重连
+        val eager = h.link.onNetworkAvailable()
+        assertEquals(listOf(LinkAction.Close, LinkAction.Open), eager)
+
+        // 定时器"到点"了
+        val late = h.link.onReconnectTimerFired()
+
+        assertEquals("过期的重连定时器必须什么都不做", emptyList<LinkAction>(), late)
+        assertEquals("状态不得被过期定时器改变", LinkState.Connecting, h.link.state)
+    }
+
+    @Test
+    fun `C3 定时器先到点、网络恢复随后到达时，动作里必须带一次 Close`() {
+        val h = Harness()
+        h.link.start()
+        h.link.onSocketFailure("没有网络", null)
+
+        h.now += 1_000L
+        assertEquals(listOf(LinkAction.Open), h.link.onReconnectTimerFired())
+
+        val recovery = h.link.onNetworkAvailable()
+
+        // 缺了这次 Close，就会同时留着两条连接。
+        assertEquals(
+            "网络恢复必须先把上一条连接关掉，否则会同时存在两条",
+            listOf(LinkAction.Close, LinkAction.Open),
+            recovery,
+        )
+    }
 }
