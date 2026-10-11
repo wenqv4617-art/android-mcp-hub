@@ -423,7 +423,10 @@ Gate 0 还没有授权服务器，指向一个不存在的地址只会让 ChatGP
 
 - [ ] `/oauth/authorize`（GET/POST）、`/oauth/token`、`/oauth/register`。
 - [ ] PKCE S256、code 一次性（`RETURNING` 判行）、`client_id`/`redirect_uri` 精确绑定。
-- [ ] 同意页 CSP `form-action` = `'self'` + 已验证回调 origin，其余指令逐字不变。
+- [x] 同意页 CSP `form-action` = `'self'` + 已验证回调 origin，其余指令逐字不变。
+      （**部分完成**：现值为 `'self' https://chatgpt.com`，覆盖部署值里的主要主机；
+      但 origin 是静态硬编码、未与 `OAUTH_REDIRECT_ALLOWLIST` 联动 ⇒ 清单里的 `localhost`
+      与 `*.chatgpt.com` 子域仍会被 CSP 拦下。真实浏览器验证仍见第 9 节 U10，**未做**。）
 - **判据（必须含真实浏览器）：**
   - Node 端到端脚本：register → authorize → login → consent → approve →
     断言 `302` 带 `code`/`state`/`iss` → 换 token → 调 `/mcp` → 重放 code 被拒 →

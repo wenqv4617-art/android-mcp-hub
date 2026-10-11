@@ -1,1 +1,6 @@
+$ npm run typecheck
+
+> android-mcp-hub@0.1.0-gate1 typecheck
+> tsc --noEmit -p tsconfig.json
+
 TYPECHECK_EXIT=0

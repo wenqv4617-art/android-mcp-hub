@@ -85,7 +85,7 @@ android-mcp-hub/
 │       │   ├── session-do.ts      McpSession DO（会话生命周期）
 │       │   └── tools.ts           phone_ping 的定义、参数校验、结果映射
 │       └── util/                  ids / crypto / http / log（白名单式安全日志）
-├── worker/test/                   219 个自动化测试 + Workers 运行时 shim
+├── worker/test/                   223 个自动化测试 + Workers 运行时 shim
 │   ├── harness/                   Node 端 Workers 运行时替身（含故障注入，见 TEST_REPORT.md）
 │   └── *.test.ts                  8 个测试文件
 ├── tools/mock-phone/              模拟手机 WebSocket 客户端（可命令行、可被引用）
@@ -130,7 +130,7 @@ npm run gate0        # = typecheck && test && e2e
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm run test         # 219 个用例（8 个测试文件）
+npm run test         # 223 个用例（8 个测试文件）
 npm run e2e          # 21 项端到端检查（真 HTTP + 真 WebSocket + 官方 MCP SDK）
 ```
 

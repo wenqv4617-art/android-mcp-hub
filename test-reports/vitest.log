@@ -1,25 +1,30 @@
+$ npm run test
+
+> android-mcp-hub@0.1.0-gate1 test
+> vitest run --config worker/vitest.config.ts
+
 
  RUN  v4.1.11 /root/android-mcp-hub
 
- ✓ worker/test/logging.test.ts (12 tests) 62ms
- ✓ worker/test/tools.test.ts (19 tests) 154ms
- ✓ worker/test/worker-index.test.ts (20 tests) 61ms
- ✓ worker/test/mcp-http.test.ts (31 tests) 127ms
+ ✓ worker/test/logging.test.ts (12 tests) 73ms
+ ✓ worker/test/tools.test.ts (19 tests) 160ms
+ ✓ worker/test/worker-index.test.ts (20 tests) 57ms
+ ✓ worker/test/mcp-http.test.ts (31 tests) 131ms
  ✓ worker/test/mcp-session.test.ts (11 tests) 33ms
- ✓ worker/test/security.test.ts (31 tests) 941ms
- ✓ worker/test/oauth.test.ts (49 tests) 1313ms
-     ✓ 注册记录数到上限后拒绝新增，并且回 429 而不是 503  583ms
-     ✓ 已经连上的客户端不受上限影响：容量满了之后 authorize 仍然可用  562ms
- ✓ worker/test/phone-session.test.ts (46 tests) 5103ms
-     ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  412ms
-     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  313ms
-     ✓ alarm 处理器自己的记账失败不会向外抛，指标照常记一笔  318ms
-     ✓ 落盘永不返回：调用方仍在超时那一刻拿到 phone_timeout，而不是永远挂着  394ms
-     ✓ 同一个 request_id 的第二个未完成请求被拒绝为 409 duplicate_request_id  338ms
+ ✓ worker/test/security.test.ts (31 tests) 895ms
+ ✓ worker/test/oauth.test.ts (53 tests) 1464ms
+     ✓ 注册记录数到上限后拒绝新增，并且回 429 而不是 503  621ms
+     ✓ 已经连上的客户端不受上限影响：容量满了之后 authorize 仍然可用  678ms
+ ✓ worker/test/phone-session.test.ts (46 tests) 4932ms
+     ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  413ms
+     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  311ms
+     ✓ alarm 处理器自己的记账失败不会向外抛，指标照常记一笔  313ms
+     ✓ 落盘永不返回：调用方仍在超时那一刻拿到 phone_timeout，而不是永远挂着  313ms
+     ✓ 同一个 request_id 的第二个未完成请求被拒绝为 409 duplicate_request_id  313ms
 
  Test Files  8 passed (8)
-      Tests  219 passed (219)
-   Start at  06:34:48
-   Duration  6.68s (transform 2.77s, setup 1.43s, import 3.77s, tests 7.79s, environment 1ms)
+      Tests  223 passed (223)
+   Start at  07:23:25
+   Duration  6.47s (transform 2.87s, setup 1.30s, import 3.65s, tests 7.74s, environment 1ms)
 
 VITEST_EXIT=0

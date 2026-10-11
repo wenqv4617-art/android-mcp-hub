@@ -7,7 +7,7 @@
 
 ## 0. 一句话现状
 
-**代码已经具备完整闭环所需的全部能力，本地能证明的每一条都通过了（阶段 A：13 PASS / 0 FAIL / 6 NOT RUN）；但「ChatGPT 真的 ping 到这台手机」这件事本身还没有发生 —— 它需要用户在专属账号里执行一次真实的 `wrangler deploy`（已获批准，约定由用户自己执行），然后手机连上、ChatGPT 完成授权。**
+**代码已经具备完整闭环所需的全部能力，本地能证明的每一条都通过了（阶段 A：14 PASS / 0 FAIL / 6 NOT RUN）；但「ChatGPT 真的 ping 到这台手机」这件事本身还没有发生 —— 它需要用户在专属账号里执行一次真实的 `wrangler deploy`（已获批准，约定由用户自己执行），然后手机连上、ChatGPT 完成授权。**
 >
 > 另：由于 Termux 装不上 workerd，新增了 `worker-gate1-check.yml` 把 Worker 测试挪到 ubuntu runner 上；它在本地已通过静态校验（A13），但**尚未在 GitHub 上真实执行过**（需用户手动触发）。
 
@@ -46,7 +46,7 @@
 | # | 项目 | 命令 | 结果 | 证据文件 |
 | --- | --- | --- | --- | --- |
 | A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
-| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 219 passed (219)` | `test-reports/vitest.log` |
+| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 223 passed (223)` | `test-reports/vitest.log` |
 | A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
 | A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=171 failures=0 errors=0 skipped=0`（14 个测试类） | `test-reports/android-build.log` |
 | A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
@@ -58,12 +58,13 @@
 | A11 | **部署后自检脚本本身可信**（部署前能验的就只剩这个） | `npm run smoke:selftest` | **PASS** — 10 PASS / 0 FAIL。先回放**正确**响应证明 `tools/gate1-smoke.mjs` 判 PASS（退出码 0），再把 S256、`resource_metadata`、`healthz.status` 分别改坏，证明它**真的会**报 FAIL（退出码 1），目标不可达时报退出码 2 —— 即「不会假绿、也不会把没验的算成通过」 | `test-reports/smoke-selftest.log` |
 | A12 | **部署文档里的凭据生成流程真的能跑通**（部署已被批准、改由用户执行，文档本身于是也成了交付件） | `printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone`，再把输出的那段 JSON 喂给真实的 `loadConfig` | **PASS** — 生成的记录被 `loadConfig` 接受：`problems: []`、`credentials: 1`、`deviceId: "my-android-phone"`、`tokenSha256` 长度 64、`oauth.enabled: true`、`hasMcpAccessToken: false`（正是我们要部署的那套配置） | 本节 |
 | A13 | **三个工作流都满足各自的静态约束**（两个测试类工作流零部署能力；`deploy-worker.yml` 是唯一的部署入口，必须人工输入 `DEPLOY` 且只在 `gate0` 上） | `npx vitest run worker/test/security.test.ts`（16 条闸门 + 12 条篡改反向测试） | **PASS** — 测试类：`workflow_dispatch` 手动触发、无 push/PR/定时触发、无部署命令/云凭据/GitHub Secrets、`permissions: contents: read`；部署类：13 条约束逐条满足。**篡改必须被拒绝**已实测：删 `DEPLOY` 确认条件 / `gate0` 改 `main` / 加 `push:` / 加 `id-token: write` / 凭据改明文 / 把部署挪到 dry-run 之前 / 测试类工作流里塞 `wrangler deploy` / 塞 `secrets.` / 清单多一个 `rogue.yml` / 清单少一个文件，各自都会红；再把这套检查函数改成恒返回空数组 → `Tests 6 failed \| 25 passed (31)` | `test-reports/vitest.log`；说明见 `TEST_REPORT.md` §12.13 / §12.16 / §12.17 |
+| A14 | **同意页 CSP 放行 ChatGPT 回调主机**（真机联调回来的 bug：填对口令但回不到 ChatGPT） | `npx vitest run worker/test/oauth.test.ts`（4 条 CSP 用例） | **PASS** — `form-action` 由 `'self'` 改为 `'self' https://chatgpt.com`；4 条用例分别守"放行且没有别的来源"、"批准后 302 的 origin 确实落在 `form-action` 里"、"原有收紧项一条没少"、"同意页与错误页共用同一份 CSP"。把该值临时改回 `'self'` → `Tests 3 failed \| 50 passed (53)`，还原后逐字节一致 | `test-reports/vitest.log`；说明见 `TEST_REPORT.md` §12.18 |
 
-### A2 明细（`worker/test/` 8 个文件，219 条）
+### A2 明细（`worker/test/` 8 个文件，223 条）
 
 | 文件 | 条数 | 覆盖 |
 | --- | --- | --- |
-| `worker/test/oauth.test.ts` | 49 | **Gate 1 新增**：OAuth 全流程 + 安全性质 |
+| `worker/test/oauth.test.ts` | 53 | **Gate 1 新增**：OAuth 全流程 + 安全性质 + **同意页 CSP 的跳转兼容性 4 条** |
 | `worker/test/phone-session.test.ts` | 46 | DO 状态机、超时、断线、重建、**发现项 A/B/C 的故障注入** |
 | `worker/test/mcp-http.test.ts` | 31 | `/mcp` 传输层、鉴权、会话、方法派发 |
 | `worker/test/tools.test.ts` | 19 | `phone_ping` 参数校验与结果形状 |
@@ -72,9 +73,9 @@
 | `worker/test/logging.test.ts` | 12 | 日志白名单 / 错误类别 / 凭据形状终检 |
 | `worker/test/mcp-session.test.ts` | 11 | `McpSession` 生命周期与 TTL |
 
-> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 49+46+31+20+19+31+12+11 = **219**，与 vitest 自报的 `219 passed` 逐条吻合。
+> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 53+46+31+20+19+31+12+11 = **223**，与 vitest 自报的 `223 passed` 逐条吻合。
 >
-> `oauth.test.ts` 由 46 增至 49：新增客户端注册上限（`MAX_CLIENTS = 500`，超出回 **429** 而非 503）与 `redirect_uris` 数组长度闸（`MAX_REDIRECT_URIS = 10`）三条。这修掉的是 `docs/GATE1_SECURITY.md` 里原本记为**已知问题 G1-K1** 的真实资源耗尽路径：`/oauth/register` 必须公开，而 `client:` 记录既无 `expiresAt`、也不在 `alarm()` 的清理前缀里 —— 一个不需要任何凭据的循环就能让它单调增长。上限闸门整段删掉时这条测试会红（`Tests 1 failed | 48 passed`）。
+> `oauth.test.ts` 由 46 增至 49、再由 49 增至 **53**。前三条是客户端注册上限（`MAX_CLIENTS = 500`，超出回 **429** 而非 503）与 `redirect_uris` 数组长度闸（`MAX_REDIRECT_URIS = 10`）。这修掉的是 `docs/GATE1_SECURITY.md` 里原本记为**已知问题 G1-K1** 的真实资源耗尽路径：`/oauth/register` 必须公开，而 `client:` 记录既无 `expiresAt`、也不在 `alarm()` 的清理前缀里 —— 一个不需要任何凭据的循环就能让它单调增长。上限闸门整段删掉时这条测试会红（`Tests 1 failed | 48 passed`）。**后四条是同意页 CSP**：`form-action` 必须放行 ChatGPT 回调主机，否则批准后的 `302` 会被浏览器拦下（症状是"填对口令但页面不动、回不到 ChatGPT"，真机联调时踩到）。把该值改回 `'self'` → `Tests 3 failed | 50 passed (53)`。详见 `TEST_REPORT.md` §12.18。
 >
 > `security.test.ts` 由 15 增至 19：新增 `describe("安全 / 不开启任何自动部署")` —— 起初三条，Gate 1 收尾时第 2 条由"禁字符串"改写为"禁能力"、并补了第 4 条（工作流清单必须恰好是两个文件）。起因见 `TEST_REPORT.md` §12.16：Termux 装不上 workerd，于是多了一个在 ubuntu 上跑测试的工作流，而"跑测试"这件事本身就会碰到 `wrangler` 这个词 —— 禁字符串的闸会去咬正确的改动。四条都做过故障注入验证（`on: push` → 1 红；`run: npx wrangler deploy` + `CLOUDFLARE_API_TOKEN: ${{ secrets.CF_TOKEN }}` → 1 红且失败信息点名文件；多丢一个 `rogue.yml` → 1 红），注入后还原到逐字节一致。
 
@@ -151,10 +152,10 @@
 
 | 阶段 | PASS | FAIL | NOT RUN | BLOCKED | 合计 |
 | --- | --- | --- | --- | --- | --- |
-| A 本地自动化（含 A9–A13 五项部署前检查） | **13** | 0 | 6 | 0 | 19 |
+| A 本地自动化（含 A9–A14 六项部署前检查） | **14** | 0 | 6 | 0 | 20 |
 | B 真实 Cloudflare 联调 | 0 | 0 | 0 | **10** | 10 |
 | C ChatGPT 官方验收 | 0 | 0 | 0 | **6** | 6 |
-| **合计** | **13** | **0** | **6** | **16** | **35** |
+| **合计** | **14** | **0** | **6** | **16** | **36** |
 
 ---
 

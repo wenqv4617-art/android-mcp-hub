@@ -78,7 +78,9 @@ Gate 1 把 `/mcp` 从"共享一个静态 Bearer"升级成"**完整的 OAuth 2.1 
 15. **撤销不区分"令牌是否存在"。** 一律 200，避免 `/oauth/revoke` 变成"这个令牌还有效吗"的探测探针。
 16. **CORS 只对 OAuth 端点放开，且不依赖 Origin 做信任判断。**
     OAuth 端点本来就是给别的源（ChatGPT 后端/前端）用的；安全性来自"不使用 Cookie、凭据只出现在 body 与 Authorization 头"。
-    同意页则相反：`form-action 'self'`，只接受来自自己页面的提交。
+    同意页则相反：`form-action 'self' https://chatgpt.com` —— 表单只能提交回自己，但批准后的 `302`
+    会跳往 ChatGPT，而 `form-action` **会跟着这次重定向走**（见 `docs/OAUTH-DESIGN.md` §3.5），
+    所以必须显式放行已验证的回调主机；其余指令（`default-src 'none'` / `base-uri 'none'` / `frame-ancestors 'none'`）逐字不变。
 17. **`/mcp` 未知方法回 HTTP 404 + JSON-RPC `-32601`。**
     这不是风格问题：实测"200 + `-32601`"会让新版官方连接器判定"服务器实现了一个我们不认识的方法"从而**永久失败**，只有 404 才会回退到 `initialize`。
 
@@ -92,7 +94,7 @@ Gate 1 把 `/mcp` 从"共享一个静态 Bearer"升级成"**完整的 OAuth 2.1 
 | T14 | 开放重定向 | **已防** | `checkRedirectUri`：注册时 + 授权时两道；禁 userinfo/fragment；主机白名单；非 https 仅回环 |
 | T15 | 授权码被第三方截获 | **已防（弱）** | 强制 S256 PKCE + 码绑定 `client_id`/`redirect_uri` + 一次性。**但码本身在浏览器重定向里明文可见**——这正是 PKCE 存在的理由 |
 | T16 | 跨客户端令牌混用 | **已防** | 码记录带 `clientId`；换令牌时比对；刷新令牌带 `clientId`，A 的刷新令牌拿到 B 必 `invalid_grant`（oauth.test.ts 有专条） |
-| T17 | 同意页 CSRF / 伪造表单 | **已防** | `consent_id` 一次性随机、必须先在服务端存在；CSP + `form-action 'self'`；不信任 Origin/Referer |
+| T17 | 同意页 CSRF / 伪造表单 | **已防** | `consent_id` 一次性随机、必须先在服务端存在；CSP + `form-action 'self' https://chatgpt.com`（同源提交 + 放行回调主机，见 T27）；不信任 Origin/Referer |
 | T18 | 暴力猜 `OAUTH_OWNER_SECRET` | **已缓解** | 常数时间比较 + 10 次失败锁 5 分钟；口令由运维用高熵随机串生成 |
 | T19 | 未授权者注册恶意客户端 | **部分防** | DCR 本来就匿名（规范如此）；恶意客户端**拿不到**任何东西，除非运维在同意页上亲手批准。真正的风险是**存储增长** —— 已用 `MAX_CLIENTS=500` / `MAX_REDIRECT_URIS=10` 挡住 |
 | T20 | 用随机 Bearer 放大 DO 调用 | **已防** | `/mcp` 只有 `mcp_at_` 前缀才去敲 DO；静态令牌路径不碰 DO |
@@ -102,6 +104,7 @@ Gate 1 把 `/mcp` 从"共享一个静态 Bearer"升级成"**完整的 OAuth 2.1 
 | T24 | 点击劫持（把同意页塞进 iframe） | **已防** | `Content-Security-Policy: frame-ancestors 'none'` |
 | T25 | 客户端密钥时序侧信道 | **已防** | `timingSafeEqual` 定长比较、不提前 return（与设备令牌同一套） |
 | T26 | OAuth 产物进日志 | **已防（有测试）** | 日志走 `SAFE_FIELDS` 键名白名单 + 固定错误类别 + 整行凭据形状终检；`oauth.test.ts` 有一条"走完整套流程后日志里不出现 `access_token`/`refresh_token`/`code`/`OAUTH_OWNER_SECRET`" |
+| T27 | 同意页批准后被 CSP 拦下（**可用性**，不是泄漏） | **已防（默认配置）** | `form-action` 会被继续应用到表单响应的重定向链；只写 `'self'` 时 `302 → https://chatgpt.com/...` 被拦，症状是"填对口令但页面不动"。现值为 `form-action 'self' https://chatgpt.com`，并有 4 条测试钉住（含"302 目标 origin 必须落在 `form-action` 里"）。⚠ **残余**：这个 origin 是**静态硬编码**的，与 `OAUTH_REDIRECT_ALLOWLIST` 不联动 —— 部署值 `chatgpt.com,localhost` 里的 `localhost` 客户端、以及 `*.chatgpt.com` 子域，批准后仍会被 CSP 拦下（详见 `TEST_REPORT.md` §12.18） |
 
 ---
 
@@ -162,7 +165,7 @@ openssl rand -base64 32
 | 位置 | 覆盖 |
 | --- | --- |
 | `worker/test/security.test.ts`（31 条） | 仓库无凭据形状、无既有生产项目引用、无 D1/KV/R2/Queue 绑定、Env 只有三个 DO 绑定、日志不出现明文令牌；**工作流闸门 16 条** —— 测试类工作流必须零部署能力（触发方式 / 部署能力 / 只读权限），`deploy-worker.yml` 必须满足 13 条约束，外加工作流清单必须恰好三个文件；其中 **12 条是篡改反向测试**（改坏真实工作流后必须报错）。见 `TEST_REPORT.md` §12.13 / §12.16 / §12.17 |
-| `worker/test/oauth.test.ts`（49 条） | 未启用时 8 条路由 404 + `/mcp` 401 不带 `resource_metadata`；启用后必须带；DCR 校验；同意页只提交三个字段、无 `<script`、CSP；**输错口令一次后改对仍能拿码**；码只能用一次；跨客户端拒绝；刷新轮换 + 重放拒绝；OAuth 令牌真能完成 `initialize`；伪造/无前缀/已撤销/过期/受众不符/缺 scope 一律 401；全套流程后日志无凭据；存储故障 → 503 而不是假码 |
+| `worker/test/oauth.test.ts`（53 条） | 未启用时 8 条路由 404 + `/mcp` 401 不带 `resource_metadata`；启用后必须带；DCR 校验 + 客户端上限 500；同意页只提交三个字段、无 `<script`、CSP（**含 `form-action` 必须放行回调主机、且批准后 302 的 origin 必须落在其中**）；**输错口令一次后改对仍能拿码**；码只能用一次；跨客户端拒绝；刷新轮换 + 重放拒绝；OAuth 令牌真能完成 `initialize`；伪造/无前缀/已撤销/过期/受众不符/缺 scope 一律 401；全套流程后日志无凭据；存储故障 → 503 而不是假码 |
 | `worker/test/mcp-http.test.ts` | 未知方法 404 + `-32601`；`Accept`/`Content-Type` 校验；会话头校验 |
 | `worker/test/phone-session.test.ts` | 重复 `request_id` 拒绝覆盖（409）；落盘永不返回时结算照常发生；DO 重建后遗留 pending 不产生虚假成功 |
 | `worker/test/logging.test.ts` | 日志白名单、错误类别归一化、凭据形状终检 |

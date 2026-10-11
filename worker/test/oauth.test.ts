@@ -133,6 +133,15 @@ function consentIdOf(html: string): string {
   return matched[1]!;
 }
 
+/** 按浏览器的方式从 CSP 里取出某个指令的来源列表（指令不存在时返回空数组）。 */
+function cspSources(csp: string, directive: string): string[] {
+  const found = csp
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part === directive || part.startsWith(`${directive} `));
+  return found === undefined ? [] : found.split(/\s+/).slice(1);
+}
+
 /** 走到"拿到授权码"这一步。返回 Location（一个 URL）。 */
 async function obtainCode(
   rig: TestRig,
@@ -436,6 +445,92 @@ describe("OAuth / 授权端点与同意页", () => {
     const csp = response.headers.get("Content-Security-Policy") ?? "";
     expect(csp).toContain("default-src 'none'");
     expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+  });
+
+  // -------------------------------------------------------------------------
+  //  CSP 与"批准后跳回 ChatGPT"的关系（G1 真机联调时踩到的坑）
+  //
+  //  症状：能打开同意页、口令也填对了，但提交后停在原地，回不到 ChatGPT。
+  //  原因：同意页的表单是 POST /oauth/authorize，批准后回的是 **302 跳往
+  //  https://chatgpt.com/...**。浏览器会继续把 form-action 应用于"表单响应的
+  //  重定向链"，所以 form-action 只有 'self' 时这次跳转会被拦下 —— 服务端
+  //  明明发了正确的 302，用户端却看不到任何动静。
+  //
+  //  下面四条守的是：既放行这次跳转，又不顺手把别的限制放宽。
+  // -------------------------------------------------------------------------
+
+  it("同意页的 CSP 放行同源表单提交与 ChatGPT 回调主机（且没有别的来源）", async () => {
+    const rig = await enabledRig();
+    const client = await registerClient(rig);
+    const { challenge } = pkce();
+    const response = await get(rig, authorizeUrl(client.clientId, client.redirectUri, challenge));
+    expect(response.status).toBe(200);
+
+    const formAction = cspSources(
+      response.headers.get("Content-Security-Policy") ?? "",
+      "form-action",
+    );
+    expect(formAction).toContain("'self'"); // 表单本身提交到 /oauth/authorize
+    expect(formAction).toContain("https://chatgpt.com"); // 批准后的 302 目标
+    // ★ 白名单式断言：只允许这两条，防止有人图省事写成 https: 或 '*'。
+    expect(formAction.filter((source) => source !== "'self'")).toEqual(["https://chatgpt.com"]);
+  });
+
+  it("批准后的 302 目标 origin 确实落在同意页的 form-action 里", async () => {
+    const rig = await enabledRig();
+    const client = await registerClient(rig);
+    const { challenge } = pkce();
+    const page = await get(rig, authorizeUrl(client.clientId, client.redirectUri, challenge));
+    expect(page.status).toBe(200);
+    const csp = page.headers.get("Content-Security-Policy") ?? "";
+    const consentId = consentIdOf(await page.text());
+
+    const approved = await postForm(rig, "/oauth/authorize", {
+      consent_id: consentId,
+      owner_secret: TEST_OAUTH_OWNER_SECRET,
+      decision: "approve",
+    });
+    expect(approved.status).toBe(302);
+
+    // 浏览器真正会去比对的东西：这次表单响应的跳转目标 vs 表单所在文档的 CSP。
+    const target = new URL(approved.headers.get("Location")!);
+    expect(cspSources(csp, "form-action")).toContain(target.origin);
+    expect(target.origin).toBe("https://chatgpt.com");
+  });
+
+  it("CSP 的原有收紧项一条都没少", async () => {
+    const rig = await enabledRig();
+    const client = await registerClient(rig);
+    const { challenge } = pkce();
+    const page = await get(rig, authorizeUrl(client.clientId, client.redirectUri, challenge));
+    const csp = page.headers.get("Content-Security-Policy") ?? "";
+
+    expect(cspSources(csp, "default-src")).toEqual(["'none'"]);
+    expect(cspSources(csp, "base-uri")).toEqual(["'none'"]);
+    expect(cspSources(csp, "frame-ancestors")).toEqual(["'none'"]);
+    // 同意页不含脚本，所以既没有 script-src，也不该出现 unsafe-eval。
+    expect(csp).not.toContain("script-src");
+    expect(csp).not.toContain("unsafe-eval");
+    // 只有内联样式这一条放宽，且没有通配符来源。
+    expect(cspSources(csp, "style-src")).toEqual(["'unsafe-inline'"]);
+    expect(csp).not.toContain("*");
+  });
+
+  it("同意页与错误页共用同一份 CSP（避免只改了一处）", async () => {
+    const rig = await enabledRig();
+    const client = await registerClient(rig);
+    const { challenge } = pkce();
+    const consent = await get(rig, authorizeUrl(client.clientId, client.redirectUri, challenge));
+    expect(consent.status).toBe(200);
+
+    const badClient = await get(rig, authorizeUrl("not-a-registered-client", CALLBACK, challenge));
+    expect(badClient.status).toBe(400);
+
+    const expected =
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; base-uri 'none'; frame-ancestors 'none'";
+    // 逐字相等：任何放宽或收紧都必须先改这条测试，不能悄悄改。
+    expect(consent.headers.get("Content-Security-Policy")).toBe(expected);
+    expect(badClient.headers.get("Content-Security-Policy")).toBe(expected);
   });
 
   it("redirect_uri 与注册值不逐字节相等时拒绝（不做模糊匹配）", async () => {

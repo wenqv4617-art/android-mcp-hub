@@ -150,7 +150,10 @@ export const HTML_HEADERS: Record<string, string> = {
   "Content-Type": "text/html; charset=utf-8",
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
+  // OAuth POST 同源，但成功后的 302 会跳往 ChatGPT。某些移动端 WebView
+  // 会把 form-action 的限制继续应用于表单响应的重定向链。
+  // 仅放行已在服务端校验过的 ChatGPT 回调主机，不放宽 default-src。
   "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; base-uri 'none'; frame-ancestors 'none'",
   "Referrer-Policy": "no-referrer",
 };

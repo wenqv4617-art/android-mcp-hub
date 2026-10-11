@@ -14,7 +14,7 @@
 
 | 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | Gate 1（本轮） | 结果 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **219（8 个文件）** | ✅ 全过 |
+| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **223（8 个文件）** | ✅ 全过 |
 | Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
 | 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
 | Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
@@ -22,14 +22,14 @@
 | Android Lint（阻塞式门禁） | — | — | ❌ **被 `abortOnError = false` 静音** | ✅ **会红** | ✅ 保留，未回退 | ✅ 见 **§6.7** |
 | Manifest 组件类名 ↔ 真实 APK 的 dex | — | ❌ **漏了 —— Gate 0.1 启动即闪退** | ✅ **新增（两层检查）** | ✅ 保留，未回退 | ✅ 保留，未回退 | ✅ 见 **§6.6** |
 | Android 13–16 兼容性**代码**核对 | — | ✅ 已核对并出文档 | ✅ 不变 | ✅ 不变 | ✅ 不变 | ✅ 见 [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) |
-| OAuth 授权服务器（ChatGPT 接入的前提） | — | — | — | — | ✅ **代码 + 本地替身 46 条** | ✅ 见 **§12.2** |
+| OAuth 授权服务器（ChatGPT 接入的前提） | — | — | — | — | ✅ **代码 + 本地替身 53 条**，含同意页 CSP 的跳转兼容性 | ✅ 见 **§12.2 / §12.18** |
 | 真实 workerd 运行时上的验证 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | §5，附精确错误 |
 | Android 真机行为验证（**含"启动是否真的不闪退"**） | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN** | §6.4 / §6.6 |
 | Android Keystore 真实加解密 | — | ⛔ NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | §6.3 |
 | ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN（OAuth 已就绪，但没连过）** | §7 / §12.4 |
-| 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ **仍未执行，等用户批准** | §12.4 |
+| 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ **仍未执行**（已获批准，由用户自己执行；Termux 装不上 workerd，见 §12.16） | §12.4 |
 
-**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→219）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
+**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→219），最后按用户在真机联调时报的"填对口令但回不到 ChatGPT"补上同意页 CSP 的跳转兼容性修复（Worker 219→223，见 **§12.18**）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
 
 ### 0.1 Gate 0.1 审计问题 → 修复 → 对应测试
 
@@ -760,7 +760,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | 类别 | 通过 | 失败 | 跳过 | NOT RUN |
 | --- | --- | --- | --- | --- |
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
-| Worker/DO 单元测试 | **219** | 0 | 0 | 6（workerd 相关，§5） |
+| Worker/DO 单元测试 | **223** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
 | Android JVM 单测 | **171** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
@@ -770,7 +770,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | GitHub Actions 工作流 | **4（不开启自动部署的静态门禁，§12.13）** | 0 | 0 | 1（CI 里真实跑一次，需用户手动触发，§12.16） |
 | 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
 | ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
-| **合计（已执行）** | **419** | **0** | **0** | **45+** |
+| **合计（已执行）** | **423** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -1378,3 +1378,77 @@ commit `b9aa05e`）。于是规则从"一律不许"变成"默认不许 + 一个�
 
 计数变化：`security.test.ts` 19→**31**，Worker 单元测试 207→**219**，
 `TEST_REPORT.md` §0/§9 合计 407→**419**。
+
+---
+
+## 12.18 同意页 CSP 放行 ChatGPT 回调主机（G1 真机联调回来的 bug）
+
+#### 现象与定位
+
+用户在真机上接 ChatGPT 时：**能打开同意页、口令也填对了，但提交后停在原地，回不到 ChatGPT**
+（同一现象在既有生产项目里也出现过）。服务端侧看不出异常 —— 它确实发了 302。
+
+根因在**浏览器侧的一条 CSP 语义**：同意页表单是 `POST /oauth/authorize`
+（`worker/src/oauth/pages.ts:95`，`action="/oauth/authorize"`，同源），
+批准分支回的是 **302 跳往 `https://chatgpt.com/...`**
+（`worker/src/oauth/endpoints.ts:352-374`：`newOpaqueToken("mcp_code")` → 读回记录 →
+`new URL(record.redirectUri)` + `code`/`state`/`iss` → `Response.redirect(…, 302)`）。
+而 `form-action` **会被继续应用到"表单响应的重定向链"上**，原来只有 `'self'`，
+于是这次跳转被拦下。`docs/OAUTH-DESIGN.md` §3.5 与 §8 第 1 条**早就写过这个坑**
+（「症状是『approve 后页面不动』」），代码没跟上设计文档。
+
+#### 改动（只有一处，`worker/src/oauth/pages.ts`）
+
+`:151-158` 的 `HTML_HEADERS`：`form-action` 由 `'self'` 改为
+`'self' https://chatgpt.com`，并补三行注释说明"为什么只多加这一个来源、以及为什么不动 `default-src`"。
+其余指令逐字不变：`default-src 'none'; style-src 'unsafe-inline'; …; base-uri 'none'; frame-ancestors 'none'`。
+错误页与同意页共用这同一份头（`endpoints.ts:197-199` `htmlResponse`），所以一处改完两页都生效。
+
+#### 新增测试（`oauth.test.ts` 49→**53**）
+
+| 用例 | 守的是什么 |
+| --- | --- |
+| 同意页的 CSP 放行同源表单提交与 ChatGPT 回调主机（且没有别的来源） | `form-action` 含 `'self'` 与 `https://chatgpt.com`，且**只允许这两条**（防止有人写成 `https:` 或 `*`） |
+| 批准后的 302 目标 origin 确实落在同意页的 form-action 里 | 把 CSP 与**真实跳转**绑在一起：解析 `Location` 的 origin 去比对 `form-action`，两边任何一边被改都会红 |
+| CSP 的原有收紧项一条都没少 | `default-src`/`base-uri`/`frame-ancestors` 逐字为 `'none'`、无 `script-src`、无 `unsafe-eval`、无通配符 |
+| 同意页与错误页共用同一份 CSP | 整条 CSP **逐字相等**，防止只改了其中一页 |
+
+辅助函数 `cspSources(csp, directive)`（`oauth.test.ts:136`）按浏览器的方式切分指令与来源列表。
+
+**故障注入**：把 `form-action 'self' https://chatgpt.com` 临时改回 `'self'`（等于让这个 bug 重新出现）
+→ 上面第 1、2、4 条**精确变红**（`Tests 3 failed | 50 passed (53)`）；还原后 `sha256sum -c` 逐字节一致
+（`1d5d05b52c5d3832e003761af8517a087aff77d29c5e657163d6bb3157d6089d`）。
+
+#### 这次的补丁附件本身有格式错误（如实记录）
+
+用户给的 `android-mcp-hub-oauth-csp.patch`（860 字节）**`git apply` 直接报 `error: corrupt patch at line 15`**。
+原因是 hunk 头 `@@ -126,6 +126,10 @@` 的 **new 行数多写了 1**（正文是 context 5 + 加 4 + 删 1 ⇒ 应为 9），
+且起点行号是旧的（126，实际在 `:151`）。**语义内容与当前代码逐字节匹配**（被删的旧行与 `pages.ts:154` 完全相同、
+5 条 context 行都在且顺序一致、`https://chatgpt.com` 尚未出现），所以处置是**只修 hunk 头、正文一个字节不改**
+（`@@ -151,6 +151,9 @@`），改完 `git apply --check` 通过并成功应用。
+
+#### 诚实边界（必须和修复一起讲）
+
+- 这一条**只证明"服务器发出来的响应变对了"**，测试跑在 Node 替身上、断言的是响应头字符串。
+  **真实浏览器/WebView 上"这次跳转到底还拦不拦"没有在本机验证过** —— 最终确认仍要用户在真实
+  ChatGPT 客户端上再连一次（`docs/OAUTH-DESIGN.md` 第 9 节 U10 记载的 Playwright 对照实验依然是 **NOT RUN**）。
+- **`form-action` 里的 origin 是静态硬编码的，与 `OAUTH_REDIRECT_ALLOWLIST` 不联动**。部署值
+  （`worker/wrangler.jsonc:57`）是 `"chatgpt.com,localhost"`，而 `checkRedirectUri`
+  （`worker/src/oauth/endpoints.ts:824-857`）还允许 `*.chatgpt.com` 子域与 `http://localhost:*` 回环：
+  - `localhost` 客户端：服务端会放行（`:839-847` `isLocal && allowedLocal` → `ok: true`），
+    但批准后的 302 目标是 `http://localhost:*`，**不在 `form-action` 里，仍会被 CSP 拦下**（本机调试才会遇到）；
+  - `*.chatgpt.com` 子域：同理会被拦。
+  - 设计文档 §3.5 的原意是"**渲染时把已验证回调的 origin 追加进去**"，那需要把 origin 传进渲染函数
+    （会动到 `endpoints.ts` 的调用点）；本次按用户要求**只改 `pages.ts`、不重构 OAuth**，所以没有做。
+    彻底修法见下方"下一轮可选"。
+- `localhost` 出现在生产 `vars` 里本身值得复看：它不是秘密，但生产环境没必要放行回环回调。
+
+#### 下一轮可选（未做，等复审决定）
+
+1. 把 `form-action` 由"静态 `chatgpt.com`"改成**渲染时的已验证 origin**（`authorizeGet` 已经算过
+   `checkRedirectUri`，把通过的 origin 传给渲染器即可）；顺带覆盖 `*.chatgpt.com` 与回环。
+2. 或退一步：至少加上 `https://*.chatgpt.com`，与 `checkRedirectUri` 的子域规则对齐。
+3. 生产 `vars` 里去掉 `localhost`（本机调试改用 `.dev.vars` 覆盖）。
+
+计数变化：`oauth.test.ts` 49→**53**，Worker 单元测试 219→**223**，
+`TEST_REPORT.md` §0/§9 合计 419→**423**。
