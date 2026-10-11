@@ -33,7 +33,13 @@ import type { PhoneSessionNamespace } from "./env";
 import type { Env } from "./env";
 import { PhoneSession, INTERNAL_CREDENTIAL_HEADER, INTERNAL_DEVICE_HEADER, ROUTE_CONNECT } from "./phone/phone-session";
 import { McpSession } from "./mcp/session-do";
-import { handleMcpRequest, revokePhoneDeviceViaDurableObject as revokePhoneDevice, SERVER_NAME, SERVER_VERSION } from "./mcp/http";
+import {
+  handleMcpRequest,
+  notifyRevocationInBackground,
+  revokePhoneDeviceViaDurableObject as revokePhoneDevice,
+  SERVER_NAME,
+  SERVER_VERSION,
+} from "./mcp/http";
 import { OAuthStore } from "./oauth/store-do";
 import { handleOAuthRequest, isOAuthPath } from "./oauth/endpoints";
 import { jsonResponse, notFound, textResponse } from "./util/http";
@@ -46,7 +52,7 @@ export { PhoneSession, McpSession, OAuthStore };
 const SCHEMA_VERSION = "gate0-do-v1";
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const config = loadConfig(env);
 
@@ -54,7 +60,7 @@ export default {
       if (url.pathname === "/healthz") return handleHealthz(env, config);
       if (url.pathname === "/" ) return handleRoot();
       if (url.pathname === "/mcp") return await handleMcpRequest(request, env);
-      if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config);
+      if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config, ctx);
       // OAuth 面。`isOAuthPath` 只认精确路径集合，不做前缀匹配 ——
       // 前缀匹配会让 `/oauth/authorize/../../mcp` 这种形状落到错误的分支上。
       if (isOAuthPath(url.pathname)) return await handleOAuthRequest(request, env, config);
@@ -144,7 +150,17 @@ function handleRoot(): Response {
 //  /phone/ws —— 手机 WebSocket 升级 + 设备鉴权
 // ---------------------------------------------------------------------------
 
-async function handlePhoneUpgrade(request: Request, env: Env, config: AppConfig): Promise<Response> {
+/**
+ * `ctx` 一路传进来只为一件事：撤销通知必须挂到这次调用的生命周期上
+ * （见 `notifyRevocationInBackground`）。类型允许 undefined —— Node 替身 harness
+ * 与单测调用 `worker.fetch(request, env, {})` 时没有 `waitUntil`。
+ */
+async function handlePhoneUpgrade(
+  request: Request,
+  env: Env,
+  config: AppConfig,
+  ctx: ExecutionContext | undefined,
+): Promise<Response> {
   if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
     return jsonResponse(
       { error: "upgrade_required", message: "这个端点只接受 WebSocket 升级请求" },
@@ -178,10 +194,19 @@ async function handlePhoneUpgrade(request: Request, env: Env, config: AppConfig)
     //   看到"服务端坏了"，而实际上它只是没收到撤销通知）。真正的保证来自
     //   "每个工具调用都重新查授权"：撤销后的新请求一律 device_revoked，
     //   与这次推送成功与否无关。
+    //
+    //   ★ Gate 2：但"尽力而为"不等于"发了就不管"。这里原先写的是"调用一次
+    //     跨 DO 的撤销、再 catch 掉失败"这种裸 fire-and-forget，而这个请求
+    //     马上就要带着 401 返回 —— 响应一返回 isolate 就可能被回收，飞行中的
+    //     通知会被掐掉。改成走 `notifyRevocationInBackground`（内部用
+    //     `ctx.waitUntil` 把 promise 挂到这次调用的生命周期上）：语义不变
+    //     （失败只记日志），但它真的有机会落地。
     if (isDeviceRevoked(config, deviceId)) {
-      void revokePhoneDevice(env, deviceId, "upgrade_after_revocation").catch(() => {
-        logEvent("warn", "phone.revoke_notify_failed", { deviceId, errorCode: "revoke_notify_failed" });
-      });
+      notifyRevocationInBackground(
+        ctx,
+        { deviceId, reason: "upgrade_after_revocation", credentialScoped: false },
+        revokePhoneDevice(env, deviceId, "upgrade_after_revocation"),
+      );
     }
 
     return unauthorizedPhone();
@@ -201,10 +226,14 @@ async function handlePhoneUpgrade(request: Request, env: Env, config: AppConfig)
     //   伪造尝试，而是一次"应该被终结的旧凭据"的自白。此时要把**凭据级**撤销
     //   通知推到 DO：只有那条旧凭据开出来的连接该死，用新凭据重连的连接必须
     //   活着 —— 否则一条迟到的重连请求就成了一条拒绝服务路径。
+    //   ★ Gate 2：同上面的设备级分支，这条通知也必须挂到 `ctx.waitUntil` 上 ——
+    //     这个请求同样马上返回 401，不登记生命周期就可能被掐掉。
     if (findCredential(config, deviceId, digest)?.revokedAt != null) {
-      void revokePhoneDevice(env, deviceId, "upgrade_with_rotated_credential", digest).catch(() => {
-        logEvent("warn", "phone.revoke_notify_failed", { deviceId, errorCode: "revoke_notify_failed" });
-      });
+      notifyRevocationInBackground(
+        ctx,
+        { deviceId, reason: "upgrade_with_rotated_credential", credentialScoped: true },
+        revokePhoneDevice(env, deviceId, "upgrade_with_rotated_credential", digest),
+      );
     }
     return unauthorizedPhone();
   }

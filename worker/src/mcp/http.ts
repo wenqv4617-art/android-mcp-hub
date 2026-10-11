@@ -165,6 +165,50 @@ export async function revokePhoneDeviceViaDurableObject(
   return { ok: response.ok, status: response.status };
 }
 
+/**
+ * ★ Gate 2：把撤销通知登记成一个**有生命周期保证**的后台任务。
+ *
+ * 为什么需要它：`revokePhoneDeviceViaDurableObject` 是一次**跨 DO 的 HTTP 调用**。
+ * 两处调用点原先写的是 `void revokePhoneDevice(...).catch(...)` —— 发出去就不管了。
+ * 在 Workers 上这是不安全的：响应一返回，运行时就可以回收这个 isolate，飞行中的
+ * 子请求会被直接掐掉。而这条通知恰恰是在"拒绝一次升级"时才发出来的 —— 那是最
+ * 可能紧接着就 `return unauthorizedPhone()`、让请求结束的时刻。通知丢了，撤销就
+ * 只能等下一个工具调用才被发现，而**已经建立的那条连接仍然活着**。
+ *
+ * `ctx.waitUntil()` 是 Workers 的标准机制：把 promise 挂到这次调用的生命周期上，
+ * 响应发出之后运行时仍然会等它落地。它**不**改变"尽力而为"的语义（失败只记日志、
+ * 绝不把 401 变成 500），只是让尽力而为真的有机会成功。
+ *
+ * 两点必须说清楚：
+ *  1. `ctx` 可能没有 `waitUntil`（Node 替身 harness、单测里只传 `{}`），此时退化成
+ *     原来的"发了就不管"。因此**正确性绝不能依赖这条通知** —— 每个请求入口都要
+ *     重新查配置（`phone-session.ts` 的 `revocationCheck`）。通知只负责让已经建立
+ *     的连接尽快死掉，不负责"撤销生效"。
+ *  2. 不做重试。重复投递由 DO 侧的幂等判据吸收；而"必须送达"本身就不成立。
+ *
+ * 返回值是那条已加过 `.catch` 的 promise：调用点可以忽略它（生产路径），测试可以
+ * 确定性地 await 它，不必依赖 `settle()` 猜时间。
+ */
+export function notifyRevocationInBackground(
+  ctx: ExecutionContext | undefined,
+  details: { deviceId: string; reason: string; credentialScoped: boolean },
+  notification: Promise<unknown>,
+): Promise<void> {
+  const settled = notification.then(
+    () => undefined,
+    () => {
+      logEvent("warn", "phone.revoke_notify_failed", {
+        deviceId: details.deviceId,
+        reason: details.reason,
+        credentialScoped: details.credentialScoped,
+        errorCode: "revoke_notify_failed",
+      });
+    },
+  );
+  if (ctx !== undefined && typeof ctx.waitUntil === "function") ctx.waitUntil(settled);
+  return settled;
+}
+
 export async function handleMcpRequest(request: Request, env: Env, deps: McpHttpDeps = {}): Promise<Response> {
   const config = loadConfig(env);
   const method = request.method.toUpperCase();

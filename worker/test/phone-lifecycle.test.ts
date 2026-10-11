@@ -45,6 +45,7 @@ import {
   toolPhoneDirect,
   upgradePhoneDirect,
 } from "./harness/env";
+import { notifyRevocationInBackground } from "../src/mcp/http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -179,6 +180,10 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     expect(before["pending_requests"]).toBe(1);
     expect((before["metrics"] as Record<string, number>)["pingsSent"]).toBe(1);
 
+    // ★ Gate 2：撤销通知只在"目标此刻仍然无效"时才会执行（见 handleRevoke 的
+    //   `targetStillInvalid`）。所以必须先让配置层失效 —— 这也正是生产顺序：
+    //   Worker 只有在配置里查出来"已撤销"时才会推这条通知。
+    await revokeInConfig(rig);
     await revokePhoneDirect(rig, DEVICE);
     const outcome = await inflight;
 
@@ -235,6 +240,10 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     const victim = await connectMockPhone(rig, DEVICE, "no-response");
     const bystander = await connectMockPhone(rig, OTHER_DEVICE);
 
+    // ★ Gate 2：撤销通知只在"目标此刻仍然无效"时才会执行（见 handleRevoke 的
+    //   `targetStillInvalid`）。所以必须先让配置层失效 —— 这也正是生产顺序：
+    //   Worker 只有在配置里查出来"已撤销"时才会推这条通知。
+    await revokeInConfig(rig);
     await revokePhoneDirect(rig, DEVICE);
     await settle();
 
@@ -302,6 +311,10 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     const rig = await makeRig();
     const { socket } = await connectMockPhone(rig, DEVICE);
 
+    // ★ Gate 2：撤销通知只在"目标此刻仍然无效"时才会执行（见 handleRevoke 的
+    //   `targetStillInvalid`）。所以必须先让配置层失效 —— 这也正是生产顺序：
+    //   Worker 只有在配置里查出来"已撤销"时才会推这条通知。
+    await revokeInConfig(rig);
     await revokePhoneDirect(rig, DEVICE);
     const second = await revokePhoneDirect(rig, DEVICE);
     expect(second.status).toBe(200);
@@ -328,6 +341,10 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     const beforeStatus = await phoneStatus(rig, DEVICE);
     expect(beforeStatus["pending_requests"]).toBe(1);
 
+    // ★ Gate 2：撤销通知只在"目标此刻仍然无效"时才会执行（见 handleRevoke 的
+    //   `targetStillInvalid`）。所以必须先让配置层失效 —— 这也正是生产顺序：
+    //   Worker 只有在配置里查出来"已撤销"时才会推这条通知。
+    await revokeInConfig(rig);
     await revokePhoneDirect(rig, DEVICE);
     const outcome = await inflight;
     expect(outcome.ok).toBe(false);
@@ -794,5 +811,265 @@ describe("Gate 1.5 / A1 撤销入口的公网可见性", () => {
     expect(indexSource).not.toContain("/internal/phone/revoke");
     // 但它必须真的会去推撤销通知（那条链路是 index.ts → http.ts → DO）。
     expect(indexSource).toContain("revokePhoneDevice");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Gate 2 · 迟到的撤销通知
+// ---------------------------------------------------------------------------
+//
+//  撤销通知是**异步、跨 DO、可能迟到**的：它由 `worker/src/index.ts` 在"拒绝一次
+//  升级"时推出来，要跨一次 HTTP、并排在这个 DO 正在处理的其他请求后面。在这段路
+//  上配置完全可能已经变了。这一组用例把那条时间线摆出来：
+//
+//     旧配置发出通知 → 配置层重新有效（补新凭据 / 把凭据重新启用）
+//       → 手机连上来 → 旧通知才到
+//
+//  要求：**过期**的通知不得终结连接、不得结算在途请求、不得记成一次真实撤销；
+//  而"配置里确实仍然无效"的通知必须照常终结 —— 两条方向都要有断言，只测一边
+//  等于把撤销能力整个拆掉却还显示绿灯。
+// ---------------------------------------------------------------------------
+
+describe("Gate 2 迟到的撤销通知：过期通知不得误伤，仍然有效的通知照常终结", () => {
+  it("迟到的**设备级**通知不得误伤已重新授权的连接：新连接与在途请求都继续工作", async () => {
+    const rig = await makeRig();
+
+    // ① 旧配置：这台设备没有任何有效凭据 —— 那次被拒的升级就是从这里发出通知的。
+    await revokeInConfig(rig);
+
+    // ② 运维补了一条新凭据，设备重新有效。⚠ 此刻那条旧通知**还在路上**。
+    const NEW_TOKEN = "GATE2-FAKE-LATE-NOTIFY-TOKEN";
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: NEW_TOKEN },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+
+    // ③ 手机用新凭据连上来。这条连接完全合法。
+    const fresh = await connectMockPhone(rig, DEVICE, "normal", {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, NEW_TOKEN),
+    });
+    expect(fresh.response.status).toBe(101);
+    expect(fresh.socket.readyState).toBe(1);
+
+    // ④ 在途请求也一起摆好：迟到的通知绝不能把它判死（否则通知本身成了 DoS 路径）。
+    const inFlight = pingPhoneDirect(rig, DEVICE, { requestId: "req-late-device-notify", timeoutMs: 3_000 });
+
+    // ⑤ 旧配置那条设备级通知现在才到。
+    const late = await revokePhoneDirect(rig, DEVICE, "late_device_notification");
+    expect(late.status).toBe(200);
+    expect(late.body["ok"]).toBe(true);
+    // ★ 要害一：没有执行任何撤销动作。
+    expect(late.body["revoked"]).toBe(false);
+    expect(late.body["stale"]).toBe(true);
+    expect(late.body["closed"]).toBe(0);
+    expect(late.body["pending_failed"]).toBe(0);
+
+    // ★ 要害二：在途请求必须照常成功 —— 不是"快速失败得好看"，是真的一点没受影响。
+    const outcome = await inFlight;
+    expect(outcome.ok).toBe(true);
+
+    await settle();
+    expect(fresh.socket.readyState).toBe(1);
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["connected"]).toBe(true);
+    expect(status["revoked"]).toBe(false);
+    // ★ 要害三：过期投递**不许**记成一次真实安全事件，否则
+    //   `revocationsApplied` 与 `pendingRevoked` 就不再是运维能信的观测量。
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["revocationsApplied"]).toBe(0);
+    expect(metrics["pendingRevoked"]).toBe(0);
+    expect(status["revocation"]).toBeNull();
+  });
+
+  it("迟到的**凭据级**通知不得误伤重新有效的凭据：那条凭据的连接照常服务", async () => {
+    const rig = await makeRig();
+    const OLD_TOKEN = TEST_DEVICE_TOKEN;
+    const conn = await connectMockPhone(rig, DEVICE, "normal");
+    const fingerprint = fingerprintOf(rig, DEVICE, OLD_TOKEN)!;
+
+    // ① 这条凭据一度被标撤销（那正是"轮换掉了、会发凭据级通知"的时刻）……
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: OLD_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+    // ② ……但运维把这次轮换回滚了，同一把令牌重新变成有效。旧通知仍在路上。
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: OLD_TOKEN },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+
+    const inFlight = pingPhoneDirect(rig, DEVICE, { requestId: "req-late-credential-notify", timeoutMs: 3_000 });
+    const late = await revokePhoneDirect(rig, DEVICE, "late_credential_notification", {
+      credentialId: fingerprint,
+    });
+    expect(late.status).toBe(200);
+    expect(late.body["scope"]).toBe("credential");
+    expect(late.body["revoked"]).toBe(false);
+    expect(late.body["stale"]).toBe(true);
+    expect(late.body["closed"]).toBe(0);
+    expect(late.body["pending_failed"]).toBe(0);
+
+    const outcome = await inFlight;
+    expect(outcome.ok).toBe(true);
+    await settle();
+    expect(conn.socket.readyState).toBe(1);
+    expect(conn.socket.closeInfo ?? null).toBeNull();
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["bound_credential_active"]).toBe(true);
+    expect((status["metrics"] as Record<string, number>)["revocationsApplied"]).toBe(0);
+  });
+
+  it("正向对照：设备**确实**仍被撤销时，通知照常终结连接与在途请求", async () => {
+    const rig = await makeRig();
+    await connectMockPhone(rig, DEVICE, "no-response");
+
+    const inFlight = pingPhoneDirect(rig, DEVICE, { requestId: "req-device-still-revoked", timeoutMs: 10_000 });
+    await settle();
+    expect((await phoneStatus(rig, DEVICE))["pending_requests"]).toBe(1);
+
+    // 配置层撤销 + 通知。这一次通知到达时目标**仍然**无效 —— 必须执行。
+    await revokeInConfig(rig);
+    const revoked = await revokePhoneDirect(rig, DEVICE, "device_still_revoked");
+    expect(revoked.status).toBe(200);
+    expect(revoked.body["revoked"]).toBe(true);
+    expect(revoked.body["stale"]).toBeUndefined();
+    expect(revoked.body["closed"]).toBe(1);
+    expect(revoked.body["pending_failed"]).toBe(1);
+
+    const outcome = await inFlight;
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("不该成功");
+    expect(outcome.error.code).toBe("device_revoked");
+  });
+
+  it("正向对照：那条凭据**确实**已撤销时，凭据级通知照常终结它的连接与在途请求", async () => {
+    const rig = await makeRig();
+    const OLD_TOKEN = TEST_DEVICE_TOKEN;
+    const conn = await connectMockPhone(rig, DEVICE, "no-response");
+    const fingerprint = fingerprintOf(rig, DEVICE, OLD_TOKEN)!;
+
+    const inFlight = pingPhoneDirect(rig, DEVICE, { requestId: "req-credential-still-revoked", timeoutMs: 10_000 });
+    await settle();
+
+    // 轮换：旧凭据被标撤销、新凭据上线。设备本身**没有**被撤销。
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: OLD_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+      { deviceId: DEVICE, token: "GATE2-FAKE-ROTATED-TOKEN" },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+
+    const revoked = await revokePhoneDirect(rig, DEVICE, "credential_still_revoked", {
+      credentialId: fingerprint,
+    });
+    expect(revoked.status).toBe(200);
+    expect(revoked.body["scope"]).toBe("credential");
+    expect(revoked.body["revoked"]).toBe(true);
+    expect(revoked.body["stale"]).toBeUndefined();
+    expect(revoked.body["closed"]).toBe(1);
+    expect(revoked.body["pending_failed"]).toBe(1);
+
+    const outcome = await inFlight;
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("不该成功");
+    expect(outcome.error.code).toBe("device_revoked");
+
+    await settle();
+    expect(conn.socket.readyState).toBe(3);
+    expect(conn.socket.closeInfo?.code).toBe(4002);
+    // 轮换不是撤销：设备级状态必须仍然是"没有被撤销"。
+    expect((await phoneStatus(rig, DEVICE))["revoked"]).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Gate 2 · 撤销通知的生命周期保证
+// ---------------------------------------------------------------------------
+//
+//  行为断言（上面的 describe）证明"迟到的通知无害"，但还差一半：
+//  **通知会不会根本没送到？** 原先两处调用点写的是
+//  `void revokePhoneDevice(...).catch(...)` —— 而它们紧接着就 `return 401`。
+//  响应一返回，运行时就可以回收 isolate，飞行中的通知被掐掉，撤销就静默丢失。
+//  这三条用例钉住修复后的契约。
+// ---------------------------------------------------------------------------
+
+describe("Gate 2 撤销通知的生命周期", () => {
+  it("通知被登记到 ctx.waitUntil：响应返回之后运行时仍会等它落地", async () => {
+    const registered: Promise<unknown>[] = [];
+    let finished = false;
+    const ctx = {
+      waitUntil: (promise: Promise<unknown>) => {
+        registered.push(promise);
+      },
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+
+    const notification = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      finished = true;
+    })();
+
+    const settled = notifyRevocationInBackground(
+      ctx,
+      { deviceId: DEVICE, reason: "lifecycle_test", credentialScoped: false },
+      notification,
+    );
+
+    // ★ 要害：promise 真的被交给了运行时（不是"发了就不管"）。
+    expect(registered.length).toBe(1);
+    expect(finished).toBe(false);
+    await settled;
+    expect(finished).toBe(true);
+    expect(registered[0]).toBe(settled);
+  });
+
+  it("通知失败只记日志、返回的 promise 永不 reject —— 401 绝不能变成 500", async () => {
+    const ctx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+
+    const failing = Promise.reject(new Error("DO unreachable"));
+    await expect(
+      notifyRevocationInBackground(
+        ctx,
+        { deviceId: DEVICE, reason: "lifecycle_test_failure", credentialScoped: true },
+        failing,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("ctx 没有 waitUntil（Node 替身 / 单测只传 {}）时退化为后台执行且不抛", async () => {
+    let ran = false;
+    const settled = notifyRevocationInBackground(
+      {} as ExecutionContext,
+      { deviceId: DEVICE, reason: "lifecycle_test_no_ctx", credentialScoped: false },
+      Promise.resolve().then(() => {
+        ran = true;
+      }),
+    );
+    await settled;
+    expect(ran).toBe(true);
+    // 退化路径同样不能抛。
+    await expect(
+      notifyRevocationInBackground(
+        undefined,
+        { deviceId: DEVICE, reason: "lifecycle_test_undefined_ctx", credentialScoped: false },
+        Promise.reject(new Error("no ctx, still must not throw")),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("代码级守卫：两处通知都必须经过 notifyRevocationInBackground，不许退回 `void …`", () => {
+    const root = join(__dirname, "..", "..");
+    const indexSource = readFileSync(join(root, "worker", "src", "index.ts"), "utf8");
+
+    // 两处发送点（设备级 upgrade_after_revocation / 凭据级 upgrade_with_rotated_credential）
+    // 都必须走那个会把 promise 交给 `ctx.waitUntil` 的助手。
+    expect(indexSource.match(/notifyRevocationInBackground\(/g)?.length).toBe(2);
+    // 反向断言：`void revokePhoneDevice(` 这个"发了就不管"的形状不许再出现。
+    expect(indexSource).not.toMatch(/void\s+revokePhoneDevice\s*\(/);
+    // 而内部路由字面量仍然不许出现在公网入口（沿用 A1 的守卫）。
+    expect(indexSource).not.toContain("/internal/phone/revoke");
   });
 });

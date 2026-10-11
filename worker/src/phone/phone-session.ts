@@ -31,6 +31,7 @@
 // ============================================================================
 
 import {
+  activeCredentialsFor,
   isCredentialActive,
   isDeviceRevoked,
   loadConfig,
@@ -839,7 +840,8 @@ export class PhoneSession implements DurableObject {
    * 语义（任务书 A1 的四条要求 + 集中审计问题 1/2）：
    *   1. 撤销后不得接受新的设备操作请求 → 请求入口每次都用**当前配置**重新判定
    *      （见 [revocationCheck]），而不是看一个落盘的布尔值；
-   *   2. 已建立连接在**可验证的**撤销通知到达后关闭 → 这里立刻 close(4002)；
+   *   2. 已建立连接在**可验证且距今仍然成立**的撤销通知到达后关闭 → 这里立刻
+   *      close(4002)；"仍然成立"是 Gate 2 补上的：迟到的通知不得误伤已重新授权的连接；
    *   3. 未完成请求必须明确失败 → 全部结算成 `device_revoked`；
    *   4. 不得影响其他设备 → 撤销状态只存在**这台设备自己的** DO 里。
    *
@@ -850,6 +852,10 @@ export class PhoneSession implements DurableObject {
    *   · 撤销记录本身不再是门禁：它只是一条审计记录。真正的判据永远是
    *     "当前配置里这条凭据/这台设备还有效吗"，因此给设备补一条新凭据之后，
    *     升级会被接受并记一次 `reauthorizationsApplied`。
+   *
+   * ★ Gate 2：通知是**异步、可能迟到**的，所以到达时必须**再问一次当前配置** ——
+   *   目标此刻已经有效 ⇒ 这条通知已过期，直接忽略（不关连接、不换代次、不记账），
+   *   响应里带 `stale: true`。详见 [handleRevoke] 内的注释。
    */
   private async handleRevoke(request: Request): Promise<Response> {
     let body: { deviceId?: unknown; reason?: unknown; credentialId?: unknown };
@@ -878,6 +884,55 @@ export class PhoneSession implements DurableObject {
         currentGeneration: this.generation,
       });
       return json({ error: "device_mismatch" }, 409);
+    }
+
+    // ★ Gate 2：撤销通知是**异步、可能迟到**的，所以到达时**必须再问一次当前配置**。
+    //
+    //   通知由 `worker/src/index.ts` 在"拒绝一次升级"时推出来（设备级、或凭据级），
+    //   它要跨一次 HTTP、并排在这个 DO 正在处理的其他请求后面。在这段路上配置
+    //   完全可能已经变了。最典型的一条时间线：
+    //
+    //     ① 旧配置里这台设备没有任何有效凭据（于是那次升级被拒，通知发出）；
+    //     ② 运维给这台设备补上一条新凭据（设备重新有效）；
+    //     ③ 手机用新凭据连上来，这条连接完全合法；
+    //     ④ ①的那条通知现在才到。
+    //
+    //   如果到达时无条件执行，这条**过期**的通知会关掉一条合法的连接、并把它在途
+    //   的请求结算成 `device_revoked` —— 一条迟到的通知就变成了一条拒绝服务路径
+    //   （正是集中审计问题 2 要消除的那类误伤；凭据级同理：轮换掉的旧凭据被重新
+    //   启用之后，关于它的迟到通知不能终结它）。
+    //
+    //   所以判据与升级入口 / 请求入口**完全一致**：配置才是门禁，通知只负责把
+    //   "配置层已经成立的事实"立刻施加到活连接上。
+    //     · 设备级：此刻这台设备还有没有有效凭据（`activeCredentialsFor` 为空即
+    //       "所有凭据都已撤销"或"这台设备已被整个删掉"，两种都算仍然无效）；
+    //     · 凭据级：那条指纹此刻还有效吗（`isCredentialActive` 对"配置里已经没有
+    //       这条凭据"也返回 false）。
+    //   目标此刻仍然无效 ⇒ 照常记账 + 终结；否则什么都不做：**不关连接、不换代次、
+    //   也不记账**（否则 `revocationsApplied` 会把一次过期投递记成一次真实安全事件）。
+    const config = this.currentConfig();
+    const targetStillInvalid =
+      scope === "device"
+        ? activeCredentialsFor(config, requestedDeviceId).length === 0
+        : !isCredentialActive(config, requestedDeviceId, requestedCredentialId as string);
+    if (!targetStillInvalid) {
+      logEvent("warn", "phone_session.revoke_stale_ignored", {
+        deviceId: requestedDeviceId,
+        scope,
+        reason,
+        currentGeneration: this.generation,
+      });
+      return json({
+        ok: true,
+        device_id: requestedDeviceId,
+        revoked: false,
+        stale: true,
+        scope,
+        already_revoked: false,
+        closed: 0,
+        pending_failed: 0,
+        generation: this.generation,
+      });
     }
 
     // 幂等：撤销通知**可能被重复投递**（每个被拒的升级都会推一条，
