@@ -54,6 +54,7 @@
 | A9 | **部署配置能打包**（`--dry-run`，不上传、不创建资源） | `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run` | **PASS** — `Total Upload: 120.35 KiB / gzip: 31.40 KiB`，三个 DO binding 全部解析到真实导出类，`DRYRUN_EXIT=0` | `test-reports/wrangler-dryrun.log` |
 | A10 | **凭据生成步骤自检**（第 4.1 节的命令真的产出 Worker 认的摘要） | `printf '%s' "$TOKEN" \| npm run check:credential -- --device-id my-android-phone` | **PASS** — 与 `sha256sum` 逐字节一致；`loadConfig` 接受该 `DEVICE_TOKENS` 形状（1 条生效凭据、`deviceId` 解析成功）；把明文令牌填进 `tokenSha256` 会被明确拒绝 | `test-reports/credential-check.log` |
 | A11 | **部署后自检脚本本身可信**（部署前能验的就只剩这个） | `npm run smoke:selftest` | **PASS** — 10 PASS / 0 FAIL。先回放**正确**响应证明 `tools/gate1-smoke.mjs` 判 PASS（退出码 0），再把 S256、`resource_metadata`、`healthz.status` 分别改坏，证明它**真的会**报 FAIL（退出码 1），目标不可达时报退出码 2 —— 即「不会假绿、也不会把没验的算成通过」 | `test-reports/smoke-selftest.log` |
+| A12 | **部署文档里的凭据生成流程真的能跑通**（部署已被批准、改由用户执行，文档本身于是也成了交付件） | `printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone`，再把输出的那段 JSON 喂给真实的 `loadConfig` | **PASS** — 生成的记录被 `loadConfig` 接受：`problems: []`、`credentials: 1`、`deviceId: "my-android-phone"`、`tokenSha256` 长度 64、`oauth.enabled: true`、`hasMcpAccessToken: false`（正是我们要部署的那套配置） | 本节 |
 
 ### A2 明细（`worker/test/` 8 个文件，200 条）
 
@@ -141,12 +142,16 @@
 
 ## 7. 汇总
 
+> **状态更新（本轮）**：真实部署**已获用户批准**，并约定**由用户自己执行**（凭据只存在于用户的终端与 Cloudflare；逐条命令见 [GATE1_DEPLOYMENT.md](GATE1_DEPLOYMENT.md) §5，已确认的决定见其 §10）。
+> 因此 B/C 的阻塞原因已经从「等批准」变成「等用户跑完部署命令并把 `workers.dev` 地址给我」——
+> 这两段在**真实执行之前仍然是 BLOCKED**，不会因为"批准了"就改标 PASS。
+
 | 阶段 | PASS | FAIL | NOT RUN | BLOCKED | 合计 |
 | --- | --- | --- | --- | --- | --- |
-| A 本地自动化（含 A9–A11 三项部署前检查） | **11** | 0 | 5 | 0 | 16 |
+| A 本地自动化（含 A9–A12 四项部署前检查） | **12** | 0 | 5 | 0 | 16 |
 | B 真实 Cloudflare 联调 | 0 | 0 | 0 | **10** | 10 |
 | C ChatGPT 官方验收 | 0 | 0 | 0 | **6** | 6 |
-| **合计** | **11** | **0** | **5** | **16** | **32** |
+| **合计** | **12** | **0** | **5** | **16** | **33** |
 
 ---
 

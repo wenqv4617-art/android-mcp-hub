@@ -1239,3 +1239,26 @@ npm run smoke -- --base https://<WORKER>
 **顺带修了测试替身的一处不忠实**（K2）：`worker/test/harness/runtime.ts` 的 `FakeDurableObjectStorage.list()`
 原本忽略 `options.limit`，把全部匹配项都返回。真实 workerd 的 `list()` 是**会**尊重 `limit` 的 ——
 替身不忠实就有可能让一个在真运行时成立的断言在替身上以错误的理由通过（或反之）。现在它按插入顺序取到 `limit` 为止。
+
+### 12.15 部署获批，而且这一轮把"部署文档自己能不能跑通"也验了
+
+用户批准在 Android MCP Hub **专属新账号**上部署（Free 计划、不订阅付费服务、不建 D1/KV/R2/Queue、
+不配自定义域名、不开自动部署），并选择**自己执行** `wrangler` 那几条命令 —— 凭据只存在于他的终端与 Cloudflare。
+已确认的决定记在 `docs/GATE1_DEPLOYMENT.md` §10：`MCP_ACCESS_TOKEN` **不配置**（只走 OAuth）、
+`deviceId` 用 `my-android-phone`、Worker 资源清单照第 1 节。
+
+这带来一个直接的后果：**部署文档本身成了交付件**，因为它现在是"用户要照着敲"的东西，
+所以它必须真的能跑，而不只是读起来对。于是把它逐条执行了一遍：
+
+| 步骤 | 真实结果 |
+| --- | --- |
+| `DEVICE_TOKEN="$(openssl rand -base64 32 \| tr -d '\n')"` | 正常 |
+| `printf '%s' "$DEVICE_TOKEN" \| npm run check:credential -- --device-id my-android-phone` | 打印自检通过（两条独立实现一致）+ 一行可直接粘贴的 `DEVICE_TOKENS` JSON，**不回显令牌** |
+| 把那段 JSON 喂给真实的 `loadConfig` | `problems: []`、`credentials: 1`、`deviceId: "my-android-phone"`、`tokenSha256` 长度 64、`oauth.enabled: true`、`hasMcpAccessToken: false` |
+
+最后一行是关键：它证明文档里那套操作产出的**正是我们要部署的那份配置**，
+而不是"看起来像对的 JSON"。记为 **A12**（`docs/GATE1_ACCEPTANCE.md`），阶段 A 由 11 PASS 变 12。
+
+`docs/GATE1_DEPLOYMENT.md` 相应更新：标题由「待批准，尚未执行」改为「已获批准 · 由用户自己执行」，
+新增 **§5.0 先把仓库放到你信任的环境里**（`git clone --branch gate0 … && npm ci`），
+§9 改成"我仍然不会做的事"，§10 从"需要用户回复"改成"已确认的决定"。

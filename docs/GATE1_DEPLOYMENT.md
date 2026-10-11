@@ -1,4 +1,4 @@
-# Gate 1 部署方案（**待批准，尚未执行**）
+# Gate 1 部署方案（**已获批准 · 由用户自己执行**）
 
 > **当前状态：NOT RUN。**
 > 本文件是**部署前的方案与检查清单**。Gate 1 的代码修改、本地测试（阶段 A）已经完成，
@@ -145,10 +145,27 @@ npx wrangler@4.149.0 login
 
 ---
 
-## 5. 部署命令（**在用户批准之前不要执行**）
+## 5. 部署命令（**由你自己执行**）
+
+> **这一节是给你亲手跑的，我不执行。** 原因不是形式：执行 `wrangler deploy` 需要账号登录态，
+> 而任务书明令「绝不要求用户在聊天窗口粘贴真实 Token / API Key / 密码」——
+> 最干净的做法就是凭据从始至终只存在于你的终端和 Cloudflare 里。
+> 你跑完把 `workers.dev` 地址告诉我，我用 `npm run smoke` 做**只读**自检（不需要任何秘密），然后进阶段 C。
+
+### 5.0 先把仓库放到你信任的环境里
 
 ```bash
-cd /root/android-mcp-hub            # 或你本地的仓库路径
+git clone --branch gate0 https://github.com/wenqv4617-art/android-mcp-hub.git
+cd android-mcp-hub
+npm ci
+git log --oneline -1        # 应看到 933a915 或更新
+```
+
+> 部署用的就是这份代码。`gate0` 分支的 HEAD 就是我要你部署的那个版本 ——
+> 如果你看到的是更新的提交，那是我在这之后又推了东西，请按新的提交号记录。
+
+```bash
+# 在你 clone 下来的仓库目录里执行
 
 # ---- 0) 先本地全量回归（不产生任何云端资源）----
 npm run typecheck
@@ -156,10 +173,12 @@ npm run test
 npm run e2e
 
 # ---- 1) 注入 Secret（不要写进任何文件、不要提交）----
-npx wrangler@4.149.0 secret put DEVICE_TOKENS     --config worker/wrangler.jsonc
-npx wrangler@4.149.0 secret put OAUTH_OWNER_SECRET --config worker/wrangler.jsonc
-# 可选：给本机 curl 用的静态 Bearer
-# npx wrangler@4.149.0 secret put MCP_ACCESS_TOKEN --config worker/wrangler.jsonc
+#     DEVICE_TOKENS：粘贴 §4.1 第 2 步生成的那条 JSON 数组
+#     OAUTH_OWNER_SECRET：粘贴 §4.2 生成的口令
+npx wrangler@4.149.0 secret put DEVICE_TOKENS       --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put OAUTH_OWNER_SECRET  --config worker/wrangler.jsonc
+# 本轮已确认**不配置** MCP_ACCESS_TOKEN（只走 OAuth）：
+# 静态 Bearer 等于多留一条认证路径，且它会被 /healthz 自检要求为未配置。
 
 # ---- 2) 部署 ----
 npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc
@@ -321,21 +340,24 @@ npx wrangler@4.149.0 delete --config worker/wrangler.jsonc
 
 ---
 
-## 9. 我在批准前**不会**做的事
+## 9. 我**不会**做的事（部署已获批准，这一节仍然有效）
 
-- ❌ 不执行 `wrangler deploy` / `wrangler secret put` / `wrangler login`
+- ❌ 不执行 `wrangler login` / `secret put` / `deploy`（改由你自己执行，见 §5）
 - ❌ 不创建、不修改任何云端资源
 - ❌ 不修改 Cloudflare 账号配置，不开通任何付费项
 - ❌ 不配置 GitHub Actions 或任何自动部署
 - ❌ 不要求你在聊天里粘贴任何真实 Token / Key / 密码
 
-## 10. 需要用户回复的内容
+## 10. 已确认的决定（2026-… · 用户答复）
 
-请确认（可以直接回复"批准部署"，或指出要改的地方）：
+| # | 事项 | 决定 |
+| --- | --- | --- |
+| 1 | 谁执行部署 | **用户自己执行**（凭据只存在于用户终端与 Cloudflare；我提供逐条命令） |
+| 2 | 账号与计划 | Android MCP Hub **专属新账号**（与见川记忆完全独立），**Free 计划**，不订阅任何付费服务 |
+| 3 | 创建的资源 | **批准**：1 个 Worker + 3 个 DO 类 + 2 个 Secret + `workers.dev` 子域。不建 D1/KV/R2/Queue/Hyperdrive、不配 route 或自定义域名、不开自动部署 |
+| 4 | 静态 `MCP_ACCESS_TOKEN` | **不配置**（只走 OAuth）。自检断言 `auth.mcp_bearer_configured` 必须为 `false` |
+| 5 | 设备 `deviceId` | **`my-android-phone`**（必须与手机 App 输入框里填的完全一致） |
 
-1. 使用**专属新 Cloudflare 账号**（与既有生产项目完全独立）—— 确认？
-2. 账号是 **Free 计划**、**没有**付费订阅 —— 确认？
-3. 同意创建第 1 节列出的资源（1 Worker + 3 DO 类 + 2～3 个 Secret）—— 确认？
-4. 同意在本轮**不开通付费服务**、**不配自动部署** —— 确认？
-5. 是否要我**同时**配置可选的 `MCP_ACCESS_TOKEN`（本机 curl 用）？还是只用 OAuth？
-6. 设备 `deviceId` 想用什么值？（默认建议 `my-android-phone`，需与手机 App 里填的一致）
+**下一步（等你）**：按 §4 生成两个凭据 → 按 §5 部署 → 把 `https://android-mcp-hub.<subdomain>.workers.dev` 告诉我。
+
+**然后（我来）**：`npm run smoke -- --base <你的地址>` 做只读自检（B1–B4）→ 你去手机 App 填地址与令牌、在 ChatGPT 里加连接器（`docs/GATE1_CHATGPT_SETUP.md`）→ 阶段 C 用「G老师，Ping 一下我的手机。」验收。
