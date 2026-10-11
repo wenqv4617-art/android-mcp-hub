@@ -1,0 +1,81 @@
+name: Worker manual deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_deploy:
+        description: 'Type DEPLOY to authorize a real Cloudflare deployment'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-mcp-hub-manual-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.ref == 'refs/heads/gate0' && inputs.confirm_deploy == 'DEPLOY' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout gate0
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Validate target and configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/gate0'
+          test -f package-lock.json
+          test -f worker/wrangler.jsonc
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const raw = fs.readFileSync('worker/wrangler.jsonc', 'utf8');
+          const cfg = raw.replace(/^\s*\/\/.*$/gm, '');
+          for (const key of ['account_id', 'routes', 'route', 'd1_databases', 'kv_namespaces', 'r2_buckets', 'queues', 'hyperdrive']) {
+            if (new RegExp('"' + key + '"\\s*:').test(cfg)) throw new Error('Forbidden Wrangler config key: ' + key);
+          }
+          if (!/"name"\s*:\s*"android-mcp-hub"/.test(cfg)) throw new Error('Unexpected Worker name');
+          for (const cls of ['PhoneSession', 'McpSession', 'OAuthStore']) {
+            if (!cfg.includes('"' + cls + '"')) throw new Error('Missing Durable Object class: ' + cls);
+          }
+          NODE
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run Gate 1 checks
+        run: |
+          npm run typecheck
+          npm run test
+          npm run e2e
+
+      - name: Wrangler dry-run
+        run: npx wrangler deploy --config worker/wrangler.jsonc --dry-run
+
+      - name: Check required credentials
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          test -n "$CF_TOKEN" || { echo '::error::Missing CLOUDFLARE_API_TOKEN'; exit 1; }
+          test -n "$CF_ACCOUNT" || { echo '::error::Missing CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+          [[ "$CF_ACCOUNT" =~ ^[0-9a-fA-F]{32}$ ]] || { echo '::error::Invalid CLOUDFLARE_ACCOUNT_ID format'; exit 1; }
+
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy --config worker/wrangler.jsonc
