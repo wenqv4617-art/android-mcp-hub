@@ -10,10 +10,12 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  BATTERY_GET_STATUS_TOOL,
   dispatchToolCall,
   parsePhonePingArgs,
   PHONE_PING_TOOL,
   pingOutcomeToResult,
+  TOOL_REGISTRY,
   ToolArgumentError,
   toolNames,
 } from "../src/mcp/tools";
@@ -39,9 +41,34 @@ const failOutcome: PingOutcome = {
 };
 
 describe("工具层 / 注册表", () => {
-  it("只暴露 phone_ping 一个工具", () => {
-    expect(toolNames()).toEqual(["phone_ping"]);
+  it("注册表是显式白名单：Gate 2 之后是 phone_ping + battery_get_status，一个不多", () => {
+    // 这条断言刻意用 `toEqual` 整表比对而不是 `toContain`：
+    // "多了一个没人审过的工具"必须让测试变红，而不是悄悄通过。
+    // Gate 1 时期这里是 `["phone_ping"]`；Gate 2 工作包 E 显式加了第二个只读能力。
+    expect(toolNames()).toEqual(["phone_ping", "battery_get_status"]);
     expect(PHONE_PING_TOOL.name).toBe("phone_ping");
+    expect(BATTERY_GET_STATUS_TOOL.name).toBe("battery_get_status");
+  });
+
+  it("每个工具都声明了自己的通道，且通道只有 ping / tool 两种", () => {
+    // 通道决定这个工具走 legacy phone_ping 还是 Gate 2 的 tool_request。
+    // 写错一个字符就会让某个工具静默走错路线，所以这里逐条断言。
+    expect(PHONE_PING_TOOL.transport).toBe("ping");
+    expect(BATTERY_GET_STATUS_TOOL.transport).toBe("tool");
+    for (const tool of TOOL_REGISTRY) {
+      expect(["ping", "tool"]).toContain(tool.transport);
+    }
+  });
+
+  it("每个工具都禁止多余字段，且 allowedArgs 里的名字都在 inputSchema 里出现过", () => {
+    for (const tool of TOOL_REGISTRY) {
+      expect(tool.inputSchema["type"]).toBe("object");
+      expect(tool.inputSchema["additionalProperties"]).toBe(false);
+      const props = Object.keys(tool.inputSchema["properties"] as Record<string, unknown>);
+      // 白名单里的键必须真的在 schema 里 —— 否则会出现"文档里没有、但代码接受"
+      // 的隐藏参数，那正是最难审的一类。
+      for (const key of tool.allowedArgs) expect(props).toContain(key);
+    }
   });
 
   it("inputSchema 是 object 且禁止多余字段", () => {

@@ -102,6 +102,28 @@ X-Client-Version: android-mcp-hub/0.1.0   ← 可选，便于排查
 
 已知 `code`：`message_too_large`、`malformed_message`、`unsupported_type`、`unknown_request_id`。
 
+### 3.5 `tool_request`（Gate 2：通用只读能力调用）
+
+```jsonc
+{
+  "type": "tool_request",
+  "request_id": "8b1f...",     // 服务端生成，与 phone_ping 共用一个 request_id 空间
+  "tool_name": "battery_get_status",
+  "arguments": {}               // 选项表见下；不是对象时按 {} 处理，真正的校验在两端
+}
+```
+
+`tool_name` 必须在**双端白名单**里：
+
+- Worker 侧：`worker/src/mcp/tools.ts` 的 `TOOL_REGISTRY`（显式注册）**且**未被 `PHONE_DISABLED_TOOLS` 禁用。
+- 手机侧：Android 的能力表（见工作包 D）。
+
+任何一侧不认识这个名字，都必须回 `tool_result{ok:false,error.code:"unsupported_tool"}` ——
+**不允许**"尽力而为"地执行一个没注册的东西，也不允许服务端替手机放行。
+
+这一帧与 `phone_ping` 的区别只有一点：它不是"测量链路"，而是"请求一次能力"。
+超时、并发上限、代次校验、重复 `request_id` 拒绝、断线结算**全部共用同一套逻辑**。
+
 ---
 
 ## 4. 手机 → 服务端
@@ -144,6 +166,51 @@ X-Client-Version: android-mcp-hub/0.1.0   ← 可选，便于排查
 服务端回 `heartbeat_ack`。WebSocket 协议层自带的 ping/pong 帧由运行时自动应答，
 这条路是**应用层**心跳，用来穿过中间设备可能存在的空闲超时。
 
+### 4.4 `tool_result`（Gate 2）
+
+```jsonc
+// 成功
+{ "type": "tool_result", "request_id": "8b1f...", "ok": true,
+  "result": { "battery_level_percent": 42, "charging": false,
+              "charging_source": "unavailable", "power_save_mode": true } }
+
+// 失败
+{ "type": "tool_result", "request_id": "8b1f...", "ok": false,
+  "error": { "code": "tool_failed", "message": "..." } }
+```
+
+解析规则（`worker/src/phone/messages.ts`）：
+
+| 情况 | 结果 |
+| --- | --- |
+| `request_id` 缺失/非字符串/空 | `invalid`（`tool_result_missing_request_id`）→ 回 `error{malformed_message}` |
+| `ok` 不是布尔 | `invalid`（`tool_result_missing_ok`） |
+| `ok:true` 但 `result` 不是对象 | `invalid`（`tool_result_bad_result`） |
+| `ok:true` 同时带 `error` | `invalid`（`tool_result_conflicting_error`） |
+| `ok:false` 但缺 `error` / `error.code` | `invalid` |
+| `ok:false` 同时带 `result` | `invalid`（`tool_result_conflicting_result`） |
+| `error.code` 是没见过的名字 | **不丢帧**，归一化成 `tool_failed` |
+
+最后一条是刻意的：丢帧会让一个**已经拿到结果**的请求白等到超时，
+而超时是"不知道结果"，比"知道失败了"更糟。
+
+信封不可被结果污染：`result` 里的 `ok` / `request_id` / `device_id` / `tool_name` /
+`rtt_ms` / `server_timestamp` / `device_timestamp` / `connection_generation` /
+`error_code` / `error_message` 一律被**丢弃并记日志**（`tool.result_reserved_key_dropped`）。
+手机的返回是数据，不是信封。
+
+### 4.5 设备凭据撤销（Gate 1.5 / A1）
+
+撤销不是一条线上帧，而是一个**受保护的内部入口**：
+
+- `POST /internal/phone/revoke`（`ROUTE_REVOKE`），body `{deviceId, reason?}`。
+- **没有任何公网路由映射到它**（`worker/test/phone-lifecycle.test.ts` 用源码断言守住这条）。
+- Worker 在两个同步点尽力调用它：① 设备升级被拒（凭据已撤销）时；② 工具调用撞上已撤销设备时。
+- DO 侧的保证不依赖这次通知能否送达：**撤销状态落盘**（`revoked_device_ids`），
+  DO 重建后依然生效，`testing/reset` 也清不掉它。
+- 撤销的效果：在途请求全部结算为 `device_revoked`（不是超时），所有 socket 以
+  close code **`4002`** 关闭，之后的任何升级与任何工具请求都被 403 拒绝。
+
 ---
 
 ## 5. 规则（强制，全部有对应测试）
@@ -163,6 +230,14 @@ X-Client-Version: android-mcp-hub/0.1.0   ← 可选，便于排查
 | R11 | 每次成功握手 `connection_generation += 1` 并落盘；新连接会关闭同设备的旧连接（close code `4001`） | 防重连竞争 |
 | R12 | 未知 `request_id` 的 pong 一律拒绝并计入 `unknownPongs` | 防伪造/迟到响应 |
 | R13 | Durable Object 重建后，存储里遗留的待处理请求一律记为失败，**绝不**产生虚假成功 | 休眠/驱逐的正确处理 |
+| R14 | `phone_ping` 与 `tool_request` **共用**一个待处理表、一个并发额度、一条超时逻辑 | 两条通道各写一份必然写出"只在一条上复现"的 bug |
+| R15 | 一条 `phone_pong` 绝不允许结算 `tool_request`，一条 `tool_result` 绝不允许结算 `phone_ping`（即使 `request_id` 相同） | 通道串台 |
+| R16 | 同 `request_id` 跨通道重复登记 → 409 `duplicate_request_id`，已有请求不受影响 | 防覆盖 |
+| R17 | 应用层存活：记录最近一条**合法**上行帧时间；静默超过 `PHONE_LIVENESS_TIMEOUT_MS`（默认 90 s）判定链路已死 | `readyState` 分不出半开连接 |
+| R18 | 判定链路死亡时：`connected=false`、在途请求结算为 `phone_disconnected`、主动 `close(4000)` | 半开连接必须快速失败，而不是拖满超时 |
+| R19 | 垃圾帧（非 JSON / 未知类型 / 缺字段）**不**刷新存活时间 | 那正是更该判死的情形 |
+| R20 | 凭据撤销后：新升级 403、新工具请求 403 `device_revoked`、在途请求结算为 `device_revoked`、socket 以 `4002` 关闭 | 撤销必须真的断掉 |
+| R21 | 未知工具名 / 未知参数 / 越界参数一律是 **JSON-RPC 协议错误**（`-32602`），不产生 tool result，也不碰转发层 | 调用方必须知道自己的请求没被接受 |
 
 ---
 
@@ -177,6 +252,16 @@ X-Client-Version: android-mcp-hub/0.1.0   ← 可选，便于排查
 | `unknown_device` | `device_id` 不在 `DEVICE_TOKENS` 中 | 否 |
 | `ambiguous_device` | 未指定 `device_id` 且无法唯一推断 | 否（补上 `device_id`） |
 | `invalid_pong` | 收到 pong 但 `request_id` 不匹配当前待处理项 | 否（是 bug） |
+| `device_revoked` | 该设备的凭据已被撤销 | 否（需重新配发凭据） |
+| `unsupported_tool` | 工具名不在白名单里（服务端或手机侧） | 否（是调用方写错了） |
+| `invalid_arguments` | 参数结构不合法（手机侧拒绝） | 否（改参数） |
+| `tool_failed` | 能力执行过程中失败（**也是未知错误码的归一化目标**） | 视能力语义而定 |
+| `tool_unavailable` | 能力此刻不可用（例如系统服务拿不到） | 是（稍后重试） |
+| `not_permitted` | 服务端用 `PHONE_DISABLED_TOOLS` 关掉了这个工具 | 否 |
+
+Gate 2 的工具失败码（`tool_result.error.code`）是一个**闭集**，见
+`worker/src/phone/messages.ts` 的 `TOOL_RESULT_ERROR_CODES`；手机回别的名字会被归一化成
+`tool_failed`，并保留原始 message。
 
 Gate 0 **不做**自动重试：上层（人或未来的调度器）看到 `isError: true` 自行决定。
 
@@ -193,6 +278,14 @@ Gate 0 **不做**自动重试：上层（人或未来的调度器）看到 `isEr
 | Jitter ratio | 0.2（±20%） | 手机侧 `HubConfig.reconnectJitterRatio` |
 | Max pending requests | 16 | Worker `MAX_PENDING_REQUESTS`；手机侧只读展示 |
 | Max frame bytes | 65 536 | Worker `MAX_PHONE_MESSAGE_BYTES` |
+| Liveness timeout | 90 s（= 3 个心跳周期） | Worker `PHONE_LIVENESS_TIMEOUT_MS` |
+| Disabled tools | 空 | Worker `PHONE_DISABLED_TOOLS`（逗号分隔的工具名） |
+
+存活阈值取 3 个心跳周期是刻意的：慢一个周期（手机后台被降频、网络抖动一次）不该被误断，
+而半开连接最迟 90 秒就会变成一次明确的 `phone_offline`，而不是拖满整个 `timeout_ms`。
+
+⚠ 新增任何 env 字段，必须同时加进 `worker/src/config.ts` 的 `cacheKey` 数组，
+否则改了不生效（配置按这个键缓存）。
 
 ---
 
@@ -201,3 +294,30 @@ Gate 0 **不做**自动重试：上层（人或未来的调度器）看到 `isEr
 - 手机收到不认识的 `type`：忽略并记日志，**不回错误**（服务端可能更新了）。
 - 服务端收到不认识的 `type`：回 `error{code:"unsupported_type"}`，不断开连接。
 - 任何一方的未知字段一律忽略，不因此拒绝整帧（`type` 与 `request_id` 除外）。
+
+---
+
+## 9. Gate 2 工具通道：为什么这样设计
+
+这一节是设计理由，不是接口规范；接口在上面 §3.5 / §4.4。
+
+**为什么 ping 与 tool 共用一套待处理逻辑。**「登记 → 发帧 → 等结果 → 结算」这段顺序里，
+每一步都有一个不写对就出错的细节（先登记后发帧、先武装定时器再落盘、记账期间被结算就绝不发帧、
+发送失败立刻按 `phone_disconnected` 结算）。如果两条通道各写一份，任何一处写歪都会变成
+"只在某一条通道上复现"的缺陷。所以只有 `enqueueRequest()` 一份实现，两条通道都从它走。
+
+**为什么通道要被显式标记。** `ToolDefinition.transport` 是 `"ping" | "tool"` 的闭集，
+每个工具必须声明。写错一个字符就会让某个工具静默走错路线 —— 那是最难发现的一类 bug，
+所以 `worker/test/tools.test.ts` 里逐条断言了每个工具的 `transport`。
+
+**为什么服务端也要有一份开关。** 注册表决定"存在哪些工具"，`PHONE_DISABLED_TOOLS` 决定
+"此刻允许调用哪些"。只靠注册表的话，关掉一个能力就得改代码 + 重新部署；只靠开关的话，
+一个发现漏洞就能让运维在不知道代码的情况下把它暴露出去。
+
+**为什么手机是最后一道白名单。** 服务端注册表可能被改错、被绕过、被未来版本加上新工具。
+手机侧的能力表是**编译期**的，不认识的 `tool_name` 表里查不到，直接回 `unsupported_tool`。
+"服务端能调用什么"和"手机肯执行什么"是两条独立的否决权。
+
+**为什么禁止任何形式的通用执行。** 这个协议里没有 `shell`、没有 `intent`、
+没有 `reflection`、没有 `file_path`、没有 `url`。新增一个能力 = 新增一个显式的
+`ToolDefinition` + 手机侧一条显式的分支 + 两侧各自的测试。没有"通用执行"这个逃生口。

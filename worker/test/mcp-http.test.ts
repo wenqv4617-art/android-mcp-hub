@@ -21,6 +21,7 @@
 
 import { describe, expect, it } from "vitest";
 import { handleMcpRequest, MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER } from "../src/mcp/http";
+import { toolNames } from "../src/mcp/tools";
 import {
   connectMockPhone,
   makeRig,
@@ -197,7 +198,7 @@ describe("MCP / initialize", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP / tools/list", () => {
-  it("只返回一个工具 phone_ping，且 schema 是只读的", async () => {
+  it("tools/list 与 Worker 的注册表逐条一致（多一个、少一个都算失败）", async () => {
     const rig = await makeRig();
     const sessionId = await initSession(rig);
 
@@ -208,20 +209,33 @@ describe("MCP / tools/list", () => {
     expect(body["id"]).toBe(10);
     const tools = (body["result"] as Record<string, unknown>)["tools"] as Array<Record<string, unknown>>;
 
-    expect(tools.length).toBe(1);
-    expect(tools[0]!["name"]).toBe("phone_ping");
-    expect(typeof tools[0]!["description"]).toBe("string");
+    // 对注册表整表比对，而不是"至少包含 phone_ping"：
+    // 一个没被审过的新工具出现在 tools/list 里必须让测试变红。
+    expect(tools.map((t) => t["name"])).toEqual(toolNames());
 
-    const schema = tools[0]!["inputSchema"] as Record<string, unknown>;
+    for (const tool of tools) {
+      expect(typeof tool["description"]).toBe("string");
+      // 只读工具：这三个 hint 必须诚实。destructiveHint 不该出现。
+      const annotations = tool["annotations"] as Record<string, unknown>;
+      expect(annotations["readOnlyHint"]).toBe(true);
+      expect(annotations["destructiveHint"]).toBeUndefined();
+    }
+
+    const pingTool = tools.find((t) => t["name"] === "phone_ping")!;
+    const schema = pingTool["inputSchema"] as Record<string, unknown>;
     expect(schema["type"]).toBe("object");
     expect(schema["additionalProperties"]).toBe(false);
     const props = schema["properties"] as Record<string, unknown>;
     expect(Object.keys(props).sort()).toEqual(["device_id", "echo", "timeout_ms"]);
 
-    // 只读工具：这三个 hint 必须诚实。
-    const annotations = tools[0]!["annotations"] as Record<string, unknown>;
-    expect(annotations["readOnlyHint"]).toBe(true);
-    expect(annotations["destructiveHint"]).toBeUndefined();
+    // Gate 2 / E：新工具必须**不带**任何能力参数 —— 多一个键就多一条要审的路径。
+    const batteryTool = tools.find((t) => t["name"] === "battery_get_status")!;
+    const batterySchema = batteryTool["inputSchema"] as Record<string, unknown>;
+    expect(batterySchema["additionalProperties"]).toBe(false);
+    expect(Object.keys(batterySchema["properties"] as Record<string, unknown>).sort()).toEqual([
+      "device_id",
+      "timeout_ms",
+    ]);
   });
 });
 

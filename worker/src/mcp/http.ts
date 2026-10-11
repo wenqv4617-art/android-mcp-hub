@@ -24,7 +24,7 @@
 // ============================================================================
 
 import { loadConfig, type AppConfig } from "../config";
-import { ROUTE_PING } from "../phone/phone-session";
+import { ROUTE_PING, ROUTE_REVOKE, ROUTE_TOOL } from "../phone/phone-session";
 import type { Env, McpSessionNamespace, PhoneSessionNamespace } from "../env";
 import { MCP_SESSION_ROUTES } from "./session-do";
 import { logEvent } from "../util/log";
@@ -61,6 +61,16 @@ type RpcPayload = JsonRpcSuccess | JsonRpcError;
 interface McpHttpDeps {
   /** 注入点：真正的实现只做一件事 —— 通过 Durable Object 转发给手机。 */
   callPhonePing?: (env: Env, deviceId: string, timeoutMs: number | undefined) => Promise<import("../phone/phone-session").PingOutcome>;
+  /** Gate 1.5：撤销通知的注入点（测试可注入假的）。 */
+  revokeDevice?: (env: Env, deviceId: string, reason: string) => Promise<{ ok: boolean; status: number }>;
+  /** Gate 2：通用工具通道的注入点。缺失时通用工具会明确 internal_error，不降级。 */
+  callPhoneTool?: (
+    env: Env,
+    deviceId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    timeoutMs: number | undefined,
+  ) => Promise<import("../phone/phone-session").ToolOutcome>;
 }
 
 /** 真正的转发实现：Worker → PhoneSession DO → WebSocket → 手机。 */
@@ -83,6 +93,68 @@ export async function callPhonePingViaDurableObject(
   const response = await stub.fetch(request);
   const payload = (await response.json()) as import("../phone/phone-session").PingOutcome;
   return payload;
+}
+
+/**
+ * Gate 2 的转发实现：同一台 DO、同一条 WebSocket，只是帧类型换成 tool_request。
+ *
+ * 注意它**不**复用 [callPhonePingViaDurableObject] 的路径：两条通道在 DO 里
+ * 是两个内部路由（`/ping` 与 `/tool`），合并会让"这条请求走的是哪条通道"
+ * 在日志里无法区分 —— 而兼容性审计最需要区分的恰恰就是这个。
+ */
+export async function callPhoneToolViaDurableObject(
+  env: Env,
+  deviceId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  timeoutMs: number | undefined,
+): Promise<import("../phone/phone-session").ToolOutcome> {
+  const ns = env.PHONE_SESSION as unknown as PhoneSessionNamespace;
+  const stub = ns.get(ns.idFromName(deviceId));
+  const request = new Request(`https://phone-session.internal${ROUTE_TOOL}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      deviceId,
+      toolName,
+      arguments: args,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    }),
+  });
+  const response = await stub.fetch(request);
+  const payload = (await response.json()) as import("../phone/phone-session").ToolOutcome;
+  return payload;
+}
+
+/**
+ * Gate 1.5 / A1 的撤销通知：让 DO 立即失效并关闭对应设备当前的连接。
+ *
+ * 谁能调用它：只有 Worker 内部（DO binding 只在本 Worker 里可见）。**没有**
+ * 任何公网路由映射到 `ROUTE_REVOKE` —— 这是刻意的，撤销入口一旦公网可达，
+ * 它本身就成了"谁能撤销谁的设备"的新攻击面。
+ *
+ * DO 侧还有一道交叉校验：它要求 body 里的 deviceId 与当前 socket 上挂着的
+ * deviceId 一致，否则回 409。这样即使 Worker 内部某处把 deviceId 搞混，
+ * 也不会出现"A 的凭据被撤销、B 的连接被关掉"。
+ *
+ * 这里是**尽力而为**：撤销的最终保证来自"每次工具调用都重新解析授权"，
+ * 而不是来自这条推送（见 `worker/src/index.ts` 的 upgrade 分支注释）。
+ */
+export async function revokePhoneDeviceViaDurableObject(
+  env: Env,
+  deviceId: string,
+  reason: string,
+): Promise<{ ok: boolean; status: number }> {
+  const ns = env.PHONE_SESSION as unknown as PhoneSessionNamespace;
+  const stub = ns.get(ns.idFromName(deviceId));
+  const request = new Request(`https://phone-session.internal${ROUTE_REVOKE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceId, reason }),
+  });
+  const response = await stub.fetch(request);
+  return { ok: response.ok, status: response.status };
 }
 
 export async function handleMcpRequest(request: Request, env: Env, deps: McpHttpDeps = {}): Promise<Response> {
@@ -348,9 +420,21 @@ async function dispatchRpc(
         };
       }
       const callPhonePing = deps.callPhonePing ?? callPhonePingViaDurableObject;
-      const dispatched = await dispatchToolCall(config, name, p["arguments"], (deviceId, timeoutMs) =>
-        callPhonePing(env, deviceId, timeoutMs),
+      const callPhoneTool = deps.callPhoneTool ?? callPhoneToolViaDurableObject;
+      const dispatched = await dispatchToolCall(
+        config,
+        name,
+        p["arguments"],
+        (deviceId, timeoutMs) => callPhonePing(env, deviceId, timeoutMs),
+        (deviceId, toolName, toolArgs, timeoutMs) => callPhoneTool(env, deviceId, toolName, toolArgs, timeoutMs),
       );
+      if (dispatched.revokedDeviceId !== undefined) {
+        // 设备存在但凭据已被撤销。先让 DO 失效（尽力而为），再回明确错误。
+        const revoke = deps.revokeDevice ?? revokePhoneDeviceViaDurableObject;
+        await revoke(env, dispatched.revokedDeviceId, "tool_call_after_revocation").catch(() => {
+          logEvent("warn", "phone.revoke_notify_failed", { deviceId: dispatched.revokedDeviceId, errorCode: "revoke_notify_failed" });
+        });
+      }
       if (dispatched.protocolError !== undefined) {
         return {
           payload: failure(id, dispatched.protocolError.code, dispatched.protocolError.message, dispatched.protocolError.data),

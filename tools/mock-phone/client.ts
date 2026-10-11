@@ -19,6 +19,10 @@
 //    binary           发二进制帧 —— 必须被拒绝
 //    hello-mismatch   hello 里报另一个 deviceId —— 只记账、不崩
 //
+//  Gate 2 起它还认识通用工具帧 `tool_request`，行为由独立的 `toolBehavior`
+//  控制（见 [ToolBehavior]）。两者刻意分开：一个场景描述"这台手机对 ping 多坏"，
+//  另一个描述"它对工具调用多坏"，组合起来才是完整的"恶劣手机"。
+//
 //  ⚠ 这个文件里**没有任何真实凭据**：token 一律从命令行/环境变量传入。
 // ============================================================================
 
@@ -45,6 +49,57 @@ export const PHONE_SCENARIOS: PhoneScenario[] = [
   "hello-mismatch",
 ];
 
+/**
+ * 模拟手机对 `tool_request` 的行为。
+ *
+ * `normal` 走的是**白名单 + 固定返回值**：它能回答的能力就是
+ * [MOCK_CAPABILITIES] 里登记的那几个，别的名字一律回 `unsupported_tool`。
+ * 这与真实的 Android 侧是同一个形状 —— 那一边也只有一张显式白名单。
+ */
+export type ToolBehavior =
+  | "normal"
+  | "no-response"
+  | "wrong-request-id"
+  | "duplicate"
+  | "error"
+  | "unsupported"
+  | "reserved-key"
+  | "malformed";
+
+export const TOOL_BEHAVIORS: ToolBehavior[] = [
+  "normal",
+  "no-response",
+  "wrong-request-id",
+  "duplicate",
+  "error",
+  "unsupported",
+  "reserved-key",
+  "malformed",
+];
+
+/**
+ * 模拟能力表：工具名 → 一个**无副作用**的固定返回值。
+ *
+ * 这些数字是编的，而且是刻意编得不像任何真实设备（42% / 未充电 / 省电模式）。
+ * 它们的作用只有一个：让"这条结果确实从手机来"这件事在 E2E 里可断言。
+ */
+export const MOCK_CAPABILITIES: Record<string, () => Record<string, unknown>> = {
+  battery_get_status: () => ({
+    battery_level_percent: 42,
+    charging: false,
+    charging_source: "unavailable",
+    power_save_mode: true,
+  }),
+};
+
+/** 模拟手机对一次 tool_request 的回复记录（测试用来断言"回了几个、什么形状"）。 */
+export interface SentToolResult {
+  requestId: string;
+  toolName: string;
+  ok: boolean;
+  afterFrameIndex: number;
+}
+
 /** 只依赖标准 WebSocket 的最小接口，好让测试注入假 socket。 */
 export interface SocketLike {
   readyState: number;
@@ -55,6 +110,8 @@ export interface SocketLike {
 
 export interface MockPhoneOptions {
   scenario?: PhoneScenario;
+  /** Gate 2：对 `tool_request` 的行为。默认 normal（走 [MOCK_CAPABILITIES]）。 */
+  toolBehavior?: ToolBehavior;
   /** 只用于 hello 帧的自报字段，不参与鉴权。 */
   deviceId?: string;
   appVersion?: string;
@@ -84,6 +141,8 @@ export class MockPhone {
   readonly received: string[] = [];
   readonly sentPongs: SentPong[] = [];
   readonly sentFrames: string[] = [];
+  /** Gate 2：回过的 tool_result（含被故意发错的那些）。 */
+  readonly sentToolResults: SentToolResult[] = [];
   helloSeen = false;
   welcomeSeen = false;
   socketClosed: { code: number; reason: string } | null = null;
@@ -91,13 +150,17 @@ export class MockPhone {
   wantCloseAfterPing = false;
 
   private readonly scenario: PhoneScenario;
+  private readonly toolBehavior: ToolBehavior;
   private readonly opts: MockPhoneOptions;
   /** 收到过多少个 phone_ping（0 基索引用）。 */
   pingCount = 0;
+  /** 收到过多少个 tool_request（0 基索引用）。 */
+  toolRequestCount = 0;
 
   constructor(opts: MockPhoneOptions = {}) {
     this.opts = opts;
     this.scenario = opts.scenario ?? "normal";
+    this.toolBehavior = opts.toolBehavior ?? "normal";
   }
 
   /** 收到一条服务端帧时的行为。返回需要立刻回发的帧（已编码）。 */
@@ -160,10 +223,113 @@ export class MockPhone {
         return;
       }
 
+      case "tool_request": {
+        const requestId = typeof frame["request_id"] === "string" ? frame["request_id"] : "";
+        const toolName = typeof frame["tool_name"] === "string" ? frame["tool_name"] : "";
+        const index = this.toolRequestCount;
+        this.toolRequestCount += 1;
+        this.log(`tool_request #${index} tool=${toolName} request_id=${requestId}`);
+        this.respondToToolRequest(send, requestId, toolName);
+        return;
+      }
+
       default:
         this.log(`忽略未知帧类型：${String(frame["type"])}`);
         return;
     }
+  }
+
+  /**
+   * 对一次 `tool_request` 的回复。
+   *
+   * 默认路径刻意是**白名单**：不在 [MOCK_CAPABILITIES] 里的工具名一律回
+   * `unsupported_tool`。这样"Worker 把没注册的工具名发过来了"在 E2E 里
+   * 会变成一条可观测的失败，而不是一个"手机居然也答应了"的假成功。
+   */
+  private respondToToolRequest(send: (data: string | ArrayBuffer) => void, requestId: string, toolName: string): void {
+    switch (this.toolBehavior) {
+      case "no-response":
+        this.log("toolBehavior=no-response：故意不回 tool_result");
+        return;
+
+      case "wrong-request-id":
+        this.sendToolResult(send, `${requestId}-not-a-real-id`, toolName, true, {});
+        return;
+
+      case "duplicate":
+        this.sendToolResult(send, requestId, toolName, true, this.mockResultFor(toolName));
+        this.sendToolResult(send, requestId, toolName, true, this.mockResultFor(toolName));
+        return;
+
+      case "error":
+        this.sendToolResult(send, requestId, toolName, false, null, {
+          code: "tool_failed",
+          message: "模拟能力执行失败",
+        });
+        return;
+
+      case "unsupported":
+        this.sendToolResult(send, requestId, toolName, false, null, {
+          code: "unsupported_tool",
+          message: `模拟手机不认识工具 ${toolName}`,
+        });
+        return;
+
+      case "reserved-key":
+        // 一台被改造过的手机试图用 result 覆盖信封字段。
+        this.sendToolResult(send, requestId, toolName, true, {
+          ...this.mockResultFor(toolName),
+          ok: false,
+          request_id: "hijacked",
+          device_id: "another-phone",
+        });
+        return;
+
+      case "malformed":
+        // 缺 request_id 的 tool_result —— 服务端必须当成 invalid 拒绝，而不是崩。
+        this.sendToolResult(send, null, toolName, true, this.mockResultFor(toolName));
+        return;
+
+      default: {
+        const result = this.mockResultFor(toolName);
+        if (result === null) {
+          this.log(`toolBehavior=normal：本地白名单里没有 ${toolName}，回 unsupported_tool`);
+          this.sendToolResult(send, requestId, toolName, false, null, {
+            code: "unsupported_tool",
+            message: `模拟手机的白名单里没有工具 ${toolName}`,
+          });
+          return;
+        }
+        this.sendToolResult(send, requestId, toolName, true, result);
+        return;
+      }
+    }
+  }
+
+  /** 本地白名单查表；不在表里返回 null（调用方负责回 unsupported_tool）。 */
+  private mockResultFor(toolName: string): Record<string, unknown> | null {
+    const capability = MOCK_CAPABILITIES[toolName];
+    return capability === undefined ? null : capability();
+  }
+
+  private sendToolResult(
+    send: (data: string | ArrayBuffer) => void,
+    requestId: string | null,
+    toolName: string,
+    ok: boolean,
+    result: Record<string, unknown> | null,
+    error?: { code: string; message: string },
+  ): void {
+    const frame: Record<string, unknown> = {
+      type: "tool_result",
+      // requestId 为 null 时**故意不带这个字段**：用来构造 malformed 帧。
+      ...(requestId !== null ? { request_id: requestId } : {}),
+      ok,
+      ...(ok && result !== null ? { result } : {}),
+      ...(!ok && error !== undefined ? { error } : {}),
+    };
+    this.sentToolResults.push({ requestId: requestId ?? "<missing>", toolName, ok, afterFrameIndex: this.received.length });
+    this.sendJson(send, frame);
   }
 
   private respondToPing(send: (data: string | ArrayBuffer) => void, requestId: string): void {

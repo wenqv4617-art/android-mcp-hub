@@ -56,6 +56,23 @@ export interface Env {
   HEARTBEAT_INTERVAL_MS?: string;
   MAX_PENDING_REQUESTS?: string;
   MAX_PHONE_MESSAGE_BYTES?: string;
+  /**
+   * 应用层存活阈值（毫秒）。Gate 1.5 / A2 新增。
+   *
+   * ⚠ 新增 env 字段必须同时加进 `worker/src/config.ts` 的 `cacheKey` 数组，
+   *   否则改了它不会让配置缓存失效。
+   */
+  PHONE_LIVENESS_TIMEOUT_MS?: string;
+  /**
+   * 逗号分隔的**禁用工具名清单**。Gate 2 / C 新增。
+   *
+   * 注册表回答"存在哪些工具"，这个开关回答"此刻允许调用哪些"。两者都通过
+   * 才可能落到手机上 —— 只靠代码里的注册表，运维就无法在不改代码的前提下
+   * 撤掉一个能力。留空 = 不额外禁用。
+   *
+   * ⚠ 新增 env 字段必须同时加进 `worker/src/config.ts` 的 `cacheKey` 数组。
+   */
+  PHONE_DISABLED_TOOLS?: string;
   SUPPORTED_MCP_PROTOCOL_VERSIONS?: string;
   DEFAULT_DEVICE_ID?: string;
 

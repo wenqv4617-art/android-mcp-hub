@@ -20,13 +20,22 @@
 // ============================================================================
 
 import { WebSocket } from "ws";
-import { attachMockPhone, MockPhone, PHONE_SCENARIOS, type PhoneScenario } from "./client";
+import {
+  attachMockPhone,
+  MockPhone,
+  PHONE_SCENARIOS,
+  TOOL_BEHAVIORS,
+  type PhoneScenario,
+  type ToolBehavior,
+} from "./client";
 
 interface CliOptions {
   url: string;
   device: string;
   token: string;
   scenario: PhoneScenario;
+  /** Gate 2：对 tool_request 的行为，与 scenario 独立。 */
+  toolBehavior: ToolBehavior;
   durationMs: number;
   heartbeatMs: number;
   delayMs: number;
@@ -42,9 +51,13 @@ function parseArgs(argv: string[]): CliOptions {
   const device = get("device") ?? process.env["MOCK_PHONE_DEVICE"] ?? "";
   const token = get("token") ?? process.env["MCP_DEVICE_TOKEN"] ?? "";
   const scenarioRaw = (get("scenario") ?? "normal") as PhoneScenario;
+  const toolBehaviorRaw = (get("tool-behavior") ?? "normal") as ToolBehavior;
 
   if (!PHONE_SCENARIOS.includes(scenarioRaw)) {
     fail(`未知 scenario "${scenarioRaw}"，可选：${PHONE_SCENARIOS.join(", ")}`);
+  }
+  if (!TOOL_BEHAVIORS.includes(toolBehaviorRaw)) {
+    fail(`未知 tool-behavior "${toolBehaviorRaw}"，可选：${TOOL_BEHAVIORS.join(", ")}`);
   }
   if (device === "") fail("缺少 --device（或 MOCK_PHONE_DEVICE）");
   if (token === "") {
@@ -58,6 +71,7 @@ function parseArgs(argv: string[]): CliOptions {
     device,
     token,
     scenario: scenarioRaw,
+    toolBehavior: toolBehaviorRaw,
     durationMs: Number(get("duration") ?? "30") * 1000,
     heartbeatMs: Number(get("heartbeat") ?? "30") * 1000,
     delayMs: Number(get("delay-ms") ?? "500"),
@@ -80,6 +94,7 @@ function printHelp(): void {
   --duration <秒>       默认 30。到期自动退出。
   --heartbeat <秒>      默认 30。心跳间隔。
   --delay-ms <毫秒>     仅 late 场景使用，默认 500。
+  --tool-behavior <name>  Gate 2：对 tool_request 的行为，默认 normal。可选：${TOOL_BEHAVIORS.join(", ")}
   --help                显示本帮助。
 `);
 }
@@ -94,13 +109,14 @@ async function main(): Promise<void> {
 
   const phone = new MockPhone({
     scenario: opts.scenario,
+    toolBehavior: opts.toolBehavior,
     deviceId: opts.device,
     delayMs: opts.delayMs,
     onLog: (line) => console.log(`[phone] ${line}`),
   });
 
   console.log(`[phone] 连接 ${opts.url}`);
-  console.log(`[phone] device=${opts.device} scenario=${opts.scenario}`);
+  console.log(`[phone] device=${opts.device} scenario=${opts.scenario} tool-behavior=${opts.toolBehavior}`);
 
   const socket = new WebSocket(opts.url, {
     headers: {
@@ -138,7 +154,10 @@ async function main(): Promise<void> {
 
   const stop = (): void => {
     if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
-    console.log(`[phone] 退出。收到 ${phone.received.length} 帧，回了 ${phone.sentPongs.length} 个 pong。`);
+    console.log(
+    `[phone] 退出。收到 ${phone.received.length} 帧，回了 ${phone.sentPongs.length} 个 pong、` +
+      `${phone.sentToolResults.length} 个 tool_result。`,
+  );
     try {
       socket.close(1000, "done");
     } catch {

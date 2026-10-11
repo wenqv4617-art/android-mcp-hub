@@ -28,12 +28,12 @@
 //  如果有人往 wrangler.jsonc 里加了 D1 绑定，这里不会自动获得访问权。
 // ============================================================================
 
-import { loadConfig, activeCredentialsFor, type AppConfig } from "./config";
+import { loadConfig, activeCredentialsFor, isDeviceRevoked, type AppConfig } from "./config";
 import type { PhoneSessionNamespace } from "./env";
 import type { Env } from "./env";
 import { PhoneSession, INTERNAL_DEVICE_HEADER, ROUTE_CONNECT } from "./phone/phone-session";
 import { McpSession } from "./mcp/session-do";
-import { handleMcpRequest, SERVER_NAME, SERVER_VERSION } from "./mcp/http";
+import { handleMcpRequest, revokePhoneDeviceViaDurableObject as revokePhoneDevice, SERVER_NAME, SERVER_VERSION } from "./mcp/http";
 import { OAuthStore } from "./oauth/store-do";
 import { handleOAuthRequest, isOAuthPath } from "./oauth/endpoints";
 import { jsonResponse, notFound, textResponse } from "./util/http";
@@ -166,6 +166,24 @@ async function handlePhoneUpgrade(request: Request, env: Env, config: AppConfig)
   if (candidates.length === 0) {
     // 不区分"设备不存在"与"令牌错误"，避免被用来枚举设备 ID。
     logEvent("warn", "phone.auth_failed", { reason: "no_active_credential" });
+
+    // ★ Gate 1.5 / A1：如果这台设备**存在但凭据已被撤销**，那么"拒绝这次升级"
+    //   只是把新连接挡在门外 —— 已经建立的那条连接还活着，它会继续接受
+    //   phone_ping。撤销必须在观察到的时候就**推到 DO**，让 DO 换代次、
+    //   结算在途请求并关掉旧 socket。
+    //
+    //   为什么在这里推：这是唯一一个"Worker 出于自身理由、必须处理某个
+    //   deviceId 的撤销状态"的同步点，不需要新增任何公网撤销入口。
+    //   推送是**尽力而为**的 —— 它失败不能让 401 变成 500（那会让手机侧
+    //   看到"服务端坏了"，而实际上它只是没收到撤销通知）。真正的保证来自
+    //   "每个工具调用都重新查授权"：撤销后的新请求一律 device_revoked，
+    //   与这次推送成功与否无关。
+    if (isDeviceRevoked(config, deviceId)) {
+      void revokePhoneDevice(env, deviceId, "upgrade_after_revocation").catch(() => {
+        logEvent("warn", "phone.revoke_notify_failed", { deviceId, errorCode: "revoke_notify_failed" });
+      });
+    }
+
     return unauthorizedPhone();
   }
 

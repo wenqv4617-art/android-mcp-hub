@@ -78,9 +78,30 @@ const REL_CONTROL_DEVICE_ID = "rel-control";
 /** `hello-mismatch` 场景在 hello 帧里冒充的那个 device_id（见 tools/mock-phone/client.ts:117-139）。 */
 const REL_CLAIMED_DEVICE_ID = "some-other-phone";
 
+/**
+ * Gate 2 工具通道的专用设备。
+ *
+ * 每台一个 toolBehavior —— 和阶段 1A 的 7 个 scenario 一样，一台手机只扮演
+ * 一种"坏法"，这样才能断言"一台异常手机不影响另一台"。
+ */
+const TOOL_BEHAVIOR_DEVICES: ReadonlyArray<{ deviceId: string; toolBehavior: string; title: string }> = [
+  { deviceId: "tool-normal", toolBehavior: "normal", title: "正常只读能力" },
+  { deviceId: "tool-silent", toolBehavior: "no-response", title: "收到 tool_request 不回" },
+  { deviceId: "tool-hostile", toolBehavior: "reserved-key", title: "结果里塞信封键" },
+  { deviceId: "tool-error", toolBehavior: "error", title: "能力执行失败" },
+  { deviceId: "tool-unsupported", toolBehavior: "unsupported", title: "手机白名单里没有这个工具" },
+];
+
+const TOOL_CONTROL_DEVICE_ID = "tool-control";
+
 const E2E_DEVICE_TOKENS = [
   { deviceId: TEST_DEVICE_ID, token: TEST_DEVICE_TOKEN, label: "e2e mock phone" },
   { deviceId: TEST_DEVICE_ID_2, token: TEST_DEVICE_TOKEN_2, label: "e2e mock phone 2" },
+  ...[...TOOL_BEHAVIOR_DEVICES.map((d) => d.deviceId), TOOL_CONTROL_DEVICE_ID].map((deviceId) => ({
+    deviceId,
+    token: relToken(deviceId),
+    label: "stage1b tool channel device",
+  })),
   ...[...REL_SCENARIO_DEVICES.map((d) => d.deviceId), REL_CONTROL_DEVICE_ID].map((deviceId) => ({
     deviceId,
     token: relToken(deviceId),
@@ -268,7 +289,13 @@ interface PhoneProcess {
   stop(): Promise<void>;
 }
 
-function startMockPhone(url: string, deviceId: string, token: string, scenario: string): PhoneProcess {
+function startMockPhone(
+  url: string,
+  deviceId: string,
+  token: string,
+  scenario: string,
+  toolBehavior = "normal",
+): PhoneProcess {
   const child = spawn(
     process.execPath,
     [
@@ -283,6 +310,8 @@ function startMockPhone(url: string, deviceId: string, token: string, scenario: 
       token,
       "--scenario",
       scenario,
+      "--tool-behavior",
+      toolBehavior,
       "--duration",
       "120",
       "--heartbeat",
@@ -407,7 +436,11 @@ async function main(): Promise<void> {
     out("④ tools/list");
     const listed = await client.listTools();
     const names = listed.tools.map((t) => t.name);
-    check("工具列表恰好是 phone_ping", names.length === 1 && names[0] === "phone_ping", `tools=[${names.join(", ")}]`);
+    check(
+      "工具列表恰好是 phone_ping + battery_get_status（显式白名单，一个不多）",
+      names.length === 2 && names.includes("phone_ping") && names.includes("battery_get_status"),
+      `tools=[${names.join(", ")}]`,
+    );
     out("");
 
     // ---- 5. 手机没连时：失败但不说谎 -------------------------------------
@@ -494,7 +527,7 @@ async function main(): Promise<void> {
     // ---- 8. 会话与协议头 -------------------------------------------------
     out("⑧ 会话与协议头");
     const afterClose = await client.listTools();
-    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 1);
+    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 2);
     out("");
 
     // ---- ⑨ 异常手机场景矩阵（A2–A8）--------------------------------------
@@ -837,6 +870,192 @@ async function main(): Promise<void> {
       controlFinal.structured["ok"] === true,
       `code=${String(controlFinal.code)}`,
     );
+    out("");
+
+    // ---- ⑩ Gate 2 通用工具通道（battery_get_status 全链路）---------------
+    out("⑩ Gate 2 工具通道：MCP → Worker → DO → 手机 → MCP");
+    out("   （每台手机一种 toolBehavior；请求全部走真实的 MCP tools/call）");
+
+    const toolPhones: PhoneProcess[] = [];
+    let toolControl: PhoneProcess | null = null;
+
+    /** 一次真实工具调用：返回是否失败、结构化内容、墙钟耗时。 */
+    async function toolCall(
+      deviceId: string,
+      timeoutMs: number,
+      extraArgs: Record<string, unknown> = {},
+    ): Promise<{ isError: boolean; structured: Record<string, unknown>; elapsed: number; protocolError: string }> {
+      const started = Date.now();
+      try {
+        const res = await client.callTool({
+          name: "battery_get_status",
+          arguments: { device_id: deviceId, timeout_ms: timeoutMs, ...extraArgs },
+        });
+        const elapsed = Date.now() - started;
+        return {
+          isError: res["isError"] === true,
+          structured: (res["structuredContent"] as Record<string, unknown> | undefined) ?? {},
+          elapsed,
+          protocolError: "",
+        };
+      } catch (err) {
+        // 参数校验失败 / 工具不存在这类是 **JSON-RPC 协议错误**：
+        //   SDK 在传输层就把它抛出来，压根不会变成一个 isError 的 tool result。
+        //   这个区别很重要 —— 它意味着"协议层拒绝"和"能力执行失败"是两件事。
+        return { isError: true, structured: {}, elapsed: Date.now() - started, protocolError: String(err) };
+      }
+    }
+
+    /** 起一台工具通道的手机（scenario 固定 normal —— 坏法在 toolBehavior 上）。 */
+    async function spawnToolPhone(deviceId: string, toolBehavior: string): Promise<PhoneProcess> {
+      const proc = startMockPhone(
+        `${server.origin.replace("http", "ws")}/phone/ws`,
+        deviceId,
+        relToken(deviceId),
+        "normal",
+        toolBehavior,
+      );
+      await waitFor(
+        `${deviceId} 连上服务端`,
+        async () => {
+          const res = await client.callTool({ name: "phone_ping", arguments: { device_id: deviceId, timeout_ms: 300 } });
+          const structured = (res["structuredContent"] as Record<string, unknown> | undefined) ?? {};
+          if (structured["ok"] === true) return structured;
+          const code = (structured["error"] as Record<string, unknown> | undefined)?.["code"];
+          if (code === "phone_offline") return null;
+          throw new Error(`意外的 ping 结果：${JSON.stringify(structured)}`);
+        },
+        20_000,
+      );
+      return proc;
+    }
+
+    // 先证明工具能跑通，再让它去对付坏手机。
+    const normalTool = await spawnToolPhone("tool-normal", "normal");
+    toolPhones.push(normalTool);
+    const toolControlProc = await spawnToolPhone(TOOL_CONTROL_DEVICE_ID, "normal");
+    toolControl = toolControlProc;
+
+    const happy = await toolCall("tool-normal", 3000);
+    check(
+      "battery_get_status 走完整链路成功（不是 Worker 自己编的）",
+      !happy.isError && happy.structured["ok"] === true,
+      `ok=${String(happy.structured["ok"])}`,
+    );
+    check(
+      "返回的是结构化电池字段",
+      typeof happy.structured["battery_level_percent"] === "number" &&
+        typeof happy.structured["charging"] === "boolean" &&
+        typeof happy.structured["power_save_mode"] === "boolean" &&
+        typeof happy.structured["charging_source"] === "string",
+      JSON.stringify({
+        level: happy.structured["battery_level_percent"],
+        charging: happy.structured["charging"],
+        source: happy.structured["charging_source"],
+        saver: happy.structured["power_save_mode"],
+      }),
+    );
+    check(
+      "结果里带 tool_name / connection_generation / rtt_ms",
+      happy.structured["tool_name"] === "battery_get_status" &&
+        (happy.structured["connection_generation"] as number) >= 1 &&
+        typeof happy.structured["rtt_ms"] === "number",
+      `tool=${String(happy.structured["tool_name"])} gen=${String(happy.structured["connection_generation"])}`,
+    );
+
+    // 未知工具：协议错误（JSON-RPC error，SDK 会直接抛），且不会去问手机。
+    //   —— 这里必须真的把异常接住：协议错误在传输层就被 SDK 拦下了，
+    //   它**不会**变成一个 isError 的 tool result。
+    let unknownToolError = "";
+    try {
+      await client.callTool({ name: "read_any_file", arguments: {} });
+    } catch (err) {
+      unknownToolError = String(err);
+    }
+    check(
+      "未注册的工具名被拒绝（协议错误 -32602，不是工具执行失败）",
+      unknownToolError.includes("-32602") && unknownToolError.includes("read_any_file"),
+      unknownToolError.slice(0, 120),
+    );
+
+    // 多余参数：协议错误。
+    const badArg = await toolCall("tool-normal", 3000, { package_name: "com.example.app" });
+    check(
+      "多余参数被拒绝（是协议错误，拒绝而不是静默忽略）",
+      badArg.protocolError.includes("-32602") && badArg.protocolError.includes("package_name"),
+      badArg.protocolError.slice(0, 120),
+    );
+
+    // 不认识的设备。
+    const unknownDevice = await toolCall("phone-that-does-not-exist", 3000);
+    check(
+      "未配置的设备拿不到任何能力",
+      unknownDevice.isError && unknownDevice.structured["error_code"] === "unknown_device",
+      `error_code=${String(unknownDevice.structured["error_code"])}`,
+    );
+
+    // 收到 tool_request 但不回 → 如实超时。
+    toolPhones.push(await spawnToolPhone("tool-silent", "no-response"));
+    const silent = await toolCall("tool-silent", 600);
+    check(
+      "手机不回 tool_result → 如实超时（不是虚假成功）",
+      silent.isError &&
+        (silent.structured["error"] as Record<string, unknown> | undefined)?.["code"] === "phone_timeout",
+      `elapsed=${silent.elapsed}ms code=${String(
+        (silent.structured["error"] as Record<string, unknown> | undefined)?.["code"],
+      )}`,
+    );
+    check("超时耗时确实接近 timeout_ms（不是瞬间失败，也不是拖到天荒地老）", silent.elapsed >= 500 && silent.elapsed < 3000, `elapsed=${silent.elapsed}ms`);
+
+    // 结果里塞信封键 → 被丢弃。
+    toolPhones.push(await spawnToolPhone("tool-hostile", "reserved-key"));
+    const hostile = await toolCall("tool-hostile", 3000);
+    check(
+      "手机塞进 result 的 ok/request_id/device_id 被丢弃，信封没有被改写",
+      hostile.structured["ok"] === true &&
+        hostile.structured["device_id"] === "tool-hostile" &&
+        hostile.structured["request_id"] !== "hijacked",
+      `ok=${String(hostile.structured["ok"])} request_id=${String(hostile.structured["request_id"])}`,
+    );
+
+    // 能力内部失败 → 如实转达。
+    toolPhones.push(await spawnToolPhone("tool-error", "error"));
+    const failed = await toolCall("tool-error", 3000);
+    check(
+      "手机回 ok:false → 前端拿到失败，错误码原样保留",
+      failed.isError &&
+        (failed.structured["error"] as Record<string, unknown> | undefined)?.["code"] === "tool_failed",
+      `code=${String((failed.structured["error"] as Record<string, unknown> | undefined)?.["code"])}`,
+    );
+
+    // 手机白名单里没有这个工具。
+    toolPhones.push(await spawnToolPhone("tool-unsupported", "unsupported"));
+    const unsupported = await toolCall("tool-unsupported", 3000);
+    check(
+      "手机侧白名单拒绝 → unsupported_tool（服务端不替它放行）",
+      unsupported.isError &&
+        (unsupported.structured["error"] as Record<string, unknown> | undefined)?.["code"] === "unsupported_tool",
+      `code=${String((unsupported.structured["error"] as Record<string, unknown> | undefined)?.["code"])}`,
+    );
+
+    // 对照组：跑完 5 台坏手机之后，正常那台仍然正常，ping 也仍然正常。
+    const controlTool = await toolCall(TOOL_CONTROL_DEVICE_ID, 3000);
+    check(
+      "跑完 5 台异常手机之后，对照组工具调用仍然正常",
+      !controlTool.isError && controlTool.structured["ok"] === true,
+      `ok=${String(controlTool.structured["ok"])}`,
+    );
+    const controlPing = await client.callTool({
+      name: "phone_ping",
+      arguments: { device_id: TOOL_CONTROL_DEVICE_ID, timeout_ms: 2000 },
+    });
+    check(
+      "同一台手机上 legacy phone_ping 与新工具通道共存",
+      ((controlPing["structuredContent"] as Record<string, unknown> | undefined)?.["ok"] ?? false) === true,
+    );
+
+    for (const proc of toolPhones) await proc.stop();
+    if (toolControl !== null) await toolControl.stop();
     out("");
   } finally {
     for (const client of clients) await client.close().catch(() => undefined);

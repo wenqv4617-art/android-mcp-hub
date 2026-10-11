@@ -20,6 +20,7 @@ import {
   MockPhone,
   type PhoneScenario,
   type SocketLike,
+  type ToolBehavior,
 } from "../../../tools/mock-phone/client";
 import {
   ShimDurableObjectNamespace,
@@ -39,6 +40,10 @@ export const TEST_OAUTH_OWNER_SECRET = "gate1-local-test-owner-secret-not-a-secr
 export const PHONE_ROUTES = {
   connect: "/internal/phone/connect",
   ping: "/internal/phone/ping",
+  /** Gate 2：通用工具通道（工作包 B/C）。 */
+  tool: "/internal/phone/tool",
+  /** Gate 1.5 工作包 A：受保护的撤销入口，**没有**任何公网路由映射到它。 */
+  revoke: "/internal/phone/revoke",
   status: "/internal/phone/status",
   reset: "/internal/phone/testing/reset",
 } as const;
@@ -169,6 +174,24 @@ export function phoneUpgradeRequest(
   });
 }
 
+/**
+ * 直接把"已鉴权的升级请求"打进 PhoneSession DO，**不碰 webSocket**。
+ *
+ * 与 [connectPhoneDirect] 的差别：这条路在升级被拒（401/403/426）时也能用 ——
+ * 那种响应里根本没有 socket，任何 `response.webSocket.accept()` 都会崩。
+ * 需要断言"这台设备被拒绝了"时用这个。
+ */
+export async function upgradePhoneDirect(rig: TestRig, deviceId: string): Promise<Response> {
+  const headers = new Headers();
+  headers.set("Upgrade", "websocket");
+  headers.set("Connection", "Upgrade");
+  headers.set("X-Phone-Session-Device", deviceId);
+  return await rig.phone.fetchOn(
+    deviceId,
+    new Request(`https://phone-session.internal${PHONE_ROUTES.connect}`, { method: "GET", headers }),
+  );
+}
+
 export interface PhoneConnection {
   /** 手机这一端的 socket。 */
   socket: FakeWebSocket;
@@ -223,6 +246,43 @@ export async function pingPhoneDirect(
 }
 
 /** 读 PhoneSession 的 status（含 metrics）。 */
+
+/** Gate 2：直接走内部工具通道发一次 tool_request。 */
+export async function toolPhoneDirect(
+  rig: TestRig,
+  deviceId: string,
+  body: { toolName: string; arguments?: Record<string, unknown>; requestId?: string; timeoutMs?: number } ,
+): Promise<import("../../src/phone/phone-session").ToolOutcome> {
+  const request = new Request(`https://phone-session.internal${PHONE_ROUTES.tool}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      requestId: body.requestId ?? crypto.randomUUID(),
+      deviceId,
+      toolName: body.toolName,
+      arguments: body.arguments ?? {},
+      ...(body.timeoutMs !== undefined ? { timeoutMs: body.timeoutMs } : {}),
+    }),
+  });
+  const response = await rig.phone.fetchOn(deviceId, request);
+  return (await response.json()) as import("../../src/phone/phone-session").ToolOutcome;
+}
+
+/** Gate 1.5 / A1：直接调受保护的撤销入口。 */
+export async function revokePhoneDirect(
+  rig: TestRig,
+  deviceId: string,
+  reason = "test_revoke",
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const request = new Request(`https://phone-session.internal${PHONE_ROUTES.revoke}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceId, reason }),
+  });
+  const response = await rig.phone.fetchOn(deviceId, request);
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+}
+
 export async function phoneStatus(rig: TestRig, deviceId: string): Promise<Record<string, unknown>> {
   const response = await rig.phone.fetchOn(
     deviceId,
@@ -258,6 +318,8 @@ export async function connectMockPhone(
     appVersion?: string;
     /** 让这台手机对第 N 个（0 基）ping 故意保持沉默。 */
     skipPingIndexes?: number[];
+    /** Gate 2：这台手机对 tool_request 的行为（默认 normal）。 */
+    toolBehavior?: ToolBehavior;
   } = {},
 ): Promise<ConnectedPhone> {
   const headers = new Headers();
@@ -278,6 +340,7 @@ export async function connectMockPhone(
     delayMs: opts.delayMs,
     appVersion: opts.appVersion,
     skipPingIndexes: opts.skipPingIndexes,
+    toolBehavior: opts.toolBehavior,
     onLog: opts.onLog,
   });
   attachMockPhone(phone, socket as unknown as SocketLike);

@@ -607,7 +607,33 @@ describe("PhoneSession / 11. 重连竞态（Gate 0.1 审计 R1）", () => {
     expect(metrics["timeouts"]).toBe(0);
     expect(status["pending_requests"]).toBe(0);
     expect(status["pending_mirror"]).toBe(0);
-    // alarm 必须被清掉：没有待处理请求就不该留着定时器。
+
+    // Gate 1.5 / A2 起这里**不再**是"没有待处理请求就必须没有 alarm"。
+    // 刚才那次替换建立了一条**活着的**连接，而只要有活着的连接，就必须留一个
+    // 存活阈值 alarm 去清理"半开连接"（TCP 连着、手机不再回任何应用层消息）。
+    //
+    // 断言写成"下界"而不是等号：[rescheduleAlarm] 只会让 alarm 更早、绝不更晚
+    // （`existing > next` 才改），所以这里残留的可能是更早的那个 deadline。
+    // 真正要守住的性质是"不晚于存活阈值"，而不是某个具体毫秒数。
+    const lastActivity = status["last_phone_activity_at"] as number;
+    const liveness = status["liveness_timeout_ms"] as number;
+    const alarmAt = await rig.phone.ctxOf(DEVICE).storage.getAlarm();
+    expect(alarmAt).not.toBeNull();
+    expect(alarmAt!).toBeLessThanOrEqual(lastActivity + liveness);
+
+    // 早响的 alarm 不许误杀活着的连接：跑一遍 alarm 之后，存活计时没被破，
+    // livenessTimeouts 必须还是 0，连接也还在。
+    await instance.alarm?.();
+    await settle();
+    const afterAlarm = await phoneStatus(rig, DEVICE);
+    expect((afterAlarm["metrics"] as Record<string, number>)["livenessTimeouts"]).toBe(0);
+    expect(afterAlarm["connected"]).toBe(true);
+
+    // 对照：连接真的没了之后，既没有待处理请求、也没有活着的连接，alarm 必须被清掉。
+    // 没有这一条，上面那个断言就可能是"alarm 永远挂着"的假阳性。
+    const liveSocket = rig.phone.ctxOf(DEVICE).getWebSockets("gen:2")[0]!;
+    await instance.webSocketClose?.(liveSocket as never, 1006, "gone", false);
+    await settle();
     expect(await rig.phone.ctxOf(DEVICE).storage.getAlarm()).toBeNull();
   });
 
