@@ -49,6 +49,16 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
     /** 「高级设置」是否展开。 */
     val advancedExpanded: StateFlow<Boolean> = _advancedExpanded.asStateFlow()
 
+    private val _capabilitiesEnabled = MutableStateFlow(prefs.capabilitiesEnabled())
+
+    /**
+     * 是否允许服务端调用本机的只读能力（Gate 2 工作包 D 的"本地授权策略"）。
+     *
+     * 默认**开**，与 [HubPrefs.capabilitiesEnabled] 的默认值一致 ——
+     * 两处默认值必须一起改，所以这里直接从 prefs 读初始值，不写第二份字面量。
+     */
+    val capabilitiesEnabled: StateFlow<Boolean> = _capabilitiesEnabled.asStateFlow()
+
     private val _message = MutableStateFlow(
         (initialCredential as? TokenLoadResult.Unreadable)
             ?.let { "设备令牌无法解密（${it.reason}），请重新填写并保存" },
@@ -86,6 +96,19 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleAdvanced() {
         _advancedExpanded.value = !_advancedExpanded.value
+    }
+
+    /**
+     * 切换只读能力总开关。立即落盘 —— 分发器每次都重读设置，所以**不用重连**就生效。
+     */
+    fun setCapabilitiesEnabled(enabled: Boolean) {
+        prefs.saveCapabilitiesEnabled(enabled)
+        _capabilitiesEnabled.value = enabled
+        _message.value = if (enabled) {
+            "已允许服务端调用本机只读能力"
+        } else {
+            "已关闭只读能力调用，本机不再执行任何能力请求"
+        }
     }
 
     fun dismissMessage() {

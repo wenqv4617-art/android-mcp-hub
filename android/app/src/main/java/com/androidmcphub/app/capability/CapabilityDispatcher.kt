@@ -89,6 +89,29 @@ data class ToolDispatchOutcome(
 const val UNKNOWN_TOOL_LABEL = "<unknown>"
 
 /**
+ * **本地授权策略**：这台手机此刻是否愿意执行某个能力（Gate 2 工作包 D 第 5 步）。
+ *
+ * 与"白名单"是两件事，刻意分开：
+ *  * 白名单（[CapabilityDispatcher] 的注册表）是**编译期**的，"这个能力在这个版本里存在"；
+ *  * 策略是**运行期**的，"用户此刻允许不允许用"。用户关掉总开关之后，
+ *    能力仍然注册着（协议上必须认得这个名字，才能回一个明确的 `not_permitted`），
+ *    但一条都不会被执行。
+ *
+ * 做成 `fun interface` 是为了让它能直接由一处用户设置（`HubPrefs.capabilitiesEnabled()`）
+ * 以 lambda 的形式提供，而不必再引一层适配类。
+ */
+fun interface CapabilityPolicy {
+
+    /** @return 是否允许执行 [toolName]。不允许时分发器回 `not_permitted`。 */
+    fun isPermitted(toolName: String): Boolean
+
+    companion object {
+        /** 默认策略：允许（与"默认空注册表"配合，等价于没有任何能力可用）。 */
+        val AllowAll: CapabilityPolicy = CapabilityPolicy { true }
+    }
+}
+
+/**
  * 能力分发器：把一条 `tool_request` 变成一条 `tool_result`。
  *
  * 这是手机侧**唯一**一条"外部请求 → 本地能力"的路径。协议里刻意没有
@@ -99,9 +122,10 @@ const val UNKNOWN_TOOL_LABEL = "<unknown>"
  *  1. **去重**：同一个 request_id 只执行一次，且重复帧不会被执行第二次；
  *  2. **工具名形状**：不合法 → `unsupported_tool`（不回显原文）；
  *  3. **注册表命中**：不在白名单 → `unsupported_tool`；
- *  4. **多余参数**：出现白名单外的键 → `invalid_arguments`；
- *  5. **参数取值**：[Capability.validate] → `invalid_arguments`；
- *  6. **执行**：抛异常 → `tool_failed`（只记异常类名）。
+ *  4. **本地授权策略**：[policy] 说不允许 → `not_permitted`（能力**不执行**）；
+ *  5. **多余参数**：出现白名单外的键 → `invalid_arguments`；
+ *  6. **参数取值**：[Capability.validate] → `invalid_arguments`；
+ *  7. **执行**：抛异常 → `tool_failed`（只记异常类名）。
  *
  * 纯 Kotlin（[clock] 可注入），可在 JVM 单测里完整跑。
  */
@@ -111,6 +135,8 @@ class CapabilityDispatcher(
     capacity: Int = TOOL_DEDUP_CAPACITY,
     /** 单条结果的字节上限；超了就在本地失败，而不是发出去让服务端拒。 */
     private val maxResultBytes: Int = 16 * 1024,
+    /** 运行期授权策略；默认允许。见 [CapabilityPolicy]。 */
+    private val policy: CapabilityPolicy = CapabilityPolicy.AllowAll,
 ) {
 
     /**
@@ -177,7 +203,27 @@ class CapabilityDispatcher(
                 )
             }
 
-            // 4. 多余参数：出现白名单外的键就拒绝。
+            // 4. 本地授权策略：用户关掉总开关（或将来按能力分别关）时，
+            //    能力**不执行**，回一个明确的 not_permitted。
+            //    排在参数校验之前是刻意的：不允许执行的能力不该因为
+            //    "参数不合法"而漏出任何关于它自己的信息。
+            val permitted = try {
+                policy.isPermitted(capability.name)
+            } catch (t: Throwable) {
+                // 策略本身出错时**拒绝**，不默认放行。
+                false
+            }
+            if (!permitted) {
+                return@synchronized failure(
+                    requestId = requestId,
+                    toolName = capability.name,
+                    code = ToolResultErrorCode.NOT_PERMITTED,
+                    message = "本机已关闭只读能力调用（用户设置）",
+                    startedAt = startedAt,
+                )
+            }
+
+            // 5. 多余参数：出现白名单外的键就拒绝。
             //    message 里只说"多了几个"，不回显那些键名（同样是对端文本）。
             val extraKeys = arguments.keys().asSequence().filter { it !in capability.allowedArguments }.toList()
             if (extraKeys.isNotEmpty()) {
@@ -191,7 +237,7 @@ class CapabilityDispatcher(
                 )
             }
 
-            // 5. 参数取值校验。
+            // 6. 参数取值校验。
             val problem = try {
                 capability.validate(arguments)
             } catch (t: Throwable) {
@@ -207,7 +253,7 @@ class CapabilityDispatcher(
                 )
             }
 
-            // 6. 执行。任何异常都变成 tool_failed，**只带异常类名**。
+            // 7. 执行。任何异常都变成 tool_failed，**只带异常类名**。
             val result = try {
                 capability.execute(arguments)
             } catch (t: Throwable) {

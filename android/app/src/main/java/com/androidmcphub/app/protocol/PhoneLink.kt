@@ -286,6 +286,8 @@ class PhoneLink(
 
             is IncomingFrame.ToolRequest -> handleToolRequest(frame)
 
+            is IncomingFrame.ToolRequestMalformed -> handleMalformedToolRequest(frame)
+
             is IncomingFrame.HeartbeatAck -> {
                 log(LogLevel.INFO, "收到 heartbeat_ack（server_time=${frame.serverTime}）")
                 emptyList()
@@ -436,6 +438,26 @@ class PhoneLink(
         }
 
         val frame = outcome.frame ?: return emptyList()
+        return listOf(LinkAction.Send(frame))
+    }
+
+    /**
+     * 信封完好但内容不合法的 `tool_request`（目前只有"`arguments` 不是对象"）。
+     *
+     * 和 [IncomingFrame.Unknown] 的处理不同：这里**要回帧**。回不了会让服务端
+     * 一直等到超时，把"参数写错了"说成"手机可能死了"。
+     *
+     * 刻意不占用去重窗口：这条路径没有执行任何能力，也没有消耗一个"真正的工作请求"。
+     */
+    private fun handleMalformedToolRequest(request: IncomingFrame.ToolRequestMalformed): List<LinkAction> {
+        log(LogLevel.WARN, "拒绝格式不合法的 tool_request request_id=${request.requestId} reason=${request.reason}")
+
+        val frame = encodeToolResult(
+            requestId = request.requestId,
+            ok = false,
+            errorCode = ToolResultErrorCode.INVALID_ARGUMENTS,
+            errorMessage = "请求格式不合法（${request.reason}）",
+        )
         return listOf(LinkAction.Send(frame))
     }
 

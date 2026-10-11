@@ -34,6 +34,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -86,6 +87,7 @@ fun HubScreen(vm: HubViewModel = viewModel()) {
     val message by vm.message.collectAsState()
     val serviceRunning by vm.serviceRunning.collectAsState()
     val lastError by vm.lastError.collectAsState()
+    val capabilitiesEnabled by vm.capabilitiesEnabled.collectAsState()
 
     val palette = statusPalette()
     val darkTheme = isSystemInDarkTheme()
@@ -194,9 +196,11 @@ fun HubScreen(vm: HubViewModel = viewModel()) {
                 draft = draft,
                 tokenVisible = tokenVisible,
                 expanded = advancedExpanded,
+                capabilitiesEnabled = capabilitiesEnabled,
                 onDraftChange = vm::updateDraft,
                 onToggleTokenVisible = vm::toggleTokenVisible,
                 onToggleExpanded = vm::toggleAdvanced,
+                onCapabilitiesEnabledChange = vm::setCapabilitiesEnabled,
                 onSave = vm::save,
                 onClearToken = vm::clearToken,
             )
@@ -416,9 +420,11 @@ private fun AdvancedSettingsCard(
     draft: HubDraft,
     tokenVisible: Boolean,
     expanded: Boolean,
+    capabilitiesEnabled: Boolean,
     onDraftChange: ((HubDraft) -> HubDraft) -> Unit,
     onToggleTokenVisible: () -> Unit,
     onToggleExpanded: () -> Unit,
+    onCapabilitiesEnabledChange: (Boolean) -> Unit,
     onSave: () -> Unit,
     onClearToken: () -> Unit,
 ) {
@@ -527,6 +533,35 @@ private fun AdvancedSettingsCard(
                 value = draft.maxFrameBytes,
                 onValueChange = { v -> onDraftChange { it.copy(maxFrameBytes = v) } },
             )
+
+            HorizontalDivider(modifier = Modifier.padding(top = 16.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "允许服务端调用本机只读能力",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        text = "关掉之后，手机对任何工具请求都回 not_permitted，且不执行任何能力。" +
+                            "当前已启用的能力只有 battery_get_status（电池状态，只读、不需要任何权限）。" +
+                            "开关立即生效，不需要重新连接。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Switch(
+                    checked = capabilitiesEnabled,
+                    onCheckedChange = onCapabilitiesEnabledChange,
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
 
             Button(
                 onClick = onSave,

@@ -109,14 +109,26 @@ X-Client-Version: android-mcp-hub/0.1.0   ← 可选，便于排查
   "type": "tool_request",
   "request_id": "8b1f...",     // 服务端生成，与 phone_ping 共用一个 request_id 空间
   "tool_name": "battery_get_status",
-  "arguments": {}               // 选项表见下；不是对象时按 {} 处理，真正的校验在两端
+  "arguments": {}               // 见下方"arguments 的三种形态"
 }
 ```
+
+**`arguments` 的三种形态**（手机侧 `parseIncoming`）：
+
+| 形态 | 处理 |
+| --- | --- |
+| 键不存在 / 值为 `null` | 等价于"没有参数"，按空对象执行 |
+| 是对象 | 正常校验每个键 |
+| **存在但不是对象**（数组 / 字符串 / 数字 / 布尔） | 回 `tool_result{ok:false,error.code:"invalid_arguments"}`，**绝不**按空参数执行 |
+
+第三行不能退化成第二行：用空参数执行一个本该带参数的工具，会产出一个"看起来成功、
+其实答错了"的结果。此时 `request_id` 是拿得到的，所以手机**立刻回帧**，
+不让服务端白等到超时。
 
 `tool_name` 必须在**双端白名单**里：
 
 - Worker 侧：`worker/src/mcp/tools.ts` 的 `TOOL_REGISTRY`（显式注册）**且**未被 `PHONE_DISABLED_TOOLS` 禁用。
-- 手机侧：Android 的能力表（见工作包 D）。
+- 手机侧：Android 的能力表（见工作包 D）**且**用户没有关掉"只读能力总开关"。
 
 任何一侧不认识这个名字，都必须回 `tool_result{ok:false,error.code:"unsupported_tool"}` ——
 **不允许**"尽力而为"地执行一个没注册的东西，也不允许服务端替手机放行。
@@ -190,6 +202,7 @@ X-Client-Version: android-mcp-hub/0.1.0   ← 可选，便于排查
 | `ok:false` 但缺 `error` / `error.code` | `invalid` |
 | `ok:false` 同时带 `result` | `invalid`（`tool_result_conflicting_result`） |
 | `error.code` 是没见过的名字 | **不丢帧**，归一化成 `tool_failed` |
+| 手机侧主动拒绝（参数格式错 / 用户关了开关 / 未知工具 / 执行失败） | 仍然是一条合法帧，`ok:false` + 对应 code |
 
 最后一条是刻意的：丢帧会让一个**已经拿到结果**的请求白等到超时，
 而超时是"不知道结果"，比"知道失败了"更糟。
@@ -317,6 +330,16 @@ Gate 0 **不做**自动重试：上层（人或未来的调度器）看到 `isEr
 **为什么手机是最后一道白名单。** 服务端注册表可能被改错、被绕过、被未来版本加上新工具。
 手机侧的能力表是**编译期**的，不认识的 `tool_name` 表里查不到，直接回 `unsupported_tool`。
 "服务端能调用什么"和"手机肯执行什么"是两条独立的否决权。
+
+**为什么手机侧还要再分"白名单"和"用户开关"两层。** 白名单是编译期的（"这个版本里
+存在哪些能力"），开关是运行期的（"用户此刻允许不允许用"）。关掉开关时能力**仍然注册着** ——
+协议上必须认得这个名字，才能回一个明确的 `not_permitted`；一个"查不到的装备名"回
+`unsupported_tool` 会让用户以为是版本不对，而不是"我自己关的"。开关由
+`HubPrefs.capabilitiesEnabled()` 提供，分发器**每次调用都重读**，所以拨开关立即生效、
+不需要重连。开关默认**开**：默认关会让升级后的用户莫名其妙发现新功能不可用。
+
+**为什么 `not_permitted` 排在参数校验之前。** 不允许执行的能力，不该因为"参数不合法"
+而漏出任何关于它自己的信息（连"它接受哪些参数"都不该漏）。
 
 **为什么禁止任何形式的通用执行。** 这个协议里没有 `shell`、没有 `intent`、
 没有 `reflection`、没有 `file_path`、没有 `url`。新增一个能力 = 新增一个显式的

@@ -327,3 +327,85 @@ describe("工具层 / Gate 2 通用分发", () => {
     expect(structured["echo"]).toBe("trace-42");
   });
 });
+
+// ============================================================================
+//  Gate 2 工作包 E —— battery_get_status 的工具层行为
+// ============================================================================
+//
+//  Android 侧真正的读数逻辑在 JVM 单测里（`BatteryCapabilityTest`）；这里只盯
+//  "手机把结果交给 Worker 之后，Worker 有没有原样、诚实地转达"。
+// ============================================================================
+
+describe("工具层 / battery_get_status", () => {
+  it("读不到的字段以 null 原样透传，绝不会变成字符串 \"null\" 或整键消失", async () => {
+    const rig = await makeRig();
+    const nullTool: ToolOutcome = {
+      ...okTool,
+      result: {
+        battery_level_percent: null,
+        charging: null,
+        charging_source: "unavailable",
+        power_save_mode: null,
+      },
+    };
+
+    const dispatched = await dispatchToolCall(
+      loadConfig(rig.env),
+      "battery_get_status",
+      { device_id: TEST_DEVICE_ID },
+      async () => {
+        throw new Error("这个工具不该走 ping 通道");
+      },
+      async () => nullTool,
+    );
+
+    const structured = dispatched.result?.structuredContent as Record<string, unknown>;
+    // JSON 里的 null 必须还是 null。"null" / undefined / 缺键都会让模型
+    // 把"读不到"读成"电量是 0（或未知的某个值）"。
+    expect(structured["battery_level_percent"]).toBeNull();
+    expect(structured["charging"]).toBeNull();
+    expect(structured["power_save_mode"]).toBeNull();
+    expect(structured["charging_source"]).toBe("unavailable");
+    expect(Object.prototype.hasOwnProperty.call(structured, "battery_level_percent")).toBe(true);
+  });
+
+  it("timeout_ms 取上界（60000）通过，且被原样传给 DO", async () => {
+    const rig = await makeRig();
+    let seenTimeout: number | undefined;
+    const dispatched = await dispatchToolCall(
+      loadConfig(rig.env),
+      "battery_get_status",
+      { device_id: TEST_DEVICE_ID, timeout_ms: 60_000 },
+      async () => {
+        throw new Error("不该被调用");
+      },
+      async (_deviceId, _toolName, _args, timeoutMs) => {
+        seenTimeout = timeoutMs;
+        return okTool;
+      },
+    );
+
+    expect(seenTimeout).toBe(60_000);
+    expect(dispatched.result?.isError).toBeFalsy();
+  });
+
+  it("能力执行失败时是 isError，且失败码与文案来自手机", async () => {
+    const rig = await makeRig();
+    const dispatched = await dispatchToolCall(
+      loadConfig(rig.env),
+      "battery_get_status",
+      { device_id: TEST_DEVICE_ID },
+      async () => {
+        throw new Error("不该被调用");
+      },
+      async () => ({ ...failTool, error: { code: "tool_unavailable", message: "系统不提供电池信息" } }),
+    );
+
+    expect(dispatched.result?.isError).toBe(true);
+    const structured = dispatched.result?.structuredContent as Record<string, unknown>;
+    const error = structured["error"] as Record<string, unknown>;
+    expect(error["code"]).toBe("tool_unavailable");
+    expect(error["message"]).toBe("系统不提供电池信息");
+    expect(structured["ok"]).toBe(false);
+  });
+});

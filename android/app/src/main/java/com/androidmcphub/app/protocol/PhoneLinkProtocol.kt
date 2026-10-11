@@ -74,6 +74,21 @@ sealed interface IncomingFrame {
         val type: String,
         val reason: String,
     ) : IncomingFrame
+
+    /**
+     * Gate 2：`tool_request` 的**信封完好、内容不合法**（目前只有 `arguments` 不是对象）。
+     *
+     * 为什么单独一类，而不是并进 [Unknown]：这里 `request_id` 是**拿得到**的，
+     * 所以可以立刻回一条 `tool_result{invalid_arguments}`。并进 [Unknown] 的话，
+     * 服务端会一直等到超时（默认 15s）才拿到 `phone_timeout` —— 把一个明确的
+     * "你参数写错了"说成了"手机可能死了"，那是最容易误导排查的一种结果。
+     *
+     * 缺 `request_id` 的帧仍然走 [Unknown]：回不了。
+     */
+    data class ToolRequestMalformed(
+        val requestId: String,
+        val reason: String,
+    ) : IncomingFrame
 }
 
 /**
@@ -210,7 +225,8 @@ fun parseIncoming(raw: String): IncomingFrame {
                     val hasArguments = obj.has("arguments") && !obj.isNull("arguments")
                     val arguments = if (hasArguments) obj.optJSONObject("arguments") else JSONObject()
                     if (hasArguments && arguments == null) {
-                        IncomingFrame.Unknown(type, UnknownReason.BAD_ARGUMENTS)
+                        // request_id 拿得到 → 立刻回 invalid_arguments，不让服务端白等超时。
+                        IncomingFrame.ToolRequestMalformed(requestId, UnknownReason.BAD_ARGUMENTS)
                     } else {
                         IncomingFrame.ToolRequest(
                             requestId = requestId,

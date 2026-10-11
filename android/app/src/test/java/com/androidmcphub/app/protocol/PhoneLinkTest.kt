@@ -723,9 +723,19 @@ class PhoneLinkTest {
 
         val actions = h.link.onTextFrame(toolFrame("tr-5", arguments = """["a","b"]"""))
 
-        assertEquals(emptyList<LinkAction>(), actions)
         assertEquals("格式错误时绝不能执行能力", 0, tool.calls)
         assertTrue(h.logs.any { it.second.contains(UnknownReason.BAD_ARGUMENTS) })
+
+        // 不再"静默丢弃"：request_id 拿得到，就必须回一条明确的失败帧。
+        // 否则服务端要等到超时才知道 —— 把"你参数写错了"说成"手机可能死了"。
+        assertEquals(1, actions.size)
+        val frame = (actions.single() as LinkAction.Send).frame
+        val json = org.json.JSONObject(frame)
+        assertEquals("tool_result", json.getString("type"))
+        assertEquals("tr-5", json.getString("request_id"))
+        assertEquals(false, json.getBoolean("ok"))
+        assertEquals("invalid_arguments", json.getJSONObject("error").getString("code"))
+        assertEquals(false, json.has("result"))
     }
 
     @Test

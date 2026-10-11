@@ -22,6 +22,9 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.androidmcphub.app.MainActivity
 import com.androidmcphub.app.R
+import com.androidmcphub.app.capability.AndroidBatterySource
+import com.androidmcphub.app.capability.BatteryCapability
+import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.core.HubLog
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.LogEntry
@@ -200,6 +203,14 @@ class PhoneLinkService : Service() {
                 updateNotification(state)
             },
             onPing = { outcome -> if (!outcome.duplicate) LinkBus.publishPing(outcome) },
+            // Gate 2 工作包 D/E：能力分发层。
+            //   · 白名单在这里、也**只**在这里建立：能被执行的能力就是下面这个列表。
+            //   · 授权策略每次调用都重读用户设置，所以用户在界面上开关之后
+            //     **不需要重连**就生效。
+            capabilityDispatcher = CapabilityDispatcher(
+                capabilities = listOf(BatteryCapability(AndroidBatterySource(this))),
+                policy = { prefs.capabilitiesEnabled() },
+            ),
         ).also { created ->
             client = created
             startedAtMs = System.currentTimeMillis()

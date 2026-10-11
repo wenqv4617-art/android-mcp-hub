@@ -60,8 +60,15 @@ class ToolChannelProtocolTest {
                 """{"type":"tool_request","request_id":"tr-4","tool_name":"t","arguments":$bad}""",
             )
 
-            assertTrue("arguments=$bad 应当是 Unknown，实际 $frame", frame is IncomingFrame.Unknown)
-            assertEquals(UnknownReason.BAD_ARGUMENTS, (frame as IncomingFrame.Unknown).reason)
+            // 不是 Unknown：request_id 拿得到，所以必须能回一条明确的 invalid_arguments，
+            // 而不是让服务端白等到超时。
+            assertTrue(
+                "arguments=$bad 应当是 ToolRequestMalformed，实际 $frame",
+                frame is IncomingFrame.ToolRequestMalformed,
+            )
+            val malformed = frame as IncomingFrame.ToolRequestMalformed
+            assertEquals("tr-4", malformed.requestId)
+            assertEquals(UnknownReason.BAD_ARGUMENTS, malformed.reason)
         }
     }
 

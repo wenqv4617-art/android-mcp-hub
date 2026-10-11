@@ -31,12 +31,31 @@ class HubPrefs(context: Context) {
     fun load(): HubConfig {
         // 只取字符串值；HubConfig.fromMap 会忽略不认识的键。
         // 密钥键被显式跳过：配置的 map 里不该出现凭据，密文也不行。
+        // 非字符串的开关（如能力开关）也跳过 —— `value as? String` 会给它塞一个
+        // null 值进 map，虽然 fromMap 会忽略，但没必要让"配置里有个空键"存在。
         val flat = mutableMapOf<String, String?>()
         for ((key, value) in prefs.all) {
-            if (key in SECRET_KEYS) continue
+            if (key in NON_CONFIG_KEYS) continue
             flat[key] = value as? String
         }
         return HubConfig.fromMap(flat)
+    }
+
+    /**
+     * 本机是否允许把只读能力交给已授权的服务端调用（Gate 2 工作包 D "本地授权策略"）。
+     *
+     * 默认**开**：能力白名单本身（`CapabilityDispatcher` 的注册表）已经决定了
+     * "哪些能力存在"，这个开关是用户手里的第二个、也是更粗的闸门 ——
+     * 关掉之后手机对任何 `tool_request` 都回 `not_permitted`，且不执行任何能力。
+     *
+     * 默认开而不是默认关：默认关会让首次升级后的用户莫名其妙地发现新功能不可用，
+     * 而这个开关本来就是为了"我不想要"而存在的。
+     */
+    fun capabilitiesEnabled(): Boolean = prefs.getBoolean(KEY_CAPABILITIES_ENABLED, true)
+
+    /** 写入能力开关。默认值不落盘：删掉这个键就回到默认。 */
+    fun saveCapabilitiesEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CAPABILITIES_ENABLED, enabled).apply()
     }
 
     fun save(config: HubConfig) {
@@ -131,5 +150,11 @@ class HubPrefs(context: Context) {
 
         /** 不允许出现在 [load] 结果里的键。 */
         val SECRET_KEYS: Set<String> = setOf(PrefsSecretStorage.KEY_TOKEN_BLOB, LEGACY_KEY_TOKEN)
+
+        /** 只读能力总开关（布尔）。它不是 [HubConfig] 的一部分，见 [capabilitiesEnabled]。 */
+        const val KEY_CAPABILITIES_ENABLED = "capabilities_enabled"
+
+        /** [load] 时一律跳过的键：凭据与所有非 [HubConfig] 的开关。 */
+        val NON_CONFIG_KEYS: Set<String> = SECRET_KEYS + KEY_CAPABILITIES_ENABLED
     }
 }
