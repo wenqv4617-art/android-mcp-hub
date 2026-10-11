@@ -1,5 +1,6 @@
 package com.androidmcphub.app.net
 
+import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.TokenLoadResult
@@ -49,6 +50,13 @@ class PhoneLinkClient(
     private val random: Random = Random.Default,
     private val clock: () -> Long = System::currentTimeMillis,
     private val httpClient: OkHttpClient = defaultHttpClient(),
+    /**
+     * Gate 2：能力注册表（显式白名单）。
+     *
+     * 默认**空注册表**：不显式接线时任何 `tool_request` 都回 `unsupported_tool`。
+     * 这样"忘记接线"的后果是功能缺失，而不是悄悄多出一个可被远程调用的能力。
+     */
+    private val capabilityDispatcher: CapabilityDispatcher = CapabilityDispatcher(emptyList(), clock = clock),
 ) {
 
     private val scheduler: ScheduledExecutorService =
@@ -62,6 +70,7 @@ class PhoneLinkClient(
         clock = clock,
         log = { level, text -> log(level, text) },
         responder = com.androidmcphub.app.protocol.PingResponder(clock = clock),
+        dispatcher = capabilityDispatcher,
     ).also { l ->
         l.onStateChanged = { state ->
             log(LogLevel.INFO, "状态 → ${describeState(state)}")
@@ -126,6 +135,8 @@ class PhoneLinkClient(
         }
         // 用户主动发起的新会话：去重窗口（R2）清空重来
         link.responder.reset()
+        // 工具去重窗口同理：新会话里旧 request_id 不该再被当成"重复"
+        link.dispatcher.reset()
         execute(link.start())
     }
 

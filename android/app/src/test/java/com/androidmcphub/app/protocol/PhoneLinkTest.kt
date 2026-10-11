@@ -1,5 +1,8 @@
 package com.androidmcphub.app.protocol
 
+import com.androidmcphub.app.capability.Capability
+import com.androidmcphub.app.capability.CapabilityDispatcher
+import com.androidmcphub.app.capability.CapabilityResult
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
 import org.json.JSONObject
@@ -26,7 +29,14 @@ class PhoneLinkTest {
     )
 
     /** 固定时钟 + 记录日志与状态的最小测试夹具。 */
-    private inner class Harness(private val config: HubConfig = baseConfig) {
+    private inner class Harness(
+        private val config: HubConfig = baseConfig,
+        /**
+         * Gate 2：注入到状态机里的能力注册表。默认是**空表** ——
+         * 也就是说默认情况下任何 `tool_request` 都应当得到 `unsupported_tool`。
+         */
+        capabilities: List<Capability> = emptyList(),
+    ) {
         var now: Long = 1_760_000_000_000L
         val logs = mutableListOf<Pair<LogLevel, String>>()
         val states = mutableListOf<LinkState>()
@@ -37,6 +47,7 @@ class PhoneLinkTest {
             random = Random(20241201),
             clock = { now },
             log = { level, text -> logs += level to text },
+            dispatcher = CapabilityDispatcher(capabilities, clock = { now }),
         )
 
         init {
@@ -604,5 +615,158 @@ class PhoneLinkTest {
             listOf(LinkAction.Close, LinkAction.Open),
             recovery,
         )
+    }
+
+    // ---- Gate 2：tool_request 的接线 ---------------------------------------
+
+    /** 一个只读的假能力，用来验证「外部请求 → 本地能力」这条路径本身。 */
+    private class FakeTool(
+        override val name: String,
+        override val allowedArguments: Set<String> = emptySet(),
+        private val payload: org.json.JSONObject = org.json.JSONObject().put("battery_level_percent", 42),
+    ) : Capability {
+        var calls: Int = 0
+            private set
+
+        override fun execute(arguments: org.json.JSONObject): CapabilityResult {
+            calls += 1
+            return CapabilityResult.Success(payload)
+        }
+    }
+
+    private fun toolFrame(
+        id: String,
+        tool: String = "battery_get_status",
+        arguments: String? = "{}",
+    ): String {
+        val args = arguments ?: "null"
+        return """{"type":"tool_request","request_id":"$id","tool_name":"$tool","arguments":$args}"""
+    }
+
+    @Test
+    fun `Gate2 tool_request 走白名单并回一条 tool_result`() {
+        val tool = FakeTool(name = "battery_get_status")
+        val h = Harness(capabilities = listOf(tool))
+        h.connect()
+
+        val actions = h.link.onTextFrame(toolFrame("tr-1"))
+
+        assertEquals("应当正好回一帧", 1, actions.size)
+        val frame = (actions.single() as LinkAction.Send).frame
+        val obj = JSONObject(frame)
+        assertEquals("tool_result", obj.getString("type"))
+        assertEquals("tr-1", obj.getString("request_id"))
+        assertTrue(obj.getBoolean("ok"))
+        assertEquals(42, obj.getJSONObject("result").getInt("battery_level_percent"))
+        assertEquals("能力应当被调用一次", 1, tool.calls)
+    }
+
+    @Test
+    fun `Gate2 没有注册能力时 tool_request 回 unsupported_tool，而不是静默丢弃`() {
+        val h = Harness() // 空注册表
+        h.connect()
+
+        val actions = h.link.onTextFrame(toolFrame("tr-2", tool = "read_any_file"))
+
+        // 关键：请求必须得到一个**明确的否定答复**。静默丢弃会让服务端拖满超时，
+        // 而"超时"传达的是"不知道"，这里明明"知道不支持"。
+        val obj = JSONObject((actions.single() as LinkAction.Send).frame)
+        assertEquals("tr-2", obj.getString("request_id"))
+        assertTrue(!obj.getBoolean("ok"))
+        assertEquals("unsupported_tool", obj.getJSONObject("error").getString("code"))
+        assertTrue("不得回显对端给的工具名", !(actions.single() as LinkAction.Send).frame.contains("read_any_file"))
+    }
+
+    @Test
+    fun `Gate2 重复的 tool_request 只执行一次、只回一次`() {
+        val tool = FakeTool(name = "battery_get_status")
+        val h = Harness(capabilities = listOf(tool))
+        h.connect()
+
+        val first = h.link.onTextFrame(toolFrame("tr-3"))
+        val second = h.link.onTextFrame(toolFrame("tr-3"))
+
+        assertEquals(1, first.size)
+        assertEquals("重复的请求不得再回一帧", emptyList<LinkAction>(), second)
+        assertEquals("重复的请求不得再次执行", 1, tool.calls)
+        assertTrue(
+            "应当留下一条 WARN 说明为什么没回",
+            h.logs.any { it.first == LogLevel.WARN && it.second.contains("重复的 tool_request") },
+        )
+    }
+
+    @Test
+    fun `Gate2 tool_request 缺 tool_name 或缺 request_id 时忽略并记日志，不回帧也不崩`() {
+        val h = Harness(capabilities = listOf(FakeTool(name = "battery_get_status")))
+        h.connect()
+
+        val noToolName = h.link.onTextFrame("""{"type":"tool_request","request_id":"tr-4","arguments":{}}""")
+        val noRequestId = h.link.onTextFrame("""{"type":"tool_request","tool_name":"battery_get_status"}""")
+
+        assertEquals(emptyList<LinkAction>(), noToolName)
+        assertEquals(emptyList<LinkAction>(), noRequestId)
+        assertTrue(
+            "应当记下缺字段的原因",
+            h.logs.any { it.second.contains(UnknownReason.MISSING_TOOL_NAME) },
+        )
+        assertTrue(
+            "应当记下缺 request_id 的原因",
+            h.logs.any { it.second.contains(UnknownReason.MISSING_REQUEST_ID) },
+        )
+    }
+
+    @Test
+    fun `Gate2 arguments 不是对象时属于格式错误，不得退化成「没有参数」去执行`() {
+        val tool = FakeTool(name = "battery_get_status")
+        val h = Harness(capabilities = listOf(tool))
+        h.connect()
+
+        val actions = h.link.onTextFrame(toolFrame("tr-5", arguments = """["a","b"]"""))
+
+        assertEquals(emptyList<LinkAction>(), actions)
+        assertEquals("格式错误时绝不能执行能力", 0, tool.calls)
+        assertTrue(h.logs.any { it.second.contains(UnknownReason.BAD_ARGUMENTS) })
+    }
+
+    @Test
+    fun `Gate2 工具参数绝不进日志`() {
+        val h = Harness(capabilities = listOf(FakeTool(name = "battery_get_status")))
+        h.connect()
+
+        h.link.onTextFrame(toolFrame("tr-6", arguments = """{"secret":"SUPER-SECRET-VALUE"}"""))
+
+        val all = h.logs.joinToString("\n") { it.second }
+        assertTrue("参数值绝不能出现在日志里", !all.contains("SUPER-SECRET-VALUE"))
+    }
+
+    @Test
+    fun `Gate2 tool_request 不影响同一连接上的 phone_ping`() {
+        val tool = FakeTool(name = "battery_get_status")
+        val h = Harness(capabilities = listOf(tool))
+        h.connect()
+
+        val pingActions = h.link.onTextFrame(h.pingFrame("p-1"))
+        val toolActions = h.link.onTextFrame(toolFrame("tr-7"))
+
+        assertEquals("ping 与工具各自回一帧", 1, pingActions.size)
+        assertEquals(1, toolActions.size)
+        assertEquals("phone_pong", JSONObject((pingActions.single() as LinkAction.Send).frame).getString("type"))
+        assertEquals("tool_result", JSONObject((toolActions.single() as LinkAction.Send).frame).getString("type"))
+        // 两条通道的 request_id 空间是分开的：ping 的 id 不该让工具的 id 变成"重复"。
+        assertEquals("p-1", JSONObject((pingActions.single() as LinkAction.Send).frame).getString("request_id"))
+        assertEquals("tr-7", JSONObject((toolActions.single() as LinkAction.Send).frame).getString("request_id"))
+    }
+
+    @Test
+    fun `Gate2 用户断开后收到的 tool_request 一律被忽略`() {
+        val tool = FakeTool(name = "battery_get_status")
+        val h = Harness(capabilities = listOf(tool))
+        h.connect()
+        h.link.stop()
+
+        val actions = h.link.onTextFrame(toolFrame("tr-8"))
+
+        assertEquals(emptyList<LinkAction>(), actions)
+        assertEquals("断开之后不得再执行任何能力", 0, tool.calls)
     }
 }

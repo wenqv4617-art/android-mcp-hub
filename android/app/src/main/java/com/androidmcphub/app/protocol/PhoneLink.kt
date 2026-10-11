@@ -1,5 +1,6 @@
 package com.androidmcphub.app.protocol
 
+import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.SocketFailure
@@ -59,6 +60,14 @@ class PhoneLink(
     private val clock: () -> Long = System::currentTimeMillis,
     private val log: (LogLevel, String) -> Unit = { _, _ -> },
     val responder: PingResponder = PingResponder(clock = clock),
+    /**
+     * Gate 2：能力分发器。
+     *
+     * **默认是一个空注册表** —— 也就是说，除非调用方显式注册了能力，
+     * 否则任何 `tool_request` 都会得到 `unsupported_tool`。
+     * 这是刻意的默认值：忘记接线时的后果是"功能不可用"，而不是"意外多了一个能用的能力"。
+     */
+    val dispatcher: CapabilityDispatcher = CapabilityDispatcher(emptyList(), clock = clock),
 ) {
 
     private val lock = Any()
@@ -275,6 +284,8 @@ class PhoneLink(
 
             is IncomingFrame.Ping -> handlePing(frame)
 
+            is IncomingFrame.ToolRequest -> handleToolRequest(frame)
+
             is IncomingFrame.HeartbeatAck -> {
                 log(LogLevel.INFO, "收到 heartbeat_ack（server_time=${frame.serverTime}）")
                 emptyList()
@@ -396,6 +407,35 @@ class PhoneLink(
             LogLevel.INFO,
             "收到 phone_ping request_id=${outcome.requestId}，回 phone_pong（估算 RTT ${outcome.rttMs}ms）",
         )
+        return listOf(LinkAction.Send(frame))
+    }
+
+    /**
+     * 处理一帧 `tool_request`（Gate 2）。调用前必须已持有 [lock]。
+     *
+     * 日志纪律：**只记工具名与结论，绝不记参数值**。参数里可能有服务端透传下来的
+     * 用户数据，而日志会被写进界面与 logcat；工具名已经在分发器里做过形状收敛
+     * （不在白名单的会变成 `<unknown>`），所以记它是安全的。
+     */
+    private fun handleToolRequest(request: IncomingFrame.ToolRequest): List<LinkAction> {
+        val outcome = dispatcher.handle(request.requestId, request.toolName, request.arguments)
+
+        if (outcome.duplicate) {
+            // 与 R2 同款语义：同一个 request_id 只执行一次、只回一次。
+            log(LogLevel.WARN, "重复的 tool_request request_id=${request.requestId}，不再执行也不再回复")
+            return emptyList()
+        }
+
+        if (outcome.ok) {
+            log(LogLevel.INFO, "工具调用 tool=${outcome.toolName} 成功，耗时 ${outcome.elapsedMs}ms")
+        } else {
+            log(
+                LogLevel.WARN,
+                "工具调用 tool=${outcome.toolName} 失败 code=${outcome.errorCode} 耗时 ${outcome.elapsedMs}ms",
+            )
+        }
+
+        val frame = outcome.frame ?: return emptyList()
         return listOf(LinkAction.Send(frame))
     }
 

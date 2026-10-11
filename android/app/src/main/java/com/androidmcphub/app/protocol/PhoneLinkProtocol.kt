@@ -40,6 +40,24 @@ sealed interface IncomingFrame {
         val timestamp: Long,
     ) : IncomingFrame
 
+    /**
+     * Gate 2：通用工具调用。
+     *
+     * [toolName] 只是**请求**的名字，它不代表这台手机答应执行 ——
+     * 能不能执行完全由 [com.androidmcphub.app.capability.CapabilityDispatcher]
+     * 的注册表（显式白名单）决定，不在表里的一律回 `unsupported_tool`。
+     *
+     * [arguments] 已经归一成 [JSONObject]：**缺** `arguments` 字段等价于「没有参数」，
+     * 但 `arguments` 存在且不是对象（数组 / 字符串 / 数字）属于**格式错误**，
+     * 走 [Unknown]，不会退化成"按没有参数执行" —— 用空参数去执行一个本该带参数的
+     * 工具，会产出一个**看起来成功但其实答错了**的结果，这比明确失败更糟。
+     */
+    data class ToolRequest(
+        val requestId: String,
+        val toolName: String,
+        val arguments: JSONObject,
+    ) : IncomingFrame
+
     /** 对我们发出的应用层心跳的确认（R3 的回应）。 */
     data class HeartbeatAck(
         val serverTime: Long,
@@ -71,13 +89,47 @@ object ServerErrorCode {
     const val UNSUPPORTED_TYPE = "unsupported_type"
     const val UNKNOWN_REQUEST_ID = "unknown_request_id"
 
+    /**
+     * Gate 1.5 / A1：服务端已撤销这台设备的凭据，连接必须结束。
+     *
+     * 手机侧对它没有特殊动作（socket 随后会被服务端以 4002 关掉），
+     * 把它列进闭集只是为了**日志里能出现一个可读的名字**，而不是 unrecognized。
+     */
+    const val DEVICE_REVOKED = "device_revoked"
+
     /** 认不出来的 code —— 只记这个，不记原文。 */
     const val UNRECOGNIZED = "unrecognized_error_code"
 
-    val ALL: Set<String> = setOf(MESSAGE_TOO_LARGE, MALFORMED_MESSAGE, UNSUPPORTED_TYPE, UNKNOWN_REQUEST_ID)
+    val ALL: Set<String> =
+        setOf(MESSAGE_TOO_LARGE, MALFORMED_MESSAGE, UNSUPPORTED_TYPE, UNKNOWN_REQUEST_ID, DEVICE_REVOKED)
 
     /** 认识的 code 原样返回，其余一律收敛成 [UNRECOGNIZED]。 */
     fun normalize(code: String): String = if (code in ALL) code else UNRECOGNIZED
+}
+
+/**
+ * `tool_result.error.code` 的闭集（与服务端 `worker/src/phone/messages.ts` 保持一致）。
+ *
+ * 手机侧**只会**发出这里面的 code；服务端认不出来时会归一成 `tool_failed`，
+ * 所以这个集合是"我们承诺的语义"，不是"对端可以随便填的字段"。
+ */
+object ToolResultErrorCode {
+    /** 白名单里没有这个工具名。 */
+    const val UNSUPPORTED_TOOL = "unsupported_tool"
+
+    /** 参数不符合工具的声明（缺字段 / 类型不对 / 多出字段）。 */
+    const val INVALID_ARGUMENTS = "invalid_arguments"
+
+    /** 执行期失败（拿不到系统服务、API 抛异常）。 */
+    const val TOOL_FAILED = "tool_failed"
+
+    /** 工具存在但当前不可用（例如系统版本不支持）。 */
+    const val TOOL_UNAVAILABLE = "tool_unavailable"
+
+    /** 本地授权策略拒绝（用户没打开这个能力）。 */
+    const val NOT_PERMITTED = "not_permitted"
+
+    val ALL: Set<String> = setOf(UNSUPPORTED_TOOL, INVALID_ARGUMENTS, TOOL_FAILED, TOOL_UNAVAILABLE, NOT_PERMITTED)
 }
 
 /** [IncomingFrame.Unknown.reason] 的取值。 */
@@ -86,6 +138,12 @@ object UnknownReason {
     const val MISSING_TYPE = "missing_type"
     const val MISSING_REQUEST_ID = "missing_request_id"
     const val UNSUPPORTED_TYPE = "unsupported_type"
+
+    /** Gate 2：`tool_request` 缺 `tool_name`（或为空）。 */
+    const val MISSING_TOOL_NAME = "missing_tool_name"
+
+    /** Gate 2：`tool_request` 的 `arguments` 存在但不是对象。 */
+    const val BAD_ARGUMENTS = "bad_arguments"
 }
 
 /**
@@ -137,6 +195,33 @@ fun parseIncoming(raw: String): IncomingFrame {
             serverTime = obj.optLong("server_time", 0L),
         )
 
+        "tool_request" -> {
+            // request_id 同样是回包的唯一凭据，缺了就没法回（R4）
+            val requestId = obj.optString("request_id", "")
+            if (requestId.isEmpty()) {
+                IncomingFrame.Unknown(type, UnknownReason.MISSING_REQUEST_ID)
+            } else {
+                val toolName = obj.optString("tool_name", "")
+                if (toolName.isEmpty()) {
+                    IncomingFrame.Unknown(type, UnknownReason.MISSING_TOOL_NAME)
+                } else {
+                    // 「没有 arguments 字段」= 没有参数；「arguments 不是对象」= 格式错误。
+                    // 这两者绝不能混为一谈（见 ToolRequest 的注释）。
+                    val hasArguments = obj.has("arguments") && !obj.isNull("arguments")
+                    val arguments = if (hasArguments) obj.optJSONObject("arguments") else JSONObject()
+                    if (hasArguments && arguments == null) {
+                        IncomingFrame.Unknown(type, UnknownReason.BAD_ARGUMENTS)
+                    } else {
+                        IncomingFrame.ToolRequest(
+                            requestId = requestId,
+                            toolName = toolName,
+                            arguments = arguments ?: JSONObject(),
+                        )
+                    }
+                }
+            }
+        }
+
         "error" -> IncomingFrame.ServerError(
             code = obj.optString("code", ""),
             message = obj.optString("message", ""),
@@ -177,6 +262,50 @@ fun encodeHello(
     .put("app_version", appVersion)
     .put("android_sdk", androidSdk)
     .toString()
+
+/**
+ * 手机 → 服务端的 `tool_result`（Gate 2）。
+ *
+ * 两个不变量由**这一个函数**保证，调用方无从违反：
+ *  1. `request_id` 原样回传（服务端靠它配对待处理请求，写错就变成"无人认领"）；
+ *  2. 成功帧**不带** `error`、失败帧**不带** `result` —— 服务端会把同时带两者的帧
+ *     判成 `tool_result_conflicting_*` 直接丢弃，那等于让请求白白超时。
+ *
+ * [errorCode] 必须是 [ToolResultErrorCode.ALL] 里的值；给别的值会被服务端归一成
+ * `tool_failed`（不丢帧，但语义就丢了），所以这里在**本地**就把它收敛掉。
+ */
+fun encodeToolResult(
+    requestId: String,
+    ok: Boolean,
+    result: JSONObject? = null,
+    errorCode: String? = null,
+    errorMessage: String? = null,
+): String {
+    val obj = JSONObject()
+        .put("type", "tool_result")
+        .put("request_id", requestId)
+        .put("ok", ok)
+
+    if (ok) {
+        obj.put("result", result ?: JSONObject())
+    } else {
+        val code = if (errorCode != null && errorCode in ToolResultErrorCode.ALL) {
+            errorCode
+        } else {
+            ToolResultErrorCode.TOOL_FAILED
+        }
+        obj.put(
+            "error",
+            JSONObject()
+                .put("code", code)
+                // message 是给人看的；服务端只透传、不解析。空消息补一句兜底文案，
+                // 免得日志里出现一个没有理由的失败。
+                .put("message", errorMessage?.takeIf { it.isNotEmpty() } ?: "工具未能完成"),
+        )
+    }
+
+    return obj.toString()
+}
 
 /** 只取数字，字符串形式的数字也接受；其它一律 null。 */
 private fun JSONObject.optLongOrNull(name: String): Long? {
