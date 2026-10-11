@@ -46,7 +46,7 @@
 | # | 项目 | 命令 | 结果 | 证据文件 |
 | --- | --- | --- | --- | --- |
 | A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
-| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 207 passed (207)` | `test-reports/vitest.log` |
+| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 219 passed (219)` | `test-reports/vitest.log` |
 | A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
 | A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=171 failures=0 errors=0 skipped=0`（14 个测试类） | `test-reports/android-build.log` |
 | A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
@@ -57,9 +57,9 @@
 | A10 | **凭据生成步骤自检**（第 4.1 节的命令真的产出 Worker 认的摘要） | `printf '%s' "$TOKEN" \| npm run check:credential -- --device-id my-android-phone` | **PASS** — 与 `sha256sum` 逐字节一致；`loadConfig` 接受该 `DEVICE_TOKENS` 形状（1 条生效凭据、`deviceId` 解析成功）；把明文令牌填进 `tokenSha256` 会被明确拒绝 | `test-reports/credential-check.log` |
 | A11 | **部署后自检脚本本身可信**（部署前能验的就只剩这个） | `npm run smoke:selftest` | **PASS** — 10 PASS / 0 FAIL。先回放**正确**响应证明 `tools/gate1-smoke.mjs` 判 PASS（退出码 0），再把 S256、`resource_metadata`、`healthz.status` 分别改坏，证明它**真的会**报 FAIL（退出码 1），目标不可达时报退出码 2 —— 即「不会假绿、也不会把没验的算成通过」 | `test-reports/smoke-selftest.log` |
 | A12 | **部署文档里的凭据生成流程真的能跑通**（部署已被批准、改由用户执行，文档本身于是也成了交付件） | `printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone`，再把输出的那段 JSON 喂给真实的 `loadConfig` | **PASS** — 生成的记录被 `loadConfig` 接受：`problems: []`、`credentials: 1`、`deviceId: "my-android-phone"`、`tokenSha256` 长度 64、`oauth.enabled: true`、`hasMcpAccessToken: false`（正是我们要部署的那套配置） | 本节 |
-| A13 | **新增的 Worker CI 工作流满足全部静态约束**（Termux 装不上 workerd，测试挪到 ubuntu 上跑） | `npx vitest run worker/test/security.test.ts`（§12.13 的四条闸门）+ 人工核对 YAML 缩进与结构 | **PASS** — `workflow_dispatch` 手动触发、无 push/PR/定时触发、无部署命令/云凭据/GitHub Secrets、`permissions: contents: read`、工作流清单恰好两个文件；三条闸门都做过故障注入（`on: push` / `run: npx wrangler deploy` + `CLOUDFLARE_API_TOKEN: ${{ secrets.CF_TOKEN }}` / 多丢一个 `rogue.yml`） | `test-reports/vitest.log`；说明见 `TEST_REPORT.md` §12.16 |
+| A13 | **三个工作流都满足各自的静态约束**（两个测试类工作流零部署能力；`deploy-worker.yml` 是唯一的部署入口，必须人工输入 `DEPLOY` 且只在 `gate0` 上） | `npx vitest run worker/test/security.test.ts`（16 条闸门 + 12 条篡改反向测试） | **PASS** — 测试类：`workflow_dispatch` 手动触发、无 push/PR/定时触发、无部署命令/云凭据/GitHub Secrets、`permissions: contents: read`；部署类：13 条约束逐条满足。**篡改必须被拒绝**已实测：删 `DEPLOY` 确认条件 / `gate0` 改 `main` / 加 `push:` / 加 `id-token: write` / 凭据改明文 / 把部署挪到 dry-run 之前 / 测试类工作流里塞 `wrangler deploy` / 塞 `secrets.` / 清单多一个 `rogue.yml` / 清单少一个文件，各自都会红；再把这套检查函数改成恒返回空数组 → `Tests 6 failed \| 25 passed (31)` | `test-reports/vitest.log`；说明见 `TEST_REPORT.md` §12.13 / §12.16 / §12.17 |
 
-### A2 明细（`worker/test/` 8 个文件，207 条）
+### A2 明细（`worker/test/` 8 个文件，219 条）
 
 | 文件 | 条数 | 覆盖 |
 | --- | --- | --- |
@@ -68,11 +68,11 @@
 | `worker/test/mcp-http.test.ts` | 31 | `/mcp` 传输层、鉴权、会话、方法派发 |
 | `worker/test/tools.test.ts` | 19 | `phone_ping` 参数校验与结果形状 |
 | `worker/test/worker-index.test.ts` | 20 | 路由、`/healthz` 契约、OAuth 开启/关闭时的认证路径自检 |
-| `worker/test/security.test.ts` | 19 | 仓库凭据扫描、隔离性、DO 绑定数、**不开启自动部署**（4 条，见表下注） |
+| `worker/test/security.test.ts` | 31 | 仓库凭据扫描、隔离性、DO 绑定数、**工作流闸门 16 条**（测试类零部署能力 + `deploy-worker.yml` 的 13 条约束 + 清单必须恰好三个文件，其中 12 条是篡改反向测试，见表下注） |
 | `worker/test/logging.test.ts` | 12 | 日志白名单 / 错误类别 / 凭据形状终检 |
 | `worker/test/mcp-session.test.ts` | 11 | `McpSession` 生命周期与 TTL |
 
-> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 49+46+31+20+19+19+12+11 = **207**，与 vitest 自报的 `207 passed` 逐条吻合。
+> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 49+46+31+20+19+31+12+11 = **219**，与 vitest 自报的 `219 passed` 逐条吻合。
 >
 > `oauth.test.ts` 由 46 增至 49：新增客户端注册上限（`MAX_CLIENTS = 500`，超出回 **429** 而非 503）与 `redirect_uris` 数组长度闸（`MAX_REDIRECT_URIS = 10`）三条。这修掉的是 `docs/GATE1_SECURITY.md` 里原本记为**已知问题 G1-K1** 的真实资源耗尽路径：`/oauth/register` 必须公开，而 `client:` 记录既无 `expiresAt`、也不在 `alarm()` 的清理前缀里 —— 一个不需要任何凭据的循环就能让它单调增长。上限闸门整段删掉时这条测试会红（`Tests 1 failed | 48 passed`）。
 >
@@ -103,7 +103,7 @@
 | `wrangler dev --local`（真实 workerd） | 本容器是 Android 运行时，workerd 启动即 `MmapAligned() failed` / `FATAL ERROR: Out of memory trying to allocate internal tcmalloc data`，退出码 134 | 所有 Worker 结论都来自 **Node 替身**，不是真运行时 |
 | `@cloudflare/vitest-pool-workers` | 同上 | Durable Object 的真实驱逐/重建、真实 alarm 送达未验证 |
 | 真实 Hibernation API 行为 | 同上 | `acceptWebSocket` 的休眠唤醒路径未验证 |
-| GitHub Actions 工作流（真实执行） | 本机没有 runner；两个工作流都从未被执行过 | `android-debug-apk.yml` 与 `worker-gate1-check.yml` 都只是**手动触发**、都不含任何部署步骤（`permissions: contents: read`）。新增的 Worker CI 工作流已本地做过静态验证（A13），但「在 GitHub 上真的跑一次」仍需用户手动触发 —— 在那之前它不算通过 |
+| GitHub Actions 工作流（真实执行） | 本机没有 runner；两个工作流都从未被执行过 | `android-debug-apk.yml` 与 `worker-gate1-check.yml` 都只是**手动触发**、都不含任何部署步骤（`permissions: contents: read`）；`deploy-worker.yml` 是用户新加的**手动确认**部署入口（`workflow_dispatch` + 必须输入 `DEPLOY` + 只在 `gate0`），静态约束已本地验证（A13），但「在 GitHub 上真的跑一次」仍需用户手动触发 —— 在那之前它不算通过，**Gate 1 的部署结论也仍然来自本地 `--dry-run`，不是来自这个工作流** |
 | 费用测算 | 需要账号与真实账单 | 见 `docs/GATE1_DEPLOYMENT.md` 第 2 节，标 NOT RUN |
 
 ---

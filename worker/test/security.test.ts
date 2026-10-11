@@ -194,23 +194,32 @@ describe("安全 / 与既有生产项目完全隔离", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-//  A2. 不开启任何自动部署
+//  A2. 工作流闸门：默认不许有部署能力，只允许一个具名的例外
 // ---------------------------------------------------------------------------
 //
-//  任务书写着「不开启 GitHub Actions 自动部署」。之前这条只靠人读工作流文件保证，
-//  而"人读过一次"不构成约束：以后谁加一行 `on: push`，没人会记得回来检查。
-//  这里把它变成会失败的测试。
+//  任务书写着「不开启 GitHub Actions 自动部署」。这条最早是**结构上成立**的：
+//  仓库里只有一个手动构建 APK 的工作流。后来 Gate 1 收尾加了一个在 ubuntu 上跑
+//  测试的工作流（Termux 装不上 workerd），再后来用户明确要求一个**必须人工确认**
+//  的部署工作流。
+//
+//  于是规则从"一律不许"变成"默认不许，且只允许一个具名的例外"：
+//
+//    * android-debug-apk.yml / worker-gate1-check.yml —— 纯测试类，**零部署能力**；
+//    * deploy-worker.yml —— 唯一的部署工作流，必须同时满足 13 条约束（见下）。
+//
+//  两份规则都写成**纯函数**：输入文件内容，输出违规清单。理由是"只看当前那个文件"
+//  证明不了任何东西 —— 下面那组反向测试把篡改过的内容喂进同一个函数，要求它必须报错。
 //
 //  ⚠ 这是**文本级**检查，不是 YAML 解析（仓库里没有 yaml 依赖，也不想为此引一个）。
-//    它挡不住"用各种 YAML 花招绕过"的刻意攻击，但足以挡住无意的自动部署。
-//
-//  ⚠ 第二版（Gate 1 收尾）：第二条断言原来禁的是**字符串** `wrangler|cloudflare|deploy`。
-//    在 Android/Termux 上装不上 workerd 之后，仓库里多了一个"在 ubuntu 上跑单元测试"
-//    的工作流 —— 而在一个把 `wrangler` 与 `@cloudflare/vitest-pool-workers` 写进 devDeps
-//    的仓库里跑测试，天然就会碰到这些词（连 `worker/wrangler.jsonc` 这个路径都躲不开）。
-//    禁字符串会让这道闸去咬**正确**的东西。所以它改成禁**能力**：
-//    能不能部署，取决于有没有部署命令与云凭据可用，而不是取决于文件里出现过哪个单词。
+//    它挡不住刻意用 YAML 花招绕过的人，但足以挡住无意的越界。
+
+/** 只允许手动触发的**纯测试**工作流：不许有任何部署能力。 */
+const TEST_ONLY_WORKFLOWS = ["android-debug-apk.yml", "worker-gate1-check.yml"] as const;
+
+/** 唯一的部署工作流。它存在的意义就是"部署"，所以对它适用另一套规则。 */
+const DEPLOY_WORKFLOW = "deploy-worker.yml";
+
+const WORKFLOW_ALLOWLIST: readonly string[] = [...TEST_ONLY_WORKFLOWS, DEPLOY_WORKFLOW];
 
 /** 去掉 YAML 注释行 —— 工作流开头的注释里写着"没有任何 deploy 步骤"，不剥掉会误命中。 */
 function stripYamlComments(text: string): string {
@@ -233,59 +242,327 @@ function workflowFiles(): string[] {
   }
 }
 
+function readWorkflow(name: string): string {
+  return readFileSync(join(WORKFLOW_DIR, name), "utf8");
+}
+
+/** 取某个 key 之下、缩进更深的那一段（文本级近似：够用，且不会误伤同级的下一段）。 */
+function blockAfter(body: string, key: string): string {
+  const lines = body.split("\n");
+  const start = lines.findIndex((l) => new RegExp(`^\\s*${key}:`).test(l));
+  if (start < 0) return "";
+  const indent = (lines[start]!.match(/^\s*/) ?? [""])[0].length;
+  const buf: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim() === "") continue;
+    if ((line.match(/^\s*/) ?? [""])[0].length <= indent) break;
+    buf.push(line);
+  }
+  return buf.join("\n");
+}
+
+/**
+ * 自动部署触发器。
+ * `workflow_dispatch` 是"人来点"，其余六种都是"合一次代码就自动跑"，一律不许有。
+ */
+function autoTriggerViolations(body: string): string[] {
+  const out: string[] = [];
+
+  if (!/^\s*workflow_dispatch:/m.test(body)) {
+    out.push("必须有 workflow_dispatch（只能手动触发）");
+  }
+  const auto = body.match(
+    /^\s{2}(push|pull_request|pull_request_target|schedule|repository_dispatch|workflow_run):/m,
+  );
+  if (auto) out.push(`不得有自动触发器 ${auto[1]}:`);
+
+  return out;
+}
+
+/** 测试类工作流的规则：**一条部署能力都不许有**。 */
+function testOnlyWorkflowViolations(fileName: string, content: string): string[] {
+  const body = stripYamlComments(content);
+  const out = autoTriggerViolations(body);
+
+  // 禁的是"能力"而不是"单词"：注释里提一句 wrangler 无所谓，
+  // 真正危险的是这条命令能跑起来、并且有凭据可用。
+  const forbidden: Array<[string, RegExp]> = [
+    ["部署命令", /\bwrangler\b[^\n]*\bdeploy\b/i],
+    ["wrangler-action", /wrangler-action/i],
+    ["Cloudflare 账号/API 凭据", /CLOUDFLARE_(API_TOKEN|API_KEY|ACCOUNT_ID|ZONE_ID)/i],
+    ["GitHub Secrets 注入", /secrets\.|secrets\[/],
+    ["云凭据入参", /\bapiToken\b|\bapi_token\b|\bapiKey\b|\bapi_key\b/],
+  ];
+  for (const [what, re] of forbidden) {
+    if (re.test(body)) out.push(`不得包含${what}`);
+  }
+
+  // id-token: write 是 OIDC 换云厂商凭据的前提，等于把部署能力交出去。
+  if (/:\s*write\b|id-token/i.test(body)) out.push("不得有写权限或 id-token");
+  if (/^permissions:/m.test(body) && !/contents:\s*read/.test(body)) {
+    out.push("permissions 必须是只读的（contents: read）");
+  }
+
+  return out.map((v) => `${fileName}: ${v}`);
+}
+
+/** 任务书对部署工作流提的 13 条，逐条对应下面的检查。 */
+function deployWorkflowViolations(fileName: string, content: string): string[] {
+  const body = stripYamlComments(content);
+  // 1 / 7 —— 只能手动触发，不许有 push / PR / 定时 / 链式触发
+  const out = autoTriggerViolations(body);
+
+  // 2 / 3 —— 必须有一个 confirm_deploy 输入，且 required: true
+  if (!/^\s*confirm_deploy:/m.test(body)) {
+    out.push("必须声明 confirm_deploy 输入");
+  } else if (!/^\s*required:\s*true\s*$/m.test(blockAfter(body, "confirm_deploy"))) {
+    out.push("confirm_deploy 必须是 required: true");
+  }
+
+  // 4 / 13 —— 部署 job 必须同时钉住"分支是 gate0"和"人工输入了 DEPLOY"
+  const gate = body
+    .split("\n")
+    .filter((l) => /^\s*if:/.test(l))
+    .find((l) => /github\.ref/.test(l));
+  if (gate === undefined) {
+    out.push("部署 job 必须有基于 github.ref 与 confirm_deploy 的执行条件");
+  } else {
+    if (!/github\.ref\s*==\s*'refs\/heads\/gate0'/.test(gate)) {
+      out.push("执行条件必须要求 github.ref == 'refs/heads/gate0'");
+    }
+    if (!/inputs\.confirm_deploy\s*==\s*'DEPLOY'/.test(gate)) {
+      out.push("执行条件必须要求 inputs.confirm_deploy == 'DEPLOY'");
+    }
+  }
+  const branches = [...body.matchAll(/refs\/heads\/([A-Za-z0-9._/-]+)/g)].map((m) => m[1]!);
+  const otherBranches = [...new Set(branches)].filter((b) => b !== "gate0");
+  if (otherBranches.length > 0) out.push(`不得引用其它分支：${otherBranches.join(", ")}`);
+
+  // 5 / 6 —— 权限只能有 contents: read，不许 write、不许 id-token
+  const perms = blockAfter(body, "permissions")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (perms.length !== 1 || perms[0] !== "contents: read") {
+    out.push(`permissions 必须且只能有 contents: read（当前：${perms.join(" / ") || "空"}）`);
+  }
+  if (/id-token/i.test(body)) out.push("不得有 id-token");
+  if (/:\s*write\b/i.test(body)) out.push("不得有 write 权限");
+
+  // 8 —— 不许出现别的云平台的部署凭据
+  const otherCloud: Array<[string, RegExp]> = [
+    ["AWS", /AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)|aws-actions\//i],
+    ["GCP", /GOOGLE_APPLICATION_CREDENTIALS|google-github-actions|GCP_SA_KEY/i],
+    ["Azure", /AZURE_(CREDENTIALS|CLIENT_SECRET|SUBSCRIPTION_ID)|azure\/login/i],
+    ["阿里云/腾讯云", /ALIBABA_CLOUD_|TENCENTCLOUD_|ALIYUN_/i],
+    ["其它托管平台", /VERCEL_TOKEN|NETLIFY_AUTH_TOKEN|heroku|flyctl/i],
+  ];
+  for (const [what, re] of otherCloud) {
+    if (re.test(body)) out.push(`不得出现 ${what} 的部署凭据`);
+  }
+
+  // 9 —— Cloudflare 凭据**只能**通过 GitHub Secrets 引用，不许硬编码明文。
+  //      注意：只是"提到"这个名字（echo / test -n）不算违规，赋值成非 Secrets 才算。
+  for (const line of body.split("\n")) {
+    if (!/CLOUDFLARE_[A-Z_]+/.test(line)) continue;
+    const assign = line.match(/^\s*(?:-\s*)?(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*(.*)$/);
+    if (assign === null) continue; // 不是赋值，是引用/校验/提示文案
+    if (!/\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}/.test(assign[1]!)) {
+      out.push(`Cloudflare 凭据只能通过 GitHub Secrets 引用：${line.trim()}`);
+    }
+  }
+
+  // 10 / 11 —— 部署目标只能是 android-mcp-hub，且不许配置别的账号
+  if (!/android-mcp-hub/.test(body)) out.push("必须明确部署目标为 android-mcp-hub");
+  const named = [...body.matchAll(/--name[= ]+([A-Za-z0-9._-]+)/g)].map((m) => m[1]!);
+  const wrongName = [...new Set(named)].filter((n) => n !== "android-mcp-hub");
+  if (wrongName.length > 0) out.push(`不得用 --name 部署到别的 Worker：${wrongName.join(", ")}`);
+  for (const key of [
+    "account_id",
+    "routes",
+    "route",
+    "d1_databases",
+    "kv_namespaces",
+    "r2_buckets",
+    "queues",
+    "hyperdrive",
+  ]) {
+    if (!body.includes(`'${key}'`) && !body.includes(`"${key}"`)) {
+      out.push(`必须校验 wrangler 配置里没有 ${key}`);
+    }
+  }
+
+  // 12 —— 部署之前必须先跑测试与 wrangler dry-run
+  const lines = body.split("\n");
+  const at = (re: RegExp): number => lines.findIndex((l) => re.test(l));
+  const iTest = at(/npm run test/);
+  const iE2e = at(/npm run e2e/);
+  const iDry = at(/\bwrangler\b[^\n]*\bdeploy\b[^\n]*--dry-run/);
+  const iReal = lines.findIndex(
+    (l) => /\bwrangler\b[^\n]*\bdeploy\b/.test(l) && !/--dry-run/.test(l),
+  );
+
+  if (iDry < 0) out.push("部署前必须跑一次 wrangler … --dry-run");
+  if (iReal < 0) out.push("必须有一条真正的部署命令（不带 --dry-run）");
+  if (iTest < 0) out.push("部署前必须跑 npm run test");
+  if (iE2e < 0) out.push("部署前必须跑 npm run e2e");
+  if (iDry >= 0 && iReal >= 0 && iReal < iDry) out.push("真正的部署必须排在 dry-run 之后");
+  if (iDry >= 0 && iTest >= 0 && iTest > iDry) out.push("npm run test 必须排在 dry-run 之前");
+  if (iDry >= 0 && iE2e >= 0 && iE2e > iDry) out.push("npm run e2e 必须排在 dry-run 之前");
+
+  return out.map((v) => `${fileName}: ${v}`);
+}
+
+/** 工作流清单本身也是受约束的：出现未批准的文件、或少了已批准的文件，都要红。 */
+function workflowListViolations(names: string[]): string[] {
+  if (names.length === 0) return []; // 一个工作流都没有也是合法状态（那更不可能自动部署）
+
+  const out: string[] = [];
+  const unexpected = names.filter((n) => !WORKFLOW_ALLOWLIST.includes(n));
+  const missing = WORKFLOW_ALLOWLIST.filter((n) => !names.includes(n));
+  if (unexpected.length > 0) out.push(`出现了未批准的工作流：${unexpected.join(", ")}`);
+  if (missing.length > 0) out.push(`缺少已批准的工作流：${missing.join(", ")}`);
+  return out;
+}
+
+/** 按文件名分派到对应的规则集。 */
+function workflowViolations(fileName: string, content: string): string[] {
+  return fileName === DEPLOY_WORKFLOW
+    ? deployWorkflowViolations(fileName, content)
+    : testOnlyWorkflowViolations(fileName, content);
+}
+
 describe("安全 / 不开启任何自动部署", () => {
-  it("工作流只在手动触发时运行（push / PR / 定时 / 链式触发一律不许有）", () => {
-    for (const file of workflowFiles()) {
-      const body = stripYamlComments(readFileSync(file, "utf8"));
-
-      // 允许手动与可复用工作流；其余触发方式都会让"合一次代码就自动跑"成立。
-      expect(body, rel(file)).toMatch(/^\s*workflow_dispatch:/m);
-      expect(body, rel(file)).not.toMatch(
-        /^\s{2}(push|pull_request|pull_request_target|schedule|repository_dispatch|workflow_run):/m,
-      );
+  it("测试类工作流只在手动触发时运行（push / PR / 定时 / 链式触发一律不许有）", () => {
+    for (const name of TEST_ONLY_WORKFLOWS) {
+      const body = stripYamlComments(readWorkflow(name));
+      expect(autoTriggerViolations(body), name).toEqual([]);
     }
   });
 
-  it("工作流没有任何部署能力：没有部署命令、没有云凭据、没有 GitHub Secrets", () => {
-    // 禁的是"能力"而不是"单词"：注释里提一句 wrangler 无所谓，
-    // 真正危险的是这条命令能跑起来、并且有凭据可用。
-    const forbidden: Array<{ what: string; re: RegExp }> = [
-      { what: "部署命令", re: /\bwrangler\b[^\n]*\bdeploy\b/i },
-      { what: "wrangler-action", re: /wrangler-action/i },
-      { what: "Cloudflare 账号/API 凭据", re: /CLOUDFLARE_(API_TOKEN|API_KEY|ACCOUNT_ID|ZONE_ID)/i },
-      { what: "GitHub Secrets 注入", re: /secrets\.|secrets\[/ },
-      { what: "云凭据入参", re: /\bapiToken\b|\bapi_token\b|\bapiKey\b|\bapi_key\b/ },
-    ];
-
-    for (const file of workflowFiles()) {
-      const body = stripYamlComments(readFileSync(file, "utf8"));
-      for (const { what, re } of forbidden) {
-        expect(re.test(body), `${rel(file)} 不应包含 ${what}`).toBe(false);
-      }
+  it("测试类工作流没有任何部署能力：没有部署命令、没有云凭据、没有 GitHub Secrets", () => {
+    for (const name of TEST_ONLY_WORKFLOWS) {
+      expect(testOnlyWorkflowViolations(name, readWorkflow(name)), name).toEqual([]);
     }
   });
 
-  it("工作流权限是只读的（不许有 write、不许有 id-token）", () => {
-    for (const file of workflowFiles()) {
-      const body = stripYamlComments(readFileSync(file, "utf8"));
+  it("测试类工作流权限是只读的（不许有 write、不许有 id-token）", () => {
+    for (const name of TEST_ONLY_WORKFLOWS) {
+      const body = stripYamlComments(readWorkflow(name));
 
-      // id-token: write 是 OIDC 交换云厂商凭据的前提，等于把部署能力交出去。
-      expect(body, rel(file)).not.toMatch(/:\s*write\b|id-token/i);
+      // id-token: write 是 OIDC 换云厂商凭据的前提，等于把部署能力交出去。
+      expect(body, name).not.toMatch(/:\s*write\b|id-token/i);
       if (/^permissions:/m.test(body)) {
-        expect(body, rel(file)).toMatch(/contents:\s*read/);
+        expect(body, name).toMatch(/contents:\s*read/);
       }
+    }
+  });
+
+  it("部署工作流同时满足 13 条约束（唯一被允许的例外）", () => {
+    expect(deployWorkflowViolations(DEPLOY_WORKFLOW, readWorkflow(DEPLOY_WORKFLOW))).toEqual([]);
+    for (const name of TEST_ONLY_WORKFLOWS) {
+      expect(workflowViolations(name, readWorkflow(name)), name).toEqual([]);
     }
   });
 
   it("工作流清单是明确的（新增一个工作流必须显式改这里）", () => {
-    // 与"A2 之外的 DO 绑定必须恰好三个"同一种模式：受安全约束的东西要显式列出来，
+    // 与"DO 绑定必须恰好三个"同一种模式：受安全约束的东西要显式列出来，
     // 免得以后有人顺手加一个工作流，而没人回头看一眼它能不能部署。
     const names = workflowFiles()
       .map((f) => f.split("/").pop() ?? "")
       .sort();
 
-    if (names.length === 0) return; // 一个工作流都没有也是合法状态（那更不可能自动部署）
-    expect(names).toEqual(["android-debug-apk.yml", "worker-gate1-check.yml"]);
+    expect(workflowListViolations(names)).toEqual([]);
+    expect(names).toEqual([...WORKFLOW_ALLOWLIST].sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  A3. 部署工作流的**反向测试**：篡改必须被拒绝
+// ---------------------------------------------------------------------------
+//
+//  上面那几条只能证明"当前这个文件是合规的"。这一组把文件**改坏**，再喂给同一个
+//  纯函数，要求它必须报出违规 —— 否则那些规则就只是装饰。
+
+describe("安全 / 部署工作流的篡改必须被拒绝", () => {
+  /** 在真实文件上做一处改动，返回违规清单（空数组 = 这道闸没挡住）。 */
+  function violationsAfter(mutate: (src: string) => string): string[] {
+    const mutated = mutate(readWorkflow(DEPLOY_WORKFLOW));
+    expect(mutated, "改动必须真的生效，否则这条测试是假的").not.toEqual(
+      readWorkflow(DEPLOY_WORKFLOW),
+    );
+    return deployWorkflowViolations(DEPLOY_WORKFLOW, mutated);
+  }
+
+  it("原文件是合规的（反向测试的基准）", () => {
+    expect(deployWorkflowViolations(DEPLOY_WORKFLOW, readWorkflow(DEPLOY_WORKFLOW))).toEqual([]);
+  });
+
+  it("删掉 DEPLOY 确认条件 → 必须被拒绝", () => {
+    const v = violationsAfter((s) => s.replace(/ && inputs\.confirm_deploy == 'DEPLOY'/, ""));
+    expect(v.join("\n")).toMatch(/confirm_deploy/);
+  });
+
+  it("把 gate0 改成别的分支 → 必须被拒绝", () => {
+    const v = violationsAfter((s) => s.replaceAll("refs/heads/gate0", "refs/heads/main"));
+    expect(v.join("\n")).toMatch(/gate0|其它分支/);
+  });
+
+  it("加上 push 自动触发 → 必须被拒绝", () => {
+    const v = violationsAfter((s) => s.replace("on:\n", "on:\n  push:\n"));
+    expect(v.join("\n")).toMatch(/自动触发器 push/);
+  });
+
+  it("加上 id-token: write → 必须被拒绝", () => {
+    const v = violationsAfter((s) => s.replace("permissions:\n", "permissions:\n  id-token: write\n"));
+    expect(v.join("\n")).toMatch(/id-token|contents: read/);
+  });
+
+  it("把 Cloudflare 凭据改成硬编码明文 → 必须被拒绝", () => {
+    const v = violationsAfter((s) => s.replace(/\$\{\{\s*secrets\.CLOUDFLARE_API_TOKEN\s*\}\}/g, "0123456789abcdef0123456789abcdef"));
+    expect(v.join("\n")).toMatch(/GitHub Secrets/);
+  });
+
+  it("把部署排到 dry-run 之前 → 必须被拒绝", () => {
+    const v = violationsAfter((s) => {
+      const dry = "        run: npx wrangler deploy --config worker/wrangler.jsonc --dry-run";
+      const real =
+        "        run: npx wrangler deploy --config worker/wrangler.jsonc\n";
+      // 把真正的部署那一行移到 dry-run 之前：直接把 dry-run 那行改造成不带 --dry-run
+      return s.replace(dry, real.trimEnd());
+    });
+    expect(v.join("\n")).toMatch(/dry-run/);
+  });
+
+  it("在测试类工作流里加一条部署命令 → 必须被拒绝", () => {
+    const v = testOnlyWorkflowViolations(
+      "worker-gate1-check.yml",
+      readWorkflow("worker-gate1-check.yml") +
+        "\n      - name: 顺手部署一下\n        run: npx wrangler deploy\n",
+    );
+    expect(v.join("\n")).toMatch(/部署命令/);
+  });
+
+  it("在测试类工作流里注入 GitHub Secrets → 必须被拒绝", () => {
+    const v = testOnlyWorkflowViolations(
+      "android-debug-apk.yml",
+      readWorkflow("android-debug-apk.yml") + "\n        env:\n          T: ${{ secrets.SOME_TOKEN }}\n",
+    );
+    expect(v.join("\n")).toMatch(/Secrets/);
+  });
+
+  it("添加一个未经批准的新工作流 → 必须被拒绝", () => {
+    const v = workflowListViolations([
+      ...WORKFLOW_ALLOWLIST,
+      "rogue.yml",
+    ]);
+    expect(v.join("\n")).toMatch(/未批准的工作流：rogue\.yml/);
+  });
+
+  it("少一个已批准的工作流 → 必须被拒绝", () => {
+    const v = workflowListViolations(WORKFLOW_ALLOWLIST.filter((n) => n !== DEPLOY_WORKFLOW));
+    expect(v.join("\n")).toMatch(/缺少已批准的工作流/);
   });
 });
 

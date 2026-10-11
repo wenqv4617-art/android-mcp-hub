@@ -170,6 +170,18 @@ git log --oneline -1        # 应看到 933a915 或更新
 > ② 只是想先跑一遍测试的话，用仓库里手动触发的 `.github/workflows/worker-gate1-check.yml`
 > （在 GitHub 上跑 `npm ci` / `typecheck` / `test` / `e2e`，不登录云账号、不读任何密钥）。
 > **`wrangler deploy` 本身在 Termux 上也会因为同一个依赖问题装不上**，所以部署建议用 ①。
+>
+> ③ 还有第三条路（如果你已经在手机上、又不想换机器）：仓库里有一个**必须人工确认**的
+> 部署工作流 `.github/workflows/deploy-worker.yml` —— 在 GitHub 的 Actions 页面选
+> `Worker manual deployment` → **Run workflow** → 分支选 `gate0` → 在 `confirm_deploy`
+> 输入框里**原样输入 `DEPLOY`** → 运行。它只做这一件事：
+> `npm ci` → `typecheck` / `test` / `e2e` → `wrangler deploy --dry-run` → 检查两个 Secret
+> 存在且账号 ID 是 32 位十六进制 → 真正 `wrangler deploy`；它只用
+> `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` 两个 **GitHub Secrets**（需你先在
+> 仓库 Settings → Secrets 里配好），**权限只有 `contents: read`**，执行条件同时要求
+> `github.ref == 'refs/heads/gate0'` 与 `inputs.confirm_deploy == 'DEPLOY'`。
+> 不输入 `DEPLOY`、或不是在 `gate0` 上点，job 直接跳过（不是跑一半失败）。
+> 这些约束都有静态测试守着（`TEST_REPORT.md` §12.17）。
 
 ```bash
 # 在你 clone 下来的仓库目录里执行
