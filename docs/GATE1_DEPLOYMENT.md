@@ -164,6 +164,13 @@ git log --oneline -1        # 应看到 933a915 或更新
 > 部署用的就是这份代码。`gate0` 分支的 HEAD 就是我要你部署的那个版本 ——
 > 如果你看到的是更新的提交，那是我在这之后又推了东西，请按新的提交号记录。
 
+> ⚠ **如果你是在 Android 手机上（Termux）跑这一步**：`npm ci` 会去装 workerd 的原生二进制，
+> 而它**不支持 android-arm64**，在这里会直接失败 —— 这不是你的操作问题。两个选择：
+> ① 换一台 x86_64 的机器（或 Cloudflare Dashboard 里的在线终端）跑部署命令；
+> ② 只是想先跑一遍测试的话，用仓库里手动触发的 `.github/workflows/worker-gate1-check.yml`
+> （在 GitHub 上跑 `npm ci` / `typecheck` / `test` / `e2e`，不登录云账号、不读任何密钥）。
+> **`wrangler deploy` 本身在 Termux 上也会因为同一个依赖问题装不上**，所以部署建议用 ①。
+
 ```bash
 # 在你 clone 下来的仓库目录里执行
 
@@ -353,7 +360,7 @@ npx wrangler@4.149.0 delete --config worker/wrangler.jsonc
 | # | 事项 | 决定 |
 | --- | --- | --- |
 | 1 | 谁执行部署 | **用户自己执行**（凭据只存在于用户终端与 Cloudflare；我提供逐条命令） |
-| 2 | 账号与计划 | Android MCP Hub **专属新账号**（与见川记忆完全独立），**Free 计划**，不订阅任何付费服务 |
+| 2 | 账号与计划 | Android MCP Hub **专属新账号**（与任何既有生产项目完全独立），**Free 计划**，不订阅任何付费服务 |
 | 3 | 创建的资源 | **批准**：1 个 Worker + 3 个 DO 类 + 2 个 Secret + `workers.dev` 子域。不建 D1/KV/R2/Queue/Hyperdrive、不配 route 或自定义域名、不开自动部署 |
 | 4 | 静态 `MCP_ACCESS_TOKEN` | **不配置**（只走 OAuth）。自检断言 `auth.mcp_bearer_configured` 必须为 `false` |
 | 5 | 设备 `deviceId` | **`my-android-phone`**（必须与手机 App 输入框里填的完全一致） |

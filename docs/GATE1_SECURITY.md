@@ -161,8 +161,8 @@ openssl rand -base64 32
 
 | 位置 | 覆盖 |
 | --- | --- |
-| `worker/test/security.test.ts` | 仓库无凭据形状、无既有生产项目引用、无 D1/KV/R2/Queue 绑定、Env 只有三个 DO 绑定、日志不出现明文令牌 |
-| `worker/test/oauth.test.ts`（46 条） | 未启用时 8 条路由 404 + `/mcp` 401 不带 `resource_metadata`；启用后必须带；DCR 校验；同意页只提交三个字段、无 `<script`、CSP；**输错口令一次后改对仍能拿码**；码只能用一次；跨客户端拒绝；刷新轮换 + 重放拒绝；OAuth 令牌真能完成 `initialize`；伪造/无前缀/已撤销/过期/受众不符/缺 scope 一律 401；全套流程后日志无凭据；存储故障 → 503 而不是假码 |
+| `worker/test/security.test.ts`（19 条） | 仓库无凭据形状、无既有生产项目引用、无 D1/KV/R2/Queue 绑定、Env 只有三个 DO 绑定、日志不出现明文令牌；**不开启任何自动部署**（4 条静态门禁：触发方式 / 部署能力 / 只读权限 / 工作流清单必须恰好两个 —— 见 `TEST_REPORT.md` §12.13 与 §12.16） |
+| `worker/test/oauth.test.ts`（49 条） | 未启用时 8 条路由 404 + `/mcp` 401 不带 `resource_metadata`；启用后必须带；DCR 校验；同意页只提交三个字段、无 `<script`、CSP；**输错口令一次后改对仍能拿码**；码只能用一次；跨客户端拒绝；刷新轮换 + 重放拒绝；OAuth 令牌真能完成 `initialize`；伪造/无前缀/已撤销/过期/受众不符/缺 scope 一律 401；全套流程后日志无凭据；存储故障 → 503 而不是假码 |
 | `worker/test/mcp-http.test.ts` | 未知方法 404 + `-32601`；`Accept`/`Content-Type` 校验；会话头校验 |
 | `worker/test/phone-session.test.ts` | 重复 `request_id` 拒绝覆盖（409）；落盘永不返回时结算照常发生；DO 重建后遗留 pending 不产生虚假成功 |
 | `worker/test/logging.test.ts` | 日志白名单、错误类别归一化、凭据形状终检 |

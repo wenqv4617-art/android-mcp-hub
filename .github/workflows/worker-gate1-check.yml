@@ -1,0 +1,123 @@
+# ============================================================================
+#  Worker / DO / MCP 协议 —— 手动触发的一键检查（只在 GitHub 的机器上跑）
+# ============================================================================
+#
+#  为什么需要这个工作流：
+#
+#   本项目的开发环境是一台 Android 手机（Termux）。`npm ci` 会去装
+#   workerd 的原生二进制，而它**不支持 android-arm64**，于是依赖装不上、
+#   tsc / vitest / e2e 根本跑不起来。这不是代码的问题，是宿主架构的问题。
+#
+#   所以把「本地跑不了」的那部分挪到 GitHub 的 x86_64 runner 上跑。
+#
+#  这个工作流**不能**碰生产，而且是结构上不能：
+#    * 只有 workflow_dispatch，push / PR / 定时都不会触发；
+#    * 只做四件事：装依赖、类型检查、单元测试、本地端到端；
+#    * 不登录任何云账号、不配置任何 Secret、不调用任何云 API；
+#    * permissions 只有 contents: read；
+#    * 与 Android APK 那个工作流完全独立，互不影响。
+#
+#  ⚠️ 这里跑的不是"部署后的验证"。它验证的是**这份代码本身**，
+#     真实 Cloudflare 联调与 ChatGPT 官方验收仍然要等部署之后（见
+#     docs/GATE1_ACCEPTANCE.md 的阶段 B / C）。
+# ============================================================================
+name: Worker Gate 1 check
+
+on:
+  workflow_dispatch:
+
+# 同一分支上不并发跑多份；不取消已经在跑的那份（看日志比抢资源重要）。
+concurrency:
+  group: worker-gate1-check-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  worker-check:
+    name: 依赖 / 类型检查 / 单元测试 / 本地端到端
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # 先确认我们站在对的目录上。package.json 与 package-lock.json 都在仓库根，
+      # worker/ 只是源码子目录（它自己**没有** package.json）—— 走错目录会以
+      # "找不到脚本" 之类的形式失败，那比这里直接报清楚更难查。
+      - name: 确认工作目录与工具版本
+        run: |
+          set -euo pipefail
+          echo "工作目录：$(pwd)"
+          if [ ! -f package.json ]; then
+            echo "::error::当前目录下没有 package.json —— 工作目录不对，应该在仓库根目录"
+            exit 1
+          fi
+          if [ ! -f worker/wrangler.jsonc ]; then
+            echo "::error::找不到 worker/wrangler.jsonc —— 仓库结构不是预期的样子"
+            exit 1
+          fi
+          echo "Node：$(node -v)"
+          echo "npm ：$(npm -v)"
+
+      # 这一步就是本工作流存在的理由：在 ubuntu 的 x86_64 上它能装成功，
+      # 而在 Android Termux（arm64）上 workerd 的原生二进制装不上。
+      - name: 安装依赖（npm ci）
+        run: npm ci
+
+      - name: TypeScript 类型检查
+        run: |
+          set -euo pipefail
+          mkdir -p test-reports
+          npm run typecheck 2>&1 | tee test-reports/typecheck.log
+
+      - name: Worker / DO / MCP 协议单元测试
+        run: |
+          set -euo pipefail
+          mkdir -p test-reports
+          npm run test 2>&1 | tee test-reports/vitest.log
+
+      - name: 本地端到端（真实 HTTP + 真实 WebSocket + 官方 MCP SDK）
+        run: |
+          set -euo pipefail
+          mkdir -p test-reports
+          npm run e2e 2>&1 | tee test-reports/e2e.log
+
+      # 失败时把话说清楚：是哪一步红的、去哪个 artifact 看完整日志。
+      # 不吞错、不改退出码 —— 这一步跑完，整个 job 依然是失败状态。
+      - name: 失败时打印定位信息
+        if: failure()
+        run: |
+          set -uo pipefail
+          echo "::error title=Worker Gate 1 检查失败::见下方日志与附件 worker-gate1-logs"
+          echo
+          echo "==================== 失败步骤的日志尾部 ===================="
+          for f in test-reports/typecheck.log test-reports/vitest.log test-reports/e2e.log; do
+            if [ -f "$f" ]; then
+              echo
+              echo "---------- $f （最后 60 行） ----------"
+              tail -n 60 "$f"
+            fi
+          done
+          echo
+          echo "============================================================="
+          echo "提示：单元测试失败时，先看 vitest 的 Failed Tests 段落；"
+          echo "      端到端失败时，看 e2e 日志里最后那个 [FAIL] 或异常堆栈。"
+
+      # 完整日志留档（默认保留 7 天），失败时才上传 —— 成功时没必要占空间。
+      - name: 上传完整日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-gate1-logs
+          path: test-reports/
+          if-no-files-found: ignore
+          retention-days: 7

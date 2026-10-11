@@ -204,6 +204,13 @@ describe("安全 / 与既有生产项目完全隔离", () => {
 //
 //  ⚠ 这是**文本级**检查，不是 YAML 解析（仓库里没有 yaml 依赖，也不想为此引一个）。
 //    它挡不住"用各种 YAML 花招绕过"的刻意攻击，但足以挡住无意的自动部署。
+//
+//  ⚠ 第二版（Gate 1 收尾）：第二条断言原来禁的是**字符串** `wrangler|cloudflare|deploy`。
+//    在 Android/Termux 上装不上 workerd 之后，仓库里多了一个"在 ubuntu 上跑单元测试"
+//    的工作流 —— 而在一个把 `wrangler` 与 `@cloudflare/vitest-pool-workers` 写进 devDeps
+//    的仓库里跑测试，天然就会碰到这些词（连 `worker/wrangler.jsonc` 这个路径都躲不开）。
+//    禁字符串会让这道闸去咬**正确**的东西。所以它改成禁**能力**：
+//    能不能部署，取决于有没有部署命令与云凭据可用，而不是取决于文件里出现过哪个单词。
 
 /** 去掉 YAML 注释行 —— 工作流开头的注释里写着"没有任何 deploy 步骤"，不剥掉会误命中。 */
 function stripYamlComments(text: string): string {
@@ -239,11 +246,22 @@ describe("安全 / 不开启任何自动部署", () => {
     }
   });
 
-  it("工作流里没有 wrangler、没有任何部署命令、没有密钥注入", () => {
+  it("工作流没有任何部署能力：没有部署命令、没有云凭据、没有 GitHub Secrets", () => {
+    // 禁的是"能力"而不是"单词"：注释里提一句 wrangler 无所谓，
+    // 真正危险的是这条命令能跑起来、并且有凭据可用。
+    const forbidden: Array<{ what: string; re: RegExp }> = [
+      { what: "部署命令", re: /\bwrangler\b[^\n]*\bdeploy\b/i },
+      { what: "wrangler-action", re: /wrangler-action/i },
+      { what: "Cloudflare 账号/API 凭据", re: /CLOUDFLARE_(API_TOKEN|API_KEY|ACCOUNT_ID|ZONE_ID)/i },
+      { what: "GitHub Secrets 注入", re: /secrets\.|secrets\[/ },
+      { what: "云凭据入参", re: /\bapiToken\b|\bapi_token\b|\bapiKey\b|\bapi_key\b/ },
+    ];
+
     for (const file of workflowFiles()) {
       const body = stripYamlComments(readFileSync(file, "utf8"));
-
-      expect(body, rel(file)).not.toMatch(/wrangler|cloudflare|deploy|secrets\.|secrets\[/i);
+      for (const { what, re } of forbidden) {
+        expect(re.test(body), `${rel(file)} 不应包含 ${what}`).toBe(false);
+      }
     }
   });
 
@@ -257,6 +275,17 @@ describe("安全 / 不开启任何自动部署", () => {
         expect(body, rel(file)).toMatch(/contents:\s*read/);
       }
     }
+  });
+
+  it("工作流清单是明确的（新增一个工作流必须显式改这里）", () => {
+    // 与"A2 之外的 DO 绑定必须恰好三个"同一种模式：受安全约束的东西要显式列出来，
+    // 免得以后有人顺手加一个工作流，而没人回头看一眼它能不能部署。
+    const names = workflowFiles()
+      .map((f) => f.split("/").pop() ?? "")
+      .sort();
+
+    if (names.length === 0) return; // 一个工作流都没有也是合法状态（那更不可能自动部署）
+    expect(names).toEqual(["android-debug-apk.yml", "worker-gate1-check.yml"]);
   });
 });
 

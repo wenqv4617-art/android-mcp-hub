@@ -85,7 +85,7 @@ android-mcp-hub/
 │       │   ├── session-do.ts      McpSession DO（会话生命周期）
 │       │   └── tools.ts           phone_ping 的定义、参数校验、结果映射
 │       └── util/                  ids / crypto / http / log（白名单式安全日志）
-├── worker/test/                   206 个自动化测试 + Workers 运行时 shim
+├── worker/test/                   207 个自动化测试 + Workers 运行时 shim
 │   ├── harness/                   Node 端 Workers 运行时替身（含故障注入，见 TEST_REPORT.md）
 │   └── *.test.ts                  8 个测试文件
 ├── tools/mock-phone/              模拟手机 WebSocket 客户端（可命令行、可被引用）
@@ -103,7 +103,7 @@ android-mcp-hub/
 │   ├── GATE1_CHATGPT_SETUP.md     ★ ChatGPT 接入说明：怎么在客户端加这个 MCP server、授权、验收、排障（NOT RUN）
 │   ├── GATE1_ACCEPTANCE.md        ★ 验收报告：阶段 A PASS / 阶段 B、C BLOCKED
 │   └── GATE1_SECURITY.md          ★ Gate 1 安全说明：OAuth 决策、威胁 T13–T26、已知问题 G1-K1…K6
-├── .github/workflows/             仅一个**手动触发**的 Debug APK 构建（无部署、无密钥）
+├── .github/workflows/             两个**手动触发**的工作流：Debug APK 构建、Worker 测试（都无部署、无密钥）
 ├── test-reports/                  各项测试的**原始输出**（本报告的证据来源）
 ├── SECURITY.md                    威胁模型与安全边界
 ├── ARCHITECTURE.md                架构与关键设计决策
@@ -130,7 +130,7 @@ npm run gate0        # = typecheck && test && e2e
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm run test         # 206 个用例（8 个测试文件）
+npm run test         # 207 个用例（8 个测试文件）
 npm run e2e          # 21 项端到端检查（真 HTTP + 真 WebSocket + 官方 MCP SDK）
 ```
 
@@ -182,6 +182,12 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 
 手机端配置（网关地址、设备 ID、令牌）在 App 界面上填，**不写在源码里**；设备令牌用 Android Keystore 里的密钥加密后存本机私有存储（**不留明文**）。
 
 > 想拿到一个现成的 APK，也可以用手动触发的 GitHub Actions 工作流：`.github/workflows/android-debug-apk.yml`（**只用 `workflow_dispatch`**，不部署、不读任何密钥）。⚠ 它在本仓库里**从未被执行过**。
+>
+> **在 Android/Termux 上开发时**：`npm ci` 会去装 workerd 的原生二进制，而它**不支持 android-arm64** ——
+> 依赖装不上，`tsc` / `vitest` / `e2e` 都跑不起来。这不是代码的问题，是宿主架构的问题。
+> 为此新增了 `.github/workflows/worker-gate1-check.yml`：同样**只用 `workflow_dispatch`**、`permissions: contents: read`，
+> 在 `ubuntu-latest` + Node 24 上跑 `npm ci` → `typecheck` → `test` → `e2e`，**不登录任何云账号、不配置任何 Secret**，
+> 失败时把三个日志的尾部打出来并上传 artifact。⚠ 它同样**还没在 GitHub 上真实执行过** —— 需要手动点一次（见 `TEST_REPORT.md` §12.16）。
 
 ---
 
@@ -219,7 +225,7 @@ OAuth 相关的安全设计与已知问题见 [docs/GATE1_SECURITY.md](docs/GATE
 - ❌ **没有在真实 Cloudflare 上跑过 OAuth**（Gate 1 实现的是代码 + 本地替身证据；真实授权流程 NOT RUN）。
 - ❌ **没有让 ChatGPT 官方客户端真的调过一次 `phone_ping`**（任务书把这条列为 Gate 1 的唯一验收标准，目前 BLOCKED）。
 - ❌ 没有接入任何本地 MCP 应用（不是 `phone_ping` 之外的工具都没有，是**一个都没有**）。
-- ❌ 没有自动部署流水线（`.github/workflows` 里那个只在手动点击时构建 APK，不部署、不读密钥），没有把任何真实凭据提交进仓库。
+- ❌ 没有自动部署流水线（`.github/workflows` 里那两个都只在手动点击时才跑：一个构建 APK、一个跑 Worker 测试；都不部署、不读密钥），没有把任何真实凭据提交进仓库。
 - ❌ 没有测量真实手机上的 Android 运行时行为（App 编得过、单测跑得过、APK 出得来、Lint 门禁过得了，但**从未在真机上运行过**，手工验证清单一条都没跑）。
 - ❌ 没有在真实 workerd 上跑过任何测试（容器跑不起 workerd，原因见 TEST_REPORT.md）。
 - ❌ 没有验证 Android Keystore 的真实加解密路径（JVM 测不到，工程没引 Robolectric）。
