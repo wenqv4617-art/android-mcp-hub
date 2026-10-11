@@ -7,6 +7,13 @@
 > `DEVICE_TOKENS` 与 `OAUTH_OWNER_SECRET` 已经存在 Cloudflare 的 Worker 上，
 > **一次代码部署不会碰它们**（不需要重新 `secret put`）。
 
+> 📱 **只有手机、没有电脑？** 不用走这份手册 —— 去 Actions 里手动派发即可：
+> 分支选 `feat/gate2-core`、确认串填 `DEPLOY-GATE2`。
+> 逐步的"点哪里、填什么"写在
+> [Gate2-Device-Integration-Checklist.md](Gate2-Device-Integration-Checklist.md) **§3.1**。
+> 两条路径跑的是**同一条流水线**（`npm ci` → typecheck/test/e2e → `--dry-run` → 凭据校验 → `deploy`），
+> 区别只是"谁来执行 wrangler"。
+
 ## 0. 前置条件
 
 | 项 | 要求 | 怎么确认 |

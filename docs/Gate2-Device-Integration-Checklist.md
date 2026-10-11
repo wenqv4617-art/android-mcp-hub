@@ -47,8 +47,13 @@ APK 里可核对的内容（都是**从产物里读出来的**，不是从源码
 > 而仓库里的部署工作流 `deploy-worker.yml` 只在 **`gate0` 分支**上、且输入 `confirm_deploy=DEPLOY` 时才可能跑（见 §3）。
 > 所以真机联调之前必须先决定走哪条路：
 >
-> - **A. 你来部署**：在你自己的机器上 `git checkout feat/gate2-core` 后
->   `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc`（凭据自备，仓库里不存任何 token）。
+> - **A. 你来部署**，两条子路径选一条：
+>   - **A1 只有手机**：手机浏览器打开 Actions 里的 `Worker manual deployment`，
+>     分支选 `feat/gate2-core`、确认串填 `DEPLOY-GATE2` → **Run workflow**。
+>     这是本轮新加的**临时**路径，逐步说明见 §3.1（先读再点）。
+>   - **A2 有电脑**：`git checkout feat/gate2-core` 后
+>     `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc`（凭据自备，仓库里不存任何 token），
+>     逐步见 [Gate2-Deploy-By-Yourself.md](Gate2-Deploy-By-Yourself.md)。
 > - **B. 先把 Gate 2 合并进 `gate0`**（需要你明确批准；本轮**没有**做，`gate0` 仍是 `39ef38eec151b4bb21b4e6cac933ec5221a12302`）。
 > - **C. 只联调已在线的旧版本**：那样 `battery_get_status` 与撤销语义都不是本轮代码，联调结论不能代表 Gate 2。
 >
@@ -62,7 +67,7 @@ APK 里可核对的内容（都是**从产物里读出来的**，不是从源码
 
 | 工作流 | 触发条件 | 它做什么 |
 | --- | --- | --- |
-| `.github/workflows/deploy-worker.yml` | 手动；且 job 的 `if` 同时要求 `github.ref == 'refs/heads/gate0'` **和** `inputs.confirm_deploy == 'DEPLOY'` | `npm ci` → `npm run typecheck/test/e2e` → `wrangler deploy --dry-run` → 校验两个 secret 存在 → `wrangler deploy` |
+| `.github/workflows/deploy-worker.yml` | 手动；且 job 的 `if` 同时要求**分支与确认串一一配对**：`refs/heads/gate0` + `DEPLOY`，或 `refs/heads/feat/gate2-core` + `DEPLOY-GATE2`（Gate 2 联调临时路径） | `npm ci` → `npm run typecheck/test/e2e` → `wrangler deploy --dry-run` → 校验两个 secret 存在 → `wrangler deploy` |
 | `.github/workflows/worker-gate1-check.yml` | 手动 | `npm ci` → 类型检查 → Worker/DO/MCP 单测 → 本地端到端 → 失败时打印定位信息 → 上传日志 artifact |
 | `.github/workflows/android-debug-apk.yml` | 手动 | JDK 17 + Android SDK → 关掉 aarch64 专用的 aapt2 覆盖 → `:app:testDebugUnitTest` → `:app:assembleDebug` → `verify_manifest_classes.py --apk` → 记录 `sha256sum` → 上传 APK artifact |
 
@@ -73,6 +78,40 @@ APK 里可核对的内容（都是**从产物里读出来的**，不是从源码
 - 另有 `concurrency: android-mcp-hub-manual-deploy`（`cancel-in-progress: false`）与 20 分钟超时：同时点两次不会有两个部署并行。
 
 本轮检查方式：`ls .github/workflows/` + 逐个 `grep` 触发段与关键步骤（只读）。**没有**任何 `gh workflow run`、没有 `wrangler deploy`。状态：PASS（配置就是这样）／部署本身 **NOT RUN**。
+
+之后为"只有手机"补了一条 **Gate 2 临时部署路径**（§3.1）：它仍然只能人工派发、仍然必须逐字输入确认串，只是把分支白名单从 `gate0` 临时扩到 `feat/gate2-core`，并用**另一个**确认串 `DEPLOY-GATE2` 与它配对。
+`worker/test/security.test.ts` 的部署工作流闸门同步加了第 14 条约束（分支与确认串必须一一对应）、3 条反向用例、1 条真值表用例 —— 其中真值表那条是把 `if` 条件真的拿来求值，证明**普通 push（`inputs` 为空）永远进不了部署 job**。
+
+### 3.1 只有手机怎么部署（方案 A1，逐步）
+
+> 本轮**没有**执行本节。下面的按钮位置来自 GitHub 官方文档（手动运行工作流的网页路径），
+> 逐字核对过；但"这一次点击"是用户自己的动作，状态记 **NOT RUN**。
+
+**前提**：仓库 Settings → Secrets and variables → Actions 里已经有 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`（后者 32 位十六进制）。缺了会在 `Check required credentials` 这一步失败——**不会**带着空凭据往下走。
+
+1. 手机浏览器里打开（私有仓库需要先登录）：
+   `https://github.com/wenqv4617-art/android-mcp-hub/actions/workflows/deploy-worker.yml`
+2. 页面上方/右侧找 **Run workflow** 按钮（下拉，默认收起）→ 点开。
+3. **Branch** 下拉：默认是 `gate0`，**必须改成 `feat/gate2-core`**。
+4. **confirm_deploy** 输入框：一字不差填 `DEPLOY-GATE2`（全大写，中间是连字符）。
+5. 点绿色的 **Run workflow**。页面出现一个新的 run，点进去。
+6. 逐步看：`Validate target and configuration` 会打印
+   `::warning::Gate 2 临时路径：…` 与 `部署目标：feat/gate2-core (Gate 2 联调，临时路径) @ <sha>`；
+   接着 `Install locked dependencies` → `Run Gate 1 checks` → `Wrangler dry-run` → `Check required credentials` → `Deploy Worker`。
+7. 成功的样子：整条 run 绿色勾，`Deploy Worker` 日志里有 `Uploaded android-mcp-hub` 和一行 `https://<子域>.workers.dev`。
+8. 哪里红了怎么读：
+   | 红在这一步 | 含义 |
+   | --- | --- |
+   | `Validate target and configuration` | 分支或确认串填错了（例如填了 `DEPLOY`，或没改分支） |
+   | `Check required credentials` | 缺 Secret，或 `CLOUDFLARE_ACCOUNT_ID` 不是 32 位十六进制 |
+   | `Run Gate 1 checks` | 代码本身没过测试 → 不要部署，先看日志 |
+   | `Wrangler dry-run` | `worker/wrangler.jsonc` 配置不合规（含被禁的键等） |
+   | `Deploy Worker` | Cloudflare 侧拒绝（令牌权限/账号不对） |
+9. 关于 **GitHub 手机 App**：GitHub 官方文档只写了网页路径的手动派发。App 里进
+   `仓库 → Actions → Worker manual deployment`，**如果**上方有 `Run workflow` 按钮，填法完全一样；
+   **没有这个按钮就回浏览器**（网页版最稳，必要时用浏览器菜单里的"桌面版网站/Request desktop site"）。
+10. 别顺手做的两件事：**不要合并 `gate0`**；**不要**给这个工作流加 `push` 触发器（加了会被闸门测试和 review 拦下）。
+    这条 Gate 2 路径是临时的：真机验证通过、代码并入 `gate0` 之后，要连同闸门里那两条配对约束与反向用例一起删掉。
 
 ---
 

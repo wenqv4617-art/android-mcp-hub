@@ -1,10 +1,21 @@
 name: Worker manual deployment
 
+# 手动部署，两条路径（都只能由人来点，且都必须逐字输入确认串）：
+#   · gate0             线上路径：确认串 DEPLOY（与 Gate 1 以来的行为完全一致）
+#   · feat/gate2-core   Gate 2 联调临时路径：确认串 DEPLOY-GATE2
+#
+# 两条路径共用同一套闸门：先 typecheck / 单测 / 本地 e2e，再 wrangler --dry-run，
+# 再校验 Cloudflare 账号与两个 Secret，最后才真正 deploy。
+# 没有任何 push / pull_request 触发器 —— 普通推送永远不会部署。
+#
+# ⚠ feat/gate2-core 这条路是**临时**的：Gate 2 真机验证通过、并入 gate0 之后，
+#   应当把下面 if 条件里的 Gate 2 子句、这段说明，以及 worker/test/security.test.ts 里
+#   对应的那两条约束与反向用例一起删掉（在那之前测试会一直盯着它）。
 on:
   workflow_dispatch:
     inputs:
       confirm_deploy:
-        description: 'Type DEPLOY to authorize a real Cloudflare deployment'
+        description: 'gate0 填 DEPLOY；feat/gate2-core（Gate 2 联调）填 DEPLOY-GATE2'
         required: true
         type: string
 
@@ -17,11 +28,11 @@ concurrency:
 
 jobs:
   deploy:
-    if: ${{ github.ref == 'refs/heads/gate0' && inputs.confirm_deploy == 'DEPLOY' }}
+    if: ${{ (github.ref == 'refs/heads/gate0' && inputs.confirm_deploy == 'DEPLOY') || (github.ref == 'refs/heads/feat/gate2-core' && inputs.confirm_deploy == 'DEPLOY-GATE2') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout gate0
+      - name: Checkout dispatched branch
         uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -36,7 +47,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = 'refs/heads/gate0'
+          case "$GITHUB_REF" in
+            refs/heads/gate0)
+              target='gate0'
+              ;;
+            refs/heads/feat/gate2-core)
+              target='feat/gate2-core (Gate 2 联调，临时路径)'
+              echo "::warning::Gate 2 临时路径：本次部署的是 feat/gate2-core 上尚未在真机验证过的代码"
+              ;;
+            *)
+              echo "::error::只能从 gate0 或 feat/gate2-core 手动派发（当前 $GITHUB_REF）"
+              exit 1
+              ;;
+          esac
+          echo "部署目标：$target @ $GITHUB_SHA"
           test -f package-lock.json
           test -f worker/wrangler.jsonc
           node --input-type=module <<'NODE'

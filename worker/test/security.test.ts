@@ -205,7 +205,8 @@ describe("安全 / 与既有生产项目完全隔离", () => {
 //  于是规则从"一律不许"变成"默认不许，且只允许一个具名的例外"：
 //
 //    * android-debug-apk.yml / worker-gate1-check.yml —— 纯测试类，**零部署能力**；
-//    * deploy-worker.yml —— 唯一的部署工作流，必须同时满足 13 条约束（见下）。
+//    * deploy-worker.yml —— 唯一的部署工作流，必须同时满足 13 条约束（见下），
+//      Gate 2 联调期间另加 1 条（分支与确认串必须一一对应），共 14 条。
 //
 //  两份规则都写成**纯函数**：输入文件内容，输出违规清单。理由是"只看当前那个文件"
 //  证明不了任何东西 —— 下面那组反向测试把篡改过的内容喂进同一个函数，要求它必须报错。
@@ -218,6 +219,17 @@ const TEST_ONLY_WORKFLOWS = ["android-debug-apk.yml", "worker-gate1-check.yml"] 
 
 /** 唯一的部署工作流。它存在的意义就是"部署"，所以对它适用另一套规则。 */
 const DEPLOY_WORKFLOW = "deploy-worker.yml";
+
+/**
+ * 允许被这份工作流**手动**部署的分支白名单。
+ *
+ * `feat/gate2-core` 是 Gate 2 联调期间进白名单的**一次性**临时路径：用户只有手机，
+ * 没法在本地终端部署，所以让 Actions 从那条分支手动派发；它必须逐字输入另一个
+ * 确认串 `DEPLOY-GATE2`，确认串与分支一一对应，不能互换。
+ * Gate 2 并入 gate0 之后，这条临时路径要连同下面那条 `DEPLOY-GATE2` 约束、
+ * 以及两条对应的反向用例一起删掉 —— 白名单回到只有 `gate0`。
+ */
+const DEPLOY_BRANCH_ALLOWLIST: readonly string[] = ["gate0", "feat/gate2-core"];
 
 const WORKFLOW_ALLOWLIST: readonly string[] = [...TEST_ONLY_WORKFLOWS, DEPLOY_WORKFLOW];
 
@@ -307,7 +319,10 @@ function testOnlyWorkflowViolations(fileName: string, content: string): string[]
   return out.map((v) => `${fileName}: ${v}`);
 }
 
-/** 任务书对部署工作流提的 13 条，逐条对应下面的检查。 */
+/**
+ * 任务书对部署工作流提的 13 条，逐条对应下面的检查。
+ * Gate 2 联调期间另加第 14 条：分支与确认串必须一一对应（见第 4 / 13 条之后那一段）。
+ */
 function deployWorkflowViolations(fileName: string, content: string): string[] {
   const body = stripYamlComments(content);
   // 1 / 7 —— 只能手动触发，不许有 push / PR / 定时 / 链式触发
@@ -334,10 +349,25 @@ function deployWorkflowViolations(fileName: string, content: string): string[] {
     if (!/inputs\.confirm_deploy\s*==\s*'DEPLOY'/.test(gate)) {
       out.push("执行条件必须要求 inputs.confirm_deploy == 'DEPLOY'");
     }
+    // Gate 2 临时路径：分支与确认串必须**一一对应** —— 只钉分支不行，也不能把两个
+    // 确认串对调（gate0 ↔ DEPLOY，feat/gate2-core ↔ DEPLOY-GATE2）。
+    // （并入 gate0 之后删掉这一段。）
+    const gateOneLine = gate.replace(/\s+/g, " ");
+    if (!/refs\/heads\/gate0'\s*&&\s*inputs\.confirm_deploy\s*==\s*'DEPLOY'/.test(gateOneLine)) {
+      out.push("gate0 分支必须与确认串 'DEPLOY' 配对");
+    }
+    if (
+      gateOneLine.includes("refs/heads/feat/gate2-core") &&
+      !/refs\/heads\/feat\/gate2-core'\s*&&\s*inputs\.confirm_deploy\s*==\s*'DEPLOY-GATE2'/.test(
+        gateOneLine,
+      )
+    ) {
+      out.push("feat/gate2-core 分支必须与确认串 'DEPLOY-GATE2' 配对");
+    }
   }
   const branches = [...body.matchAll(/refs\/heads\/([A-Za-z0-9._/-]+)/g)].map((m) => m[1]!);
-  const otherBranches = [...new Set(branches)].filter((b) => b !== "gate0");
-  if (otherBranches.length > 0) out.push(`不得引用其它分支：${otherBranches.join(", ")}`);
+  const otherBranches = [...new Set(branches)].filter((b) => !DEPLOY_BRANCH_ALLOWLIST.includes(b));
+  if (otherBranches.length > 0) out.push(`不得引用未批准的分支：${otherBranches.join(", ")}`);
 
   // 5 / 6 —— 权限只能有 contents: read，不许 write、不许 id-token
   const perms = blockAfter(body, "permissions")
@@ -459,11 +489,51 @@ describe("安全 / 不开启任何自动部署", () => {
     }
   });
 
-  it("部署工作流同时满足 13 条约束（唯一被允许的例外）", () => {
+  it("部署工作流同时满足 14 条约束（唯一被允许的例外）", () => {
     expect(deployWorkflowViolations(DEPLOY_WORKFLOW, readWorkflow(DEPLOY_WORKFLOW))).toEqual([]);
     for (const name of TEST_ONLY_WORKFLOWS) {
       expect(workflowViolations(name, readWorkflow(name)), name).toEqual([]);
     }
+  });
+
+  it("部署 job 的执行条件真值表：只有两条人工确认路径能通过", () => {
+    // 上面那些是**文本级**检查。这一条把 if 条件真的拿来求值，证明"分支 + 确认串"
+    // 的组合语义：普通 push（inputs 为空）永远为假 —— 这是"push 不会部署"的根据，
+    // 而不只是"文件里没写 push 触发器"。
+    const gate = readWorkflow(DEPLOY_WORKFLOW)
+      .split("\n")
+      .filter((l) => /^\s*if:/.test(l))
+      .find((l) => /github\.ref/.test(l))!;
+    const expr = gate
+      .split("if:")[1]!
+      .trim()
+      .replace(/^\$\{\{/, "")
+      .replace(/\}\}$/, "")
+      .trim();
+    // 剥掉 ${{ }} 之后，GitHub 表达式与 JS 在 == / && / || / 括号上语义一致，
+    // 所以这里用 Function 求值（不为测试引一个表达式引擎，也不改被测文件）。
+    const evaluate = (ref: string, confirm: string | null): unknown =>
+      new Function("github", "inputs", `return (${expr});`)(
+        { ref },
+        confirm === null ? {} : { confirm_deploy: confirm },
+      );
+
+    expect(expr).toContain("github.ref");
+    expect(evaluate("refs/heads/gate0", "DEPLOY")).toBe(true);
+    expect(evaluate("refs/heads/feat/gate2-core", "DEPLOY-GATE2")).toBe(true);
+
+    // 分支与确认串必须一一配对，不能互换
+    expect(evaluate("refs/heads/gate0", "DEPLOY-GATE2")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-core", "DEPLOY")).toBe(false);
+
+    // push / 不填 / 瞎填 / 别的分支 一律不部署
+    expect(evaluate("refs/heads/gate0", null)).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-core", null)).toBe(false);
+    expect(evaluate("refs/heads/gate0", "")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-core", "deploy-gate2")).toBe(false);
+    expect(evaluate("refs/heads/main", "DEPLOY")).toBe(false);
+    expect(evaluate("refs/heads/main", "DEPLOY-GATE2")).toBe(false);
+    expect(evaluate("refs/heads/gate2-core", "DEPLOY-GATE2")).toBe(false);
   });
 
   it("工作流清单是明确的（新增一个工作流必须显式改这里）", () => {
@@ -506,7 +576,36 @@ describe("安全 / 部署工作流的篡改必须被拒绝", () => {
 
   it("把 gate0 改成别的分支 → 必须被拒绝", () => {
     const v = violationsAfter((s) => s.replaceAll("refs/heads/gate0", "refs/heads/main"));
-    expect(v.join("\n")).toMatch(/gate0|其它分支/);
+    expect(v.join("\n")).toMatch(/gate0|未批准的分支/);
+  });
+
+  it("把 Gate 2 临时路径挂到未批准的分支 → 必须被拒绝", () => {
+    const v = violationsAfter((s) =>
+      s.replaceAll("refs/heads/feat/gate2-core", "refs/heads/gate2-temp"),
+    );
+    expect(v.join("\n")).toMatch(/未批准的分支：gate2-temp/);
+  });
+
+  it("删掉 Gate 2 的确认串（只钉分支）→ 必须被拒绝", () => {
+    const v = violationsAfter((s) =>
+      s.replace(" && inputs.confirm_deploy == 'DEPLOY-GATE2'", ""),
+    );
+    expect(v.join("\n")).toMatch(/DEPLOY-GATE2/);
+  });
+
+  it("把两个分支的确认串对调 → 必须被拒绝", () => {
+    const v = violationsAfter((s) =>
+      s
+        .replace(
+          "'refs/heads/gate0' && inputs.confirm_deploy == 'DEPLOY'",
+          "'refs/heads/gate0' && inputs.confirm_deploy == 'DEPLOY-GATE2'",
+        )
+        .replace(
+          "'refs/heads/feat/gate2-core' && inputs.confirm_deploy == 'DEPLOY-GATE2'",
+          "'refs/heads/feat/gate2-core' && inputs.confirm_deploy == 'DEPLOY'",
+        ),
+    );
+    expect(v.join("\n")).toMatch(/配对/);
   });
 
   it("加上 push 自动触发 → 必须被拒绝", () => {
