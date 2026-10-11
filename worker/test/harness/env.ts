@@ -60,6 +60,21 @@ export interface TestRig {
   phone: ShimDurableObjectNamespace;
   mcp: ShimDurableObjectNamespace;
   oauth: ShimDurableObjectNamespace;
+  /**
+   * 与 `DEVICE_TOKENS` 同源的凭据表（含**已撤销**条目，带明文 token）。
+   *
+   * ★ 集中审计问题 1：DO 现在要求 `/connect` 带"这次鉴权命中的凭据摘要"，
+   * 所以测试必须能算出那个摘要 —— 明文 token 只存在于测试里，这也正是
+   * 测试能推导指纹的原因。
+   */
+  credentials: TestCredential[];
+}
+
+export interface TestCredential {
+  deviceId: string;
+  token: string;
+  tokenSha256: string;
+  revokedAt: string | null;
 }
 
 export interface MakeRigOptions {
@@ -82,6 +97,8 @@ export interface MakeRigOptions {
 /** 组装一个"像生产 env"的对象，但三个 DO 绑定都指向 shim。 */
 export async function makeRig(options: MakeRigOptions = {}): Promise<TestRig> {
   resetConfigCache();
+
+  const credentials = await resolveCredentials(options);
 
   const phoneNsHolder: { ns: ShimDurableObjectNamespace | null } = { ns: null };
   const mcpNsHolder: { ns: ShimDurableObjectNamespace | null } = { ns: null };
@@ -129,7 +146,84 @@ export async function makeRig(options: MakeRigOptions = {}): Promise<TestRig> {
 
   // getter 每次都返回同一个实例，但 env 对象本身要保持稳定引用
   resetConfigCache();
-  return { env, phone, mcp, oauth };
+  return { env, phone, mcp, oauth, credentials };
+}
+
+/** 把 `MakeRigOptions.deviceTokens` 解析成带摘要的凭据表（含已撤销条目）。 */
+async function resolveCredentials(options: MakeRigOptions): Promise<TestCredential[]> {
+  if (options.deviceTokens === null) return [];
+  const list =
+    options.deviceTokens ??
+    [
+      { deviceId: TEST_DEVICE_ID, token: TEST_DEVICE_TOKEN, label: "local mock phone" },
+      { deviceId: TEST_DEVICE_ID_2, token: TEST_DEVICE_TOKEN_2, label: "local mock phone 2" },
+    ];
+  return Promise.all(
+    list.map(async (d) => ({
+      deviceId: d.deviceId,
+      token: d.token,
+      tokenSha256: await sha256Hex(d.token),
+      revokedAt: d.revokedAt ?? null,
+    })),
+  );
+}
+
+/** 这台设备**当前有效**的第一条凭据指纹；没有有效凭据时返回 null。 */
+export function activeFingerprint(rig: TestRig, deviceId: string): string | null {
+  return rig.credentials.find((c) => c.deviceId === deviceId && c.revokedAt === null)?.tokenSha256 ?? null;
+}
+
+/** 指定明文令牌对应的指纹（无论它是否已被撤销）；不在表里则返回 null。 */
+export function fingerprintOf(rig: TestRig, deviceId: string, token: string): string | null {
+  return rig.credentials.find((c) => c.deviceId === deviceId && c.token === token)?.tokenSha256 ?? null;
+}
+
+/**
+ * ★ 集中审计问题 1/2：在**同一个 rig 里**改写凭据表（并让配置缓存失效）。
+ *
+ * 为什么必须有它：这两条修复的本质都是"状态**转换**"，而静态布景只能测转换
+ * 前后的某一边。有了它才能断言：
+ *   · 一条连接建立之后凭据被撤销 → 同一个 DO 实例上的下一个请求立刻 403；
+ *   · 撤销之后在配置里补上新凭据 → **重新授权**真的能恢复服务（粘性布尔做不到）；
+ *   · 凭据轮换只终结旧凭据的连接，用新凭据重建的连接不受影响。
+ *
+ * 写入的是 `env.DEVICE_TOKENS`（与 `makeRig` 同一条路径）。`DEVICE_TOKENS` 在
+ * `loadConfig` 的缓存键里，所以 `resetConfigCache()` 之后新的判定立刻生效。
+ */
+export async function setCredentials(
+  rig: TestRig,
+  list: Array<{ deviceId: string; token: string; label?: string; revokedAt?: string | null }>,
+): Promise<void> {
+  rig.credentials = await resolveCredentials({ deviceTokens: list });
+  (rig.env as unknown as { DEVICE_TOKENS?: string }).DEVICE_TOKENS = JSON.stringify(
+    rig.credentials.map((c, index) => ({
+      deviceId: c.deviceId,
+      tokenSha256: c.tokenSha256,
+      label: list[index]?.label ?? "test",
+      createdAt: "2026-01-01T00:00:00Z",
+      revokedAt: c.revokedAt,
+    })),
+  );
+  resetConfigCache();
+}
+
+/**
+ * `/connect` 内部凭据头的取值。
+ *
+ * 三态语义（这是测试里表达"伪造/轮换/缺头"三种布景的唯一入口）：
+ *   · `undefined`（默认）→ 带上该设备当前**有效**凭据的指纹；
+ *   · 明确的字符串      → 带这一条（例如上一轮被轮换掉的旧指纹）；
+ *   · `null`            → **故意不带**，用于断言 DO 的
+ *     `500 missing_internal_credential_header`。
+ */
+function connectCredentialHeader(
+  rig: TestRig,
+  deviceId: string,
+  opts: { credentialFingerprint?: string | null },
+): string | null {
+  if (opts.credentialFingerprint === null) return null;
+  if (typeof opts.credentialFingerprint === "string") return opts.credentialFingerprint;
+  return activeFingerprint(rig, deviceId);
 }
 
 async function deviceTokensJson(options: MakeRigOptions): Promise<Record<string, string>> {
@@ -181,11 +275,17 @@ export function phoneUpgradeRequest(
  * 那种响应里根本没有 socket，任何 `response.webSocket.accept()` 都会崩。
  * 需要断言"这台设备被拒绝了"时用这个。
  */
-export async function upgradePhoneDirect(rig: TestRig, deviceId: string): Promise<Response> {
+export async function upgradePhoneDirect(
+  rig: TestRig,
+  deviceId: string,
+  opts: { credentialFingerprint?: string | null } = {},
+): Promise<Response> {
   const headers = new Headers();
   headers.set("Upgrade", "websocket");
   headers.set("Connection", "Upgrade");
   headers.set("X-Phone-Session-Device", deviceId);
+  const credential = connectCredentialHeader(rig, deviceId, opts);
+  if (credential !== null) headers.set("X-Phone-Session-Credential", credential);
   return await rig.phone.fetchOn(
     deviceId,
     new Request(`https://phone-session.internal${PHONE_ROUTES.connect}`, { method: "GET", headers }),
@@ -206,11 +306,17 @@ export interface PhoneConnection {
  * 注意：这里跳过的是 Worker 的 `handlePhoneUpgrade`（那部分由 index.test.ts 单独覆盖），
  * 打到 DO 的请求仍然带着内部标记头 —— 与生产路径一致。
  */
-export async function connectPhoneDirect(rig: TestRig, deviceId: string): Promise<PhoneConnection> {
+export async function connectPhoneDirect(
+  rig: TestRig,
+  deviceId: string,
+  opts: { credentialFingerprint?: string | null } = {},
+): Promise<PhoneConnection> {
   const headers = new Headers();
   headers.set("Upgrade", "websocket");
   headers.set("Connection", "Upgrade");
   headers.set("X-Phone-Session-Device", deviceId);
+  const credential = connectCredentialHeader(rig, deviceId, opts);
+  if (credential !== null) headers.set("X-Phone-Session-Credential", credential);
 
   const forwarded = new Request(`https://phone-session.internal${PHONE_ROUTES.connect}`, {
     method: "GET",
@@ -273,11 +379,16 @@ export async function revokePhoneDirect(
   rig: TestRig,
   deviceId: string,
   reason = "test_revoke",
+  opts: { credentialId?: string | null } = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const request = new Request(`https://phone-session.internal${PHONE_ROUTES.revoke}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ deviceId, reason }),
+    body: JSON.stringify({
+      deviceId,
+      reason,
+      ...(opts.credentialId !== undefined ? { credentialId: opts.credentialId } : {}),
+    }),
   });
   const response = await rig.phone.fetchOn(deviceId, request);
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
@@ -320,12 +431,16 @@ export async function connectMockPhone(
     skipPingIndexes?: number[];
     /** Gate 2：这台手机对 tool_request 的行为（默认 normal）。 */
     toolBehavior?: ToolBehavior;
+    /** 见 [connectCredentialHeader]：默认带当前有效凭据指纹，`null` = 故意不带。 */
+    credentialFingerprint?: string | null;
   } = {},
 ): Promise<ConnectedPhone> {
   const headers = new Headers();
   headers.set("Upgrade", "websocket");
   headers.set("Connection", "Upgrade");
   headers.set("X-Phone-Session-Device", deviceId);
+  const credential = connectCredentialHeader(rig, deviceId, opts);
+  if (credential !== null) headers.set("X-Phone-Session-Credential", credential);
 
   const response = await rig.phone.fetchOn(
     deviceId,

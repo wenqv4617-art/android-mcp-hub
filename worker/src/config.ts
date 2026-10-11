@@ -370,6 +370,46 @@ export function isDeviceRevoked(config: AppConfig, deviceId: string): boolean {
 }
 
 /**
+ * 凭据指纹：`tokenSha256` 就是凭据在整条链路上的稳定标识。
+ *
+ * 明文令牌从不落盘，也不进连接附件 —— 连接上只钉这个指纹。
+ */
+export function credentialFingerprint(credential: DeviceCredential): string {
+  return credential.tokenSha256;
+}
+
+/** 这台设备配置过的**所有**凭据（含已撤销的）。 */
+export function allCredentialsFor(config: AppConfig, deviceId: string): DeviceCredential[] {
+  return config.credentials.filter((c) => c.deviceId === deviceId);
+}
+
+/**
+ * 按指纹找一条凭据（**含已撤销的**）。
+ *
+ * 刻意返回"已撤销的那条"而不是 undefined：调用方必须能区分
+ * "这条凭据被撤销了"（轮换/吊销）与"这条凭据从来没见过"（伪造）——
+ * 前者要主动去关掉那条旧连接，后者什么都不用做。
+ */
+export function findCredential(
+  config: AppConfig,
+  deviceId: string,
+  fingerprint: string,
+): DeviceCredential | undefined {
+  return allCredentialsFor(config, deviceId).find((c) => c.tokenSha256 === fingerprint);
+}
+
+/**
+ * 这条凭据此刻是否仍然有效（存在、且未被撤销）。
+ *
+ * ★ 集中审计问题 1 的判据：连接与在途请求都必须回到**当前配置**来问这个问题，
+ *   而不是问"这条连接建立时它有效吗"。轮换之后前者立即变 false，后者永远是 true。
+ */
+export function isCredentialActive(config: AppConfig, deviceId: string, fingerprint: string): boolean {
+  const credential = findCredential(config, deviceId, fingerprint);
+  return credential !== undefined && (credential.revokedAt === null || credential.revokedAt === undefined);
+}
+
+/**
  * 推断本次设备操作该发给哪台设备。
  *
  * 优先级：显式参数 > DEFAULT_DEVICE_ID > 唯一一台**有效**的设备。

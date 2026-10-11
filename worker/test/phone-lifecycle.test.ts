@@ -30,14 +30,18 @@
 import { describe, expect, it } from "vitest";
 import {
   connectMockPhone,
+  fingerprintOf,
   framesOfType,
   makeRig,
   phoneStatus,
   pingPhoneDirect,
   revokePhoneDirect,
+  setCredentials,
   settle,
   TEST_DEVICE_ID,
   TEST_DEVICE_ID_2,
+  TEST_DEVICE_TOKEN,
+  TEST_DEVICE_TOKEN_2,
   toolPhoneDirect,
   upgradePhoneDirect,
 } from "./harness/env";
@@ -54,32 +58,81 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+type Rig = Awaited<ReturnType<typeof makeRig>>;
+
+/**
+ * ★ 集中审计问题 1/2 之后，"撤销"这件事有两个**必须分开**的层面：
+ *
+ *   1. **门禁**（配置层）：这台设备此刻还有没有有效凭据。判据是当前配置，
+ *      所以它可逆 —— 补一条新凭据就是重新授权。
+ *   2. **推送**（DO 层）：`/internal/phone/revoke` 通知。它负责立刻终结已建立的
+ *      连接、结算在途请求、换代次、记审计。它**不是**门禁（否则就成了那个
+ *      永远回不去的粘性布尔）。
+ *
+ * 生产链路上两者总是同时发生（Worker 只有在配置说"已撤销"时才会推），所以
+ * 测试要断言真实语义就必须把两边都摆出来 —— 只推配置不改，或只改配置不推，
+ * 都只是这套机制的一半。
+ */
+async function revokeInConfig(rig: Rig): Promise<void> {
+  await setCredentials(rig, [
+    { deviceId: DEVICE, token: TEST_DEVICE_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+    { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 //  A1 凭据撤销
 // ---------------------------------------------------------------------------
 
 describe("Gate 1.5 / A1 凭据撤销", () => {
-  it("撤销之后新升级被拒：DO 记住撤销状态，403 device_revoked，且计入 upgradesRejected", async () => {
-    const rig = await makeRig();
-    const first = await connectMockPhone(rig, DEVICE);
-    expect(first.response.status).toBe(101);
-
-    const revoked = await revokePhoneDirect(rig, DEVICE);
-    expect(revoked.status).toBe(200);
-    expect(revoked.body["ok"]).toBe(true);
-    expect(revoked.body["revoked"]).toBe(true);
+  it("配置里没有有效凭据 ⇒ 新升级被拒：403 device_revoked，且计入 upgradesRejected", async () => {
+    const rig = await makeRig({
+      deviceTokens: [
+        { deviceId: DEVICE, token: TEST_DEVICE_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+        { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+      ],
+    });
 
     // 撤销之后同一台设备再升级 —— 必须被 DO 自己挡掉，而不是靠 Worker 的 401。
     // （用 `upgradePhoneDirect`：被拒的响应里根本没有 socket，摸 webSocket 会崩。）
-    const second = await upgradePhoneDirect(rig, DEVICE);
+    //
+    // 显式带上那条**已撤销**凭据的指纹：这正是手机还在用旧令牌重连的形状。
+    const second = await upgradePhoneDirect(rig, DEVICE, {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, TEST_DEVICE_TOKEN),
+    });
     expect(second.status).toBe(403);
     const body = (await second.json()) as Record<string, unknown>;
     expect(body["error"]).toBe("device_revoked");
 
     const status = await phoneStatus(rig, DEVICE);
     const metrics = status["metrics"] as Record<string, number>;
-    expect(metrics["revocationsApplied"]).toBe(1);
     expect(metrics["upgradesRejected"]).toBe(1);
+    // ⚠ 阴性断言：配置态的撤销**不经过**撤销推送，所以 revocationsApplied 必须
+    //    还是 0。"谁改了这个数"要能分得清。
+    expect(metrics["revocationsApplied"]).toBe(0);
+  });
+
+  it("升级请求不带内部凭据指纹时 fail-closed：500，绝不建立无法复核来源的长连接", async () => {
+    const rig = await makeRig();
+    const response = await upgradePhoneDirect(rig, DEVICE, { credentialFingerprint: null });
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body["error"]).toBe("missing_internal_credential_header");
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["socket_open"]).toBe(false);
+    expect((status["metrics"] as Record<string, number>)["upgradesRejected"]).toBe(1);
+  });
+
+  it("拿另一台设备的凭据指纹来连这台设备：403 credential_revoked（跨设备冒名也不行）", async () => {
+    const rig = await makeRig();
+    const response = await upgradePhoneDirect(rig, DEVICE, {
+      credentialFingerprint: fingerprintOf(rig, OTHER_DEVICE, TEST_DEVICE_TOKEN_2),
+    });
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body["error"]).toBe("credential_revoked");
+    expect((await phoneStatus(rig, DEVICE))["socket_open"]).toBe(false);
   });
 
   it("撤销会主动关掉**已建立**的连接（D-1 的核心）：先收到一条 error，再以 4002 关闭", async () => {
@@ -87,7 +140,12 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     const { socket } = await connectMockPhone(rig, DEVICE);
     expect(socket.readyState).toBe(1);
 
-    await revokePhoneDirect(rig, DEVICE);
+    // 生产顺序：Worker 先在配置层看到"这台设备没有有效凭据了"，然后把撤销推给 DO。
+    await revokeInConfig(rig);
+    const revoked = await revokePhoneDirect(rig, DEVICE);
+    expect(revoked.status).toBe(200);
+    expect(revoked.body["ok"]).toBe(true);
+    expect(revoked.body["revoked"]).toBe(true);
     await settle();
 
     // 顺序是有意的：先让手机知道原因，再关。反过来的话手机只会看到一个
@@ -102,7 +160,11 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     // 撤销之后连"在线"都不该报。
     const status = await phoneStatus(rig, DEVICE);
     expect(status["connected"]).toBe(false);
+    expect(status["socket_open"]).toBe(false);
+    // ★ 连接已经被关掉了，但 status 仍然要说得出"这台设备现在被撤销了" ——
+    //   判据是配置（设备身份退回最近一次建连的那台），不是"还有没有 socket"。
     expect(status["revoked"]).toBe(true);
+    expect((status["revocation"] as Record<string, unknown>)["scope"]).toBe("device");
   });
 
   it("在途请求被明确结算为 device_revoked，绝不虚假成功，pending 与镜像一起清零", async () => {
@@ -135,10 +197,15 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     expect((after["metrics"] as Record<string, number>)["timeouts"]).toBe(0);
   });
 
-  it("撤销之后的新请求被拒（403 + requestsRejectedRevoked），不会落到那台已死的连接上", async () => {
+  it("撤销之后的新请求被拒（403 + requestsRejectedRevoked）：判据是**当前配置**，不是粘性布尔", async () => {
     const rig = await makeRig();
-    await connectMockPhone(rig, DEVICE);
-    await revokePhoneDirect(rig, DEVICE);
+    const { socket } = await connectMockPhone(rig, DEVICE);
+    expect(socket.readyState).toBe(1);
+
+    // ★ 这是集中审计问题 1 的核心断言：连接建立**之后**配置里那条凭据被撤销。
+    //   旧实现只看一个落盘的布尔值，这条请求会**成功**发到已经不该被服务的手机；
+    //   现在请求入口每次都重新读配置，当场拒绝，并把那条连接一并终结。
+    await revokeInConfig(rig);
 
     const outcome = await pingPhoneDirect(rig, DEVICE, { timeoutMs: 1_000 });
     expect(outcome.ok).toBe(false);
@@ -146,9 +213,21 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     // 必须报"被撤销"而不是"离线"：把撤销藏成 phone_offline 会让运维
     // 一直去查网络，永远查不到真正的原因。
     expect(outcome.error.code).toBe("device_revoked");
+    expect(outcome.error.message).toContain("撤销");
+
+    await settle();
+    // 请求路径发现失效之后必须**顺手终结**那条连接，而不是留一条能继续
+    // 收发帧的僵尸连接。
+    expect(socket.readyState).toBe(3);
+    expect(socket.closeInfo?.code).toBe(4002);
 
     const status = await phoneStatus(rig, DEVICE);
-    expect((status["metrics"] as Record<string, number>)["requestsRejectedRevoked"]).toBe(1);
+    const metrics = status["metrics"] as Record<string, number>;
+    expect(metrics["requestsRejectedRevoked"]).toBe(1);
+    // 明文令牌之外的阴性断言：它**没有**被发出去过（`pingsSent` 不涨），
+    // 也没有被当成超时结算。
+    expect(metrics["pingsSent"]).toBe(0);
+    expect(metrics["timeouts"]).toBe(0);
   });
 
   it("撤销一台设备**不影响**另一台：它的连接、状态、请求全部照常", async () => {
@@ -174,9 +253,10 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
     expect(outcome.ok).toBe(true);
   });
 
-  it("撤销状态落盘、跨对象重建仍然生效（不依赖 DO 自动感知 Secret 变化）", async () => {
+  it("撤销状态跨对象重建仍然生效：门禁来自配置，审计记录落盘", async () => {
     const rig = await makeRig();
     await connectMockPhone(rig, DEVICE);
+    await revokeInConfig(rig);
     await revokePhoneDirect(rig, DEVICE);
     expect(rig.phone.constructionCount(DEVICE)).toBe(1);
 
@@ -186,26 +266,35 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
 
     const status = await phoneStatus(rig, DEVICE);
     expect(rig.phone.constructionCount(DEVICE)).toBe(2);
+    // ★ 两条独立的证据：门禁（配置里没有有效凭据）与审计（撤销记录从存储里读回来）。
     expect(status["revoked"]).toBe(true);
+    expect((status["revocation"] as Record<string, unknown>)["scope"]).toBe("device");
 
-    const reconnect = await upgradePhoneDirect(rig, DEVICE);
+    const reconnect = await upgradePhoneDirect(rig, DEVICE, {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, TEST_DEVICE_TOKEN),
+    });
     expect(reconnect.status).toBe(403);
   });
 
   it("testing/reset **不能**清掉撤销状态（否则它就是一条绕过撤销的后门）", async () => {
     const rig = await makeRig();
     await connectMockPhone(rig, DEVICE);
+    await revokeInConfig(rig);
     await revokePhoneDirect(rig, DEVICE);
 
     const reset = await rig.phone.fetchOn(DEVICE, new Request(`https://phone-session.internal${"/internal/phone/testing/reset"}`, { method: "POST" }));
     expect(reset.status).toBe(200);
     const body = (await reset.json()) as Record<string, unknown>;
     expect(body["revoked"]).toBe(true);
+    expect((body["revocation"] as Record<string, unknown>)["scope"]).toBe("device");
 
     const status = await phoneStatus(rig, DEVICE);
     expect(status["revoked"]).toBe(true);
+    expect(status["revocation"]).not.toBeNull();
 
-    const reconnect = await upgradePhoneDirect(rig, DEVICE);
+    const reconnect = await upgradePhoneDirect(rig, DEVICE, {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, TEST_DEVICE_TOKEN),
+    });
     expect(reconnect.status).toBe(403);
   });
 
@@ -281,6 +370,142 @@ describe("Gate 1.5 / A1 凭据撤销", () => {
 
     const status = await phoneStatus(rig, DEVICE);
     expect(status["revoked"]).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  A1 · 集中审计问题 2：撤销必须**可逆**（重新授权），且轮换不得误伤
+// ---------------------------------------------------------------------------
+
+describe("Gate 1.5 / A1 撤销是可逆的：重新授权转换与凭据轮换", () => {
+  it("撤销之后补一条新凭据 ⇒ 重新授权：能连上、能服务请求，并把撤销记录结算掉", async () => {
+    const rig = await makeRig();
+    const first = await connectMockPhone(rig, DEVICE);
+    const oldFingerprint = fingerprintOf(rig, DEVICE, TEST_DEVICE_TOKEN)!;
+
+    // 完整的撤销：配置层（门禁）+ 推送（终结连接与在途请求）。
+    await revokeInConfig(rig);
+    await revokePhoneDirect(rig, DEVICE);
+    await settle();
+    expect(first.socket.readyState).toBe(3);
+    expect((await phoneStatus(rig, DEVICE))["revoked"]).toBe(true);
+
+    // ★ 运维给这台设备配了一条**新**令牌 —— 这就是"同一把设备的新凭据"，
+    //   也是"撤销不是永久死刑"的全部依据。
+    const NEW_TOKEN = "AUDIT-FAKE-NEW-DEVICE-TOKEN";
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: NEW_TOKEN },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+
+    const reconnected = await connectMockPhone(rig, DEVICE, "normal", {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, NEW_TOKEN),
+    });
+    expect(reconnected.response.status).toBe(101);
+
+    // 撤销记录必须被**明确结算**：留着一张"这设备被撤销过"的旧记录，
+    // 就是把人送回审计指控的那个"粘性布尔"。
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["revoked"]).toBe(false);
+    expect(status["revocation"]).toBeNull();
+    const m = status["metrics"] as Record<string, number>;
+    expect(m["reauthorizationsApplied"]).toBe(1);
+
+    // 重新授权之后，请求必须真的能通 —— 只改状态不恢复服务等于没修。
+    const outcome = await pingPhoneDirect(rig, DEVICE, { timeoutMs: 2_000 });
+    expect(outcome.ok).toBe(true);
+
+    // 旧指纹（已撤销的那条）仍然进不来：可逆不等于旧凭据复活。
+    const withOld = await upgradePhoneDirect(rig, DEVICE, { credentialFingerprint: oldFingerprint });
+    expect(withOld.status).toBe(403);
+    const body = (await withOld.json()) as Record<string, unknown>;
+    expect(body["error"]).toBe("credential_revoked");
+  });
+
+  it("凭据轮换：旧凭据的连接被终结，新凭据的连接照常服务，迟到通知**不会**误伤新连接", async () => {
+    const rig = await makeRig();
+    const OLD_TOKEN = TEST_DEVICE_TOKEN;
+    const NEW_TOKEN = "AUDIT-FAKE-ROTATED-TOKEN";
+
+    await connectMockPhone(rig, DEVICE);
+    const oldFingerprint = fingerprintOf(rig, DEVICE, OLD_TOKEN)!;
+
+    // 轮换：旧凭据被标撤销，新凭据加进来。设备**没有**被撤销。
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: OLD_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+      { deviceId: DEVICE, token: NEW_TOKEN },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+
+    // 一台还在用旧令牌的手机尝试重连时，Worker 会推一条**凭据级**撤销。
+    const rotated = await revokePhoneDirect(rig, DEVICE, "upgrade_with_rotated_credential", {
+      credentialId: oldFingerprint,
+    });
+    expect(rotated.status).toBe(200);
+    expect(rotated.body["scope"]).toBe("credential");
+    expect(rotated.body["closed"]).toBe(1);
+    await settle();
+
+    // 新凭据立刻就能连上，并且**设备级**状态是"没被撤销" ——
+    // 轮换不是撤销，把它算成撤销会让所有轮换都变成一次故障。
+    const fresh = await connectMockPhone(rig, DEVICE, "normal", {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, NEW_TOKEN),
+    });
+    expect(fresh.response.status).toBe(101);
+
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["revoked"]).toBe(false);
+    expect(status["bound_credential_active"]).toBe(true);
+
+    // ★ 要害：一条针对**旧**凭据的迟到/重复通知又来了。
+    //   它必须只影响那条早就不存在的连接 —— 既不能关掉新连接，也不能把
+    //   新连接上的在途请求判死（否则撤销通知本身就是一条 DoS 路径）。
+    const inFlight = pingPhoneDirect(rig, DEVICE, { requestId: "req-after-rotated", timeoutMs: 3_000 });
+    const late = await revokePhoneDirect(rig, DEVICE, "late_duplicate_of_rotation", {
+      credentialId: oldFingerprint,
+    });
+    expect(late.status).toBe(200);
+    expect(late.body["closed"]).toBe(0);
+
+    const outcome = await inFlight;
+    expect(outcome.ok).toBe(true);
+    expect(fresh.socket.readyState).toBe(1);
+    expect((await phoneStatus(rig, DEVICE))["connected"]).toBe(true);
+
+    // 新连接这一刻仍然是"用有效凭据开的"，所以它不该被拒绝服务。
+    const after = await pingPhoneDirect(rig, DEVICE, { requestId: "req-after-late", timeoutMs: 3_000 });
+    expect(after.ok).toBe(true);
+  });
+
+  it("拿被轮换掉的旧凭据去连：403 credential_revoked（而不是 device_revoked）", async () => {
+    const rig = await makeRig();
+    const OLD_TOKEN = TEST_DEVICE_TOKEN;
+    const NEW_TOKEN = "AUDIT-FAKE-ROTATED-TOKEN-2";
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: OLD_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+      { deviceId: DEVICE, token: NEW_TOKEN },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+
+    // 两种拒绝必须分得清：设备级 = "这台设备没了"，凭据级 = "这把钥匙换掉了"。
+    // 后者如果报成前者，运维会去查错方向。
+    const response = await upgradePhoneDirect(rig, DEVICE, {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, OLD_TOKEN),
+    });
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body["error"]).toBe("credential_revoked");
+
+    // 而设备级撤销是**另一种**形状。
+    await setCredentials(rig, [
+      { deviceId: DEVICE, token: OLD_TOKEN, revokedAt: "2026-01-02T00:00:00Z" },
+      { deviceId: OTHER_DEVICE, token: TEST_DEVICE_TOKEN_2 },
+    ]);
+    const deviceWide = await upgradePhoneDirect(rig, DEVICE, {
+      credentialFingerprint: fingerprintOf(rig, DEVICE, OLD_TOKEN),
+    });
+    expect(deviceWide.status).toBe(403);
+    expect(((await deviceWide.json()) as Record<string, unknown>)["error"]).toBe("device_revoked");
   });
 });
 
@@ -536,12 +761,22 @@ describe("Gate 1.5 / A2 工具通道上的存活判定", () => {
   it("撤销后的 tool_request 被拒为 device_revoked（不是 phone_offline）", async () => {
     const rig = await makeRig();
     await connectMockPhone(rig, DEVICE);
-    await revokePhoneDirect(rig, DEVICE);
+
+    // 只改配置、**不推**撤销通知：连接此刻还开着。这是集中审计问题 1 最尖锐的
+    // 形状 —— 旧实现只看落盘的粘性布尔值（这时还是 false），于是会把这个工具
+    // 调用原封不动转发给一台已经不该被服务的手机。
+    await revokeInConfig(rig);
 
     const outcome = await toolPhoneDirect(rig, DEVICE, { toolName: "battery_get_status", timeoutMs: 1_000 });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) throw new Error("不该成功");
+    // 必须报"被撤销"：报 phone_offline 会把人送去查网络，而设备其实好好连着。
     expect(outcome.error.code).toBe("device_revoked");
+
+    // 阴性断言：既没转发给手机，也没留下待结算的请求。
+    const m = (await phoneStatus(rig, DEVICE))["metrics"] as Record<string, number>;
+    expect(m["requestsRejectedRevoked"]).toBe(1);
+    expect(m["toolRequestsSent"]).toBe(0);
   });
 });
 

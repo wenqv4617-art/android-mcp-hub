@@ -141,17 +141,25 @@ export async function callPhoneToolViaDurableObject(
  * 这里是**尽力而为**：撤销的最终保证来自"每次工具调用都重新解析授权"，
  * 而不是来自这条推送（见 `worker/src/index.ts` 的 upgrade 分支注释）。
  */
+/**
+ * 通知 DO "这台设备（或它的某一条凭据）已被撤销"。
+ *
+ * ★ 集中审计问题 1/2：`credentialId` 是可选**范围**参数 —— 传了就只终结那条
+ * 凭据开出来的连接（凭据轮换的旧令牌），不传就是整台设备级撤销。DO 侧靠
+ * 它区分"设备级"与"凭据级"，范围信息只走 Worker→DO 的内部通道，不来自公网。
+ */
 export async function revokePhoneDeviceViaDurableObject(
   env: Env,
   deviceId: string,
   reason: string,
+  credentialId?: string,
 ): Promise<{ ok: boolean; status: number }> {
   const ns = env.PHONE_SESSION as unknown as PhoneSessionNamespace;
   const stub = ns.get(ns.idFromName(deviceId));
   const request = new Request(`https://phone-session.internal${ROUTE_REVOKE}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ deviceId, reason }),
+    body: JSON.stringify({ deviceId, reason, ...(credentialId !== undefined ? { credentialId } : {}) }),
   });
   const response = await stub.fetch(request);
   return { ok: response.ok, status: response.status };

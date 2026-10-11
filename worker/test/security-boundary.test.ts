@@ -16,14 +16,16 @@
 //  这里新增的是四条**只在真实流程里才成立**的断言：
 //
 //    D4-a  同一个 rig 里"先连上、再撤销"：**新**连接被拒（撤销确实生效）
-//    D4-b  同一个 rig 里"先连上、再撤销"：**已有**连接仍然存活，且**仍能接收新请求**
-//          —— 这是阶段 0 报告里的 R-1，此前只有静态阅读结论，现在是一条会失败的测试
+//    D4-b  同一个 rig 里"先连上、再撤销"：**已有**连接被就地终结，且新请求被明确拒绝
+//          —— 阶段 0 报告把"已有连接照常服务"记为设计缺口 R-1。集中审计问题 1
+//             之后该缺口已关闭，所以这条用例从"记录缺口"改成"守住修复"。
 //    D5    半开连接（替身近似）：服务端仍报 connected，phone_ping 拖满 timeout
 //          才失败（不是快速 phone_offline），pending 清理干净，无虚假成功
 //    D6-f  认证失败的**真实请求流程**里，被呈递的令牌不得进入日志
 //
-//  ⚠ D4-b 的测试名与注释都在描述**当前实现的既有行为**，不是认可它。
-//     任务书明确禁止在阶段 1A 实现撤销机制，所以这里只做记录 + 报告。
+//  ⚠ D4-b 的形状（先明确拒绝、再以 4002 终结）是修复后的**契约**，不是可选项：
+//     撤而不关会留下一条还能继续收发帧的僵尸连接；关而不拒会让调用方以为
+//     "只是网络抖了一下"，于是无限重试。
 //
 //  ⚠ 跑在 Node 上的 Workers 运行时替身里，不是真实 workerd。见 TEST_REPORT.md。
 // ============================================================================
@@ -93,7 +95,7 @@ describe("安全边界 / D4 连接建立之后才撤销凭据", () => {
     expect(after.headers.get("WWW-Authenticate")).toContain("Bearer");
   });
 
-  it("D4-b【已知设计缺口 R-1】同一个 rig 里先连上再撤销：已有连接**不会**被断开，且仍能接收新请求", async () => {
+  it("D4-b【R-1 缺口已关闭】同一个 rig 里先连上再撤销：已有连接被 4002 终结，且新请求被明确拒绝", async () => {
     const rig = await makeRig();
 
     // 先按正常流程连上一台手机（走 DO 的升级路径，和真实链路一致）。
@@ -101,33 +103,42 @@ describe("安全边界 / D4 连接建立之后才撤销凭据", () => {
     expect((await phoneStatus(rig, DEVICE))["connected"]).toBe(true);
 
     // 手机上还有**在途**请求时撤销凭据 —— 最坏情况：撤销那一刻正在等一个 pong。
+    // 在途请求按原样结算：撤销不是"把已经答应的回答撕掉"，它只禁止**新**动作。
     const inFlight = pingPhoneDirect(rig, DEVICE, { requestId: "req-revoke-inflight", timeoutMs: 2_000 });
     await settle();
 
     await revokeDeviceCredential(rig, DEVICE, TOKEN);
 
-    // 1) 在途请求照常结算（撤销不会把它打断，也没有任何"撤销导致的失败"语义）。
+    // 1) 在途请求照常结算。
     const inFlightOutcome = await inFlight;
     expect(inFlightOutcome.ok).toBe(true);
 
-    // 2) 连接本身仍然活着 —— 服务端侧完全没有"撤销"这个输入。
-    const status = await phoneStatus(rig, DEVICE);
-    expect(status["connected"]).toBe(true);
-    expect(socket.readyState).toBe(1);
-
-    // 3) **要害**：撤销之后**新**发起的 phone_ping 依然能成功。
-    //    工厂重置、手机丢失、凭据泄漏这三种场景下，这正是必须被堵住的口子。
+    // 2) ★ 要害：撤销之后**新**发起的 phone_ping 必须失败，而且是明确的
+    //    `device_revoked` —— 不是超时、不是 phone_offline。
+    //    工厂重置、手机丢失、凭据泄漏这三种场景下，这正是必须堵住的口子（旧行为是照常成功）。
     const afterRevoke = await pingPhoneDirect(rig, DEVICE, { requestId: "req-revoke-after", timeoutMs: 2_000 });
-    expect(afterRevoke.ok).toBe(true);
+    expect(afterRevoke.ok).toBe(false);
+    if (afterRevoke.ok) throw new Error("撤销之后的请求不该成功");
+    expect(afterRevoke.error.code).toBe("device_revoked");
 
-    // 4) 同一时刻，Worker 层对新连接已经是 401 —— 两层判断不一致，这就是缺口本身。
+    // 3) 拒绝的同时那条连接必须被终结 —— 否则留下的是一条"还能主动上传"的僵尸连接。
+    await settle();
+    expect(socket.readyState).toBe(3);
+    expect(socket.closeInfo?.code).toBe(4002);
+
+    // 4) 两层判断现在**一致**：Worker 层对新连接 401，DO 层对已有连接 4002 + 拒新请求。
+    const status = await phoneStatus(rig, DEVICE);
+    expect(status["connected"]).toBe(false);
+    expect(status["revoked"]).toBe(true);
+
     const newUpgrade = await call(rig, phoneUpgradeRequest(DEVICE, TOKEN));
     expect(newUpgrade.status).toBe(401);
     await newUpgrade.body?.cancel();
 
     // 5) 计数变化留痕，方便报告核对。
-    const m = metricsOf(await phoneStatus(rig, DEVICE));
+    const m = metricsOf(status);
     expect(m["authFailures"]).toBe(0); // DO 自己不做鉴权，所以这里恒为 0
+    expect(m["requestsRejectedRevoked"]).toBe(1);
   });
 });
 

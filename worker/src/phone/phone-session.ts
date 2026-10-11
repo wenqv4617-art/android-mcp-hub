@@ -30,7 +30,14 @@
 //  也会被代次检查挡住。
 // ============================================================================
 
-import { loadConfig, PHONE_LINK_PROTOCOL_VERSION, type RuntimeConfig } from "../config";
+import {
+  isCredentialActive,
+  isDeviceRevoked,
+  loadConfig,
+  PHONE_LINK_PROTOCOL_VERSION,
+  type AppConfig,
+  type RuntimeConfig,
+} from "../config";
 import type { Env } from "../env";
 import { logEvent } from "../util/log";
 import {
@@ -177,6 +184,19 @@ export interface PhoneSessionMetrics {
   lastPhoneActivityAt: number | null;
   /** Gate 2：最后一次收到合法 tool_result 的时刻。 */
   lastToolResultAt: number | null;
+  /**
+   * ★ 集中审计问题 1：因为"这条连接绑定的凭据已经失效"而被拒的请求数。
+   *
+   * 与 `requestsRejectedRevoked`（设备级撤销）分开计数：轮换与吊销是两种不同的
+   * 安全事件，合成一个数会让"到底发生过哪一种"变模糊。
+   */
+  credentialRejections: number;
+  /**
+   * ★ 集中审计问题 2：一次**受保护的重新授权** —— 撤销之后又用当前有效凭据
+   * 成功建立了连接。这个数 > 0 就是"撤销不是永久封印，但必须重新出示有效凭据"
+   * 的直接证据。
+   */
+  reauthorizationsApplied: number;
 }
 
 function emptyMetrics(): PhoneSessionMetrics {
@@ -216,6 +236,8 @@ function emptyMetrics(): PhoneSessionMetrics {
     lastPongAt: null,
     lastPhoneActivityAt: null,
     lastToolResultAt: null,
+    credentialRejections: 0,
+    reauthorizationsApplied: 0,
   };
 }
 
@@ -249,14 +271,44 @@ interface PendingRequest extends StoredPending {
 interface SocketAttachment {
   deviceId: string;
   generation: number;
+  /**
+   * 建立这条连接时用它完成升级鉴权的**凭据指纹**（`tokenSha256`）。
+   *
+   * ★ 集中审计问题 1：以前附件只有 `{ deviceId, generation }`，于是"这个代次
+   *   有一个 socket"就等于"这台设备可以被操作" —— 而任意一条该设备的凭据
+   *   （包括轮换后那条**已被撤销**的旧凭据）开出来的连接都满足这个条件。
+   *   轮换之后旧连接仍然是"当前代次的 socket"，phone_ping 照常被它完成。
+   *   把指纹钉在连接上，才可能回答"这条连接是用哪条凭据开的、那条凭据今天还有效吗"。
+   */
+  credentialId: string;
+}
+
+/**
+ * 最近一次观察到的撤销。**审计用，不是门禁。**
+ *
+ * ★ 集中审计问题 2：以前这里是 `STORAGE_KEY_REVOKED` 的一个**粘性布尔**，而且
+ *   它是"这台设备被撤销了"的唯一判据 —— 一旦落盘就再也回不去：即使后来给这台
+ *   设备配了有效的新令牌，DO 依然对每一次升级回 403。
+ *
+ *   安全状态必须与**当前凭据表**一致，否则"重新授权"在 DO 这一层永远不可能发生。
+ *   现在门禁完全由当前配置推导（见 [revocationCheck]），这个记录只负责在
+ *   status/日志里说明"最近一次撤销发生在何时、针对整台设备还是某一条凭据"。
+ */
+interface RevocationRecord {
+  at: number;
+  scope: "device" | "credential";
+  credentialId: string | null;
+  generation: number;
 }
 
 const STORAGE_KEY_GENERATION = "generation";
 const STORAGE_KEY_METRICS = "metrics";
 const STORAGE_KEY_PENDING = "pending";
 const STORAGE_KEY_ACTIVITY = "last_activity_at";
-/** Gate 1.5 / A1：撤销过哪些设备 ID。落盘，跨驱逐仍然生效。 */
-const STORAGE_KEY_REVOKED = "revoked_device_ids";
+/** 最近一次撤销的审计记录（见 [RevocationRecord]）。 */
+const STORAGE_KEY_REVOCATION = "revocation";
+/** 旧版本（Gate 1.5）写下的粘性布尔。只用来给审计记录补一个 `at`，不再是门禁。 */
+const STORAGE_KEY_REVOKED_LEGACY = "revoked_device_ids";
 
 /**
  * 内部路由前缀。这些路径**只**能被 Worker 通过 DO 绑定访问，公网不可达。
@@ -274,6 +326,15 @@ export const ROUTE_RESET = "/internal/phone/testing/reset";
 
 /** 内部标记头：证明这次升级已经过 Worker 的设备鉴权。 */
 export const INTERNAL_DEVICE_HEADER = "X-Phone-Session-Device";
+/**
+ * 内部标记头：这次升级**用哪一条凭据**通过了鉴权（`tokenSha256`）。
+ *
+ * ★ 集中审计问题 1：只有 Worker 知道"是哪条凭据匹配上的"，DO 必须被告知，
+ *   才可能把连接绑定到具体凭据。缺失时 DO **拒绝**升级（fail-closed）——
+ *   一个不可验证来源的连接比一条明确失败的连接危险得多。
+ *   指纹不是令牌：它是 sha256 的十六进制，泄漏它也不能用来鉴权。
+ */
+export const INTERNAL_CREDENTIAL_HEADER = "X-Phone-Session-Credential";
 
 /** 替换旧连接时使用的关闭码（4000–4999 为应用自定义区间）。 */
 export const CLOSE_CODE_REPLACED = 4001;
@@ -294,12 +355,23 @@ export class PhoneSession implements DurableObject {
   private storedPending: Record<string, StoredPending> = {};
   private metrics: PhoneSessionMetrics = emptyMetrics();
   /**
-   * Gate 1.5 / A1：Service Worker 已经确认这台设备的凭据被撤销了。
+   * ★ 集中审计问题 2：最近一次观察到的撤销（**审计记录，不是门禁**）。
    *
-   * 落盘，因此跨驱逐仍然生效 —— 这正是 D-1 缺陷的另一半：原来 DO 里根本
-   * 没有任何"撤销"这个概念，靠 Worker 的凭据表是拦不住**已经建好**的连接的。
+   * 落盘是为了跨驱逐还能说清"撤销发生过"，但**判据永远是当前配置**：
+   * `revocationCheck()` 每次都重新读凭据表，因此
+   *   · 撤销 → 立即拒绝（配置里没有有效凭据）；
+   *   · 之后配了新令牌 → 新连接被接受（配置里有了有效凭据），并记一次
+   *     `reauthorizationsApplied` —— 这就是那次**明确、受保护的状态转换**。
    */
-  private revoked = false;
+  private revocation: RevocationRecord | null = null;
+  /**
+   * 这台 DO 实例最近一次**成功建连**的 deviceId（内存态，不是持久态）。
+   *
+   * 为什么需要它：`status.revoked` 要能回答"这台设备现在被撤销了吗"，而连接
+   * 被撤销关闭之后 `currentSocket()` 就没了 —— 只按当前 socket 算会让一台刚被
+   * 撤销的设备在 status 上显示 `revoked: false`，恰好与运维要看的相反。
+   */
+  private lastConnectedDeviceId: string | null = null;
   /**
    * Gate 1.5 / A2：最后一次收到**可解析**手机帧的时刻。
    *
@@ -320,7 +392,15 @@ export class PhoneSession implements DurableObject {
       this.generation = (await ctx.storage.get<number>(STORAGE_KEY_GENERATION)) ?? 0;
       this.metrics = { ...emptyMetrics(), ...((await ctx.storage.get<PhoneSessionMetrics>(STORAGE_KEY_METRICS)) ?? {}) };
 
-      this.revoked = (await ctx.storage.get<boolean>(STORAGE_KEY_REVOKED)) === true;
+      const record = await ctx.storage.get<RevocationRecord>(STORAGE_KEY_REVOCATION);
+      if (record !== null && record !== undefined && typeof record.at === "number") {
+        this.revocation = record;
+      } else {
+        // 旧版本的粘性布尔：读出来只补一条审计记录（`at` 无从得知，用 0 表示
+        // "版本升级前发生的"）。**它不再是门禁** —— 门禁在 [revocationCheck]。
+        const legacy = (await ctx.storage.get<boolean>(STORAGE_KEY_REVOKED_LEGACY)) === true;
+        this.revocation = legacy ? { at: 0, scope: "device", credentialId: null, generation: this.generation } : null;
+      }
       const activity = await ctx.storage.get<number>(STORAGE_KEY_ACTIVITY);
       this.lastPhoneActivityAt = typeof activity === "number" && Number.isFinite(activity) ? activity : 0;
 
@@ -355,15 +435,11 @@ export class PhoneSession implements DurableObject {
 
     switch (url.pathname) {
       case ROUTE_CONNECT:
-        // ★ Gate 1.5 / A1 的第二道闸。Worker 已经用凭据表拦过一次（撤销后
-        //   新升级会 401），但 DO 自己也必须拒绝 —— 否则"先建立连接、撤销
-        //   之后又被 Worker 用旧路径转发进来"这条窗口仍然存在。
-        if (this.revoked) {
-          this.metrics.upgradesRejected += 1;
-          await this.flushMetrics();
-          logEvent("warn", "phone_session.upgrade_rejected", { reason: "device_revoked" });
-          return json({ error: "device_revoked" }, 403);
-        }
+        // ★ Gate 1.5 / A1 的第二道闸 + 集中审计问题 1/2。
+        //   Worker 已经用凭据表拦过一次（撤销后新升级会 401），但 DO 自己也必须
+        //   拒绝 —— 否则"先建立连接、撤销之后又被 Worker 用旧路径转发进来"
+        //   这条窗口仍然存在。这里把判据改成**按当前配置推导**（见
+        //   [revocationCheck]），因此重新授权之后不会再被永久封印。
         return this.handleConnect(request);
       case ROUTE_PING:
         return this.handlePingRequest(request);
@@ -392,10 +468,59 @@ export class PhoneSession implements DurableObject {
       return new Response(JSON.stringify({ error: "missing_internal_device_header" }), { status: 500 });
     }
 
+    // 升级形状的校验排在内部凭据头**之前**：426 描述的是"这次请求的传输形状
+    // 不对"，与内部记账无关。把缺失内部头排在前面会让一条普通 HTTP 请求收到
+    // 500（看起来像服务端坏了），而它其实只是一次用错方法的调用。
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       this.metrics.upgradesRejected += 1;
       await this.flushMetrics();
       return new Response(JSON.stringify({ error: "expected_websocket_upgrade" }), { status: 426 });
+    }
+
+    // ★ 集中审计问题 1：没有凭据指纹就**不接受**这条连接。
+    //
+    //   这条道路只可能由 Worker 打进来（内部路由没有公网映射），而 Worker
+    //   永远会带上它。缺失意味着"我们无法回答这条连接是用哪条凭据开的"——
+    //   那就宁可不建立连接（fail-closed），也不要一条无法复核来源的长连接。
+    const credentialId = request.headers.get(INTERNAL_CREDENTIAL_HEADER);
+    if (!credentialId) {
+      this.metrics.upgradesRejected += 1;
+      await this.flushMetrics();
+      logEvent("warn", "phone_session.upgrade_rejected", { reason: "missing_internal_credential_header" });
+      return new Response(JSON.stringify({ error: "missing_internal_credential_header" }), { status: 500 });
+    }
+
+    // ★ 集中审计问题 1/2：门禁按**当前配置**推导，而不是按一个落盘后就改不回去
+    //   的布尔值。两种拒绝要分得清：
+    //     · 设备级：这台设备此刻一条有效凭据都没有（真正的撤销/吊销）；
+    //     · 凭据级：这条指纹对应的凭据已被撤销，但设备还有别的有效凭据
+    //       （**轮换** —— 旧令牌被换掉了，整台设备并没有被撤销）。
+    //   后者以前根本没有这个概念，于是轮换之后旧连接一直活着继续服务请求。
+    const rejected = this.connectionRejection(deviceId, credentialId);
+    if (rejected !== null) {
+      this.metrics.upgradesRejected += 1;
+      await this.flushMetrics();
+      logEvent("warn", "phone_session.upgrade_rejected", { reason: rejected });
+      return new Response(JSON.stringify({ error: rejected }), { status: 403 });
+    }
+
+    // ★ 集中审计问题 2：一次**明确的重新授权转换**。
+    //
+    //   走到这里说明：这台设备曾被撤销过（有审计记录），而现在它又用一条
+    //   **当前配置里有效**的凭据通过了鉴权 —— 上面那道门禁刚刚验证过这一点。
+    //   因此这次转换是受保护的：唯一的入口就是"拿有效的凭据完成升级"，
+    //   `testing/reset` 依然清不掉撤销记录（它不是门禁，但也不是可 reset 的
+    //   普通状态）。
+    if (this.revocation !== null) {
+      logEvent("info", "phone_session.reauthorized", {
+        deviceId,
+        previousScope: this.revocation.scope,
+        previousAt: this.revocation.at,
+      });
+      this.revocation = null;
+      this.metrics.reauthorizationsApplied += 1;
+      await this.ctx.storage.delete(STORAGE_KEY_REVOCATION);
+      await this.flushMetrics();
     }
 
     const pair = new WebSocketPair();
@@ -407,8 +532,11 @@ export class PhoneSession implements DurableObject {
     // 代次先递增再接受：从这一刻起的任何 pong 只有在标着新代次时才可能被接受。
     this.generation += 1;
     const generation = this.generation;
-    const attachment: SocketAttachment = { deviceId, generation };
+    const attachment: SocketAttachment = { deviceId, generation, credentialId };
     server.serializeAttachment(attachment);
+    // 记下"这台 DO 最近服务的是哪台设备"，让连接关掉之后 status 仍能回答
+    // "这台设备现在被撤销了吗"（见 [lastConnectedDeviceId]）。
+    this.lastConnectedDeviceId = deviceId;
 
     this.ctx.acceptWebSocket(server, [`device:${deviceId}`, `gen:${generation}`]);
 
@@ -479,7 +607,203 @@ export class PhoneSession implements DurableObject {
     //   起算 —— 否则一台连上就僵死的手机要等满一个完整阈值才被判死。
     await this.noteActivity();
 
+    // ★ 集中审计问题 3：**连接建立之后必须立刻安排存活 alarm**。
+    //
+    //   审计复现的现象是"新连接建立后、还没有任何请求时 `getAlarm()` 返回 null"。
+    //   原因很实在：在这之前只有一个地方会为存活阈值排 alarm，就是
+    //   `enqueueRequest()` 与 `handleSocketGone()`；而一台刚连上、还没被请求
+    //   碰过的手机两条路都没走过。
+    //
+    //   后果不是"少一个优化"，而是这条：**完全静默的连接永远不会被主动判死**。
+    //   它只在"有人来 ping"或"对象被驱逐"时才被发现，于是 `status` 上的
+    //   `connected` 可以一直是真的，而手机早就没了。
+    await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
+
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // ---------------------------------------------------------------------------
+  //  集中审计问题 1/2：按**当前配置**推导的授权与撤销判据
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 当前配置（不是构造时的快照）。
+   *
+   * `loadConfig` 自己带按 cacheKey 的模块级缓存，所以在请求路径上调用它几乎
+   * 不要钱；而**必须**用它而不是 `this.cfg` 的原因正是问题 2：给一台设备补一条
+   * 新凭据（或撤销一条旧凭据）时，DO 实例可能还活着，它手上的快照已经过期了。
+   */
+  private currentConfig(): AppConfig {
+    return loadConfig(this.env);
+  }
+
+  /** 这台设备此刻还有没有有效凭据（= 设备级撤销/吊销）。 */
+  private deviceRevokedNow(deviceId: string): boolean {
+    return isDeviceRevoked(this.currentConfig(), deviceId);
+  }
+
+  /**
+   * 升级入口的门禁：这条连接该不该被接受。
+   *
+   * 返回 `null` = 接受；返回错误串 = 拒绝原因（会原样进响应体与日志）。
+   * 判据全部来自当前配置，因此重新授权之后自动放行。
+   */
+  private connectionRejection(deviceId: string, credentialId: string): "device_revoked" | "credential_revoked" | null {
+    const config = this.currentConfig();
+    if (isDeviceRevoked(config, deviceId)) return "device_revoked";
+    if (!isCredentialActive(config, deviceId, credentialId)) return "credential_revoked";
+    return null;
+  }
+
+  /**
+   * 请求入口与上行帧入口的门禁：**当前这条连接**绑定的凭据还有效吗？
+   *
+   * 这是问题 1 的核心修复点。以前两个请求入口只看 `this.revoked`（设备级、
+   * 且是粘性布尔），于是"用旧凭据建立的连接"在轮换之后仍然能收发请求。
+   * 现在每次请求、每个上行帧都要重新问一次配置。
+   *
+   * 返回 `null` = 放行；否则给出拒绝范围（设备级 / 凭据级）与涉及的 socket。
+   */
+  private revocationCheck(requestedDeviceId: string): { scope: "device" | "credential"; deviceId: string; credentialId: string | null; socket: WebSocket | null } | null {
+    const config = this.currentConfig();
+    const socket = this.currentSocket();
+    const att = socket !== null ? (socket.deserializeAttachment() as SocketAttachment | null) : null;
+    // 连接绑定的 deviceId 优先：它来自 Worker 的鉴权结果，比请求体里那个更可信。
+    const deviceId = att?.deviceId ?? requestedDeviceId;
+
+    if (isDeviceRevoked(config, deviceId)) {
+      return { scope: "device", deviceId, credentialId: att?.credentialId ?? null, socket };
+    }
+    if (att !== null && !isCredentialActive(config, deviceId, att.credentialId)) {
+      return { scope: "credential", deviceId, credentialId: att.credentialId, socket };
+    }
+    return null;
+  }
+
+  /**
+   * 请求入口命中撤销门禁时的共同动作：记账 + 终结。
+   *
+   * 记账用 `credentialRejections` 单独统计"凭据级"拒绝（问题 1/2 的观测量），
+   * 终结交给 [terminateSockets]，保证在途请求被**明确**判失败而不是拖到超时。
+   */
+  private async noteRevokedRequest(rejection: { scope: "device" | "credential"; credentialId: string | null }): Promise<void> {
+    this.metrics.requestsRejectedRevoked += 1;
+    if (rejection.scope === "credential") this.metrics.credentialRejections += 1;
+    await this.bestEffort("flush_metrics", () => this.flushMetrics());
+    await this.terminateSockets({
+      scope: rejection.scope,
+      credentialId: rejection.credentialId,
+      reason: rejection.scope === "credential" ? "request_with_revoked_credential" : "request_with_revoked_device",
+    });
+  }
+
+  /** 撤销门禁的对外文案：wire 码始终是闭集里的 `device_revoked`，靠 message 区分范围。 */
+  private revokedMessage(scope: "device" | "credential"): string {
+    return scope === "credential"
+      ? "该连接绑定的设备凭据已被撤销或轮换，拒绝任何新的设备操作"
+      : "设备凭据已被撤销，拒绝任何新的设备操作";
+  }
+
+  /**
+   * 记下"发生过一次撤销"（审计用），并把记录落盘。
+   *
+   * 幂等性判据是 `(scope, credentialId)`：同一条凭据被重复通知不会重复换代次、
+   * 也不会让 `revocationsApplied` 翻倍 —— 那个数要能当"真实安全事件次数"用。
+   */
+  private async recordRevocation(scope: "device" | "credential", credentialId: string | null, deviceId: string): Promise<boolean> {
+    const already =
+      this.revocation !== null &&
+      this.revocation.scope === scope &&
+      this.revocation.credentialId === credentialId;
+    if (already) return false;
+
+    this.revocation = { at: Date.now(), scope, credentialId, generation: this.generation };
+    this.metrics.revocationsApplied += 1;
+    await this.ctx.storage.put({
+      [STORAGE_KEY_REVOCATION]: this.revocation,
+      [STORAGE_KEY_METRICS]: this.metrics,
+    });
+    logEvent("warn", "phone_session.revocation_recorded", {
+      deviceId,
+      scope,
+      credentialScoped: credentialId !== null,
+    });
+    return true;
+  }
+
+  /**
+   * 把**指定范围**的连接与在途请求一并终结。
+   *
+   * 与 [handleRevoke] 的关系：这里是执行体，`handleRevoke` 是入口。
+   * 分开的理由是问题 1/2 带来的新需求 —— 撤销范围不再只有"整台设备"，
+   * 还有"这一条凭据"，而"在请求路径上发现连接已失效"也要走同一套终结逻辑。
+   *
+   * 代次一定 +1：关闭 socket 与 close 事件到达之间有窗口，不换代次的话一个
+   * 在途的 pong/tool_result 仍然匹配得上，那正是"撤销之后还收到一次成功"。
+   */
+  private async terminateSockets(options: {
+    scope: "device" | "credential";
+    credentialId: string | null;
+    reason: string;
+  }): Promise<{ closed: number; pendingFailed: number }> {
+    // 先选出"这次到底该终结哪些连接"，**再**决定要不要换代次 —— 顺序很重要，
+    // 因为代次是 DO 级别的全局计数，"换一次"就等于宣布"所有在途请求都作废"
+    // （`handlePong` 要求 `entry.generation === this.generation` **且**
+    // socket 自己的代次也等于它）。
+    const current = this.currentSocket();
+    const targets = this.ctx.getWebSockets().filter((socket) => {
+      if (options.scope !== "credential") return true;
+      const att = socket.deserializeAttachment() as SocketAttachment | null;
+      return att?.credentialId === options.credentialId;
+    });
+
+    // ★ 问题 2 的"不要误伤"，第二层：一次凭据级撤销**最多**只能影响到
+    //   那条凭据自己的连接。
+    //
+    //   最典型的场景：旧凭据 A 开的那条连接早就被替换掉了，一条针对 A 的
+    //   迟到/重复撤销通知此刻才到，而当前连接是新凭据 B 的。如果把 A 的连接
+    //   一起算进"要换代次"，B 上所有在途请求会在 pong 回来时被判成
+    //   "来自过期连接"，B 自己也会因为代次不符而无法再被 `currentSocket()`
+    //   认出来。那这条撤销通知本身就成了拒绝服务路径 —— 正是要堵的东西。
+    const touchesCurrent = options.scope === "device" || (current !== null && targets.includes(current));
+    if (options.scope === "credential" && !touchesCurrent) {
+      // 没有任何活着的连接属于那条凭据：什么都不动，只让审计记录留下。
+      return { closed: 0, pendingFailed: 0 };
+    }
+
+    const deadGenerations = new Set(
+      targets.map((socket) => (socket.deserializeAttachment() as SocketAttachment | null)?.generation ?? -1),
+    );
+    const pendingIds = [...this.pending.values()]
+      .filter((entry) => (options.scope === "credential" ? deadGenerations.has(entry.generation) : true))
+      .map((entry) => entry.requestId);
+    for (const requestId of pendingIds) {
+      this.metrics.pendingRevoked += 1;
+      await this.failPending(requestId, "device_revoked", "设备凭据已被撤销，该请求被明确终止", "disconnect");
+    }
+
+    this.generation += 1;
+    const generation = this.generation;
+    await this.ctx.storage.put({
+      [STORAGE_KEY_GENERATION]: generation,
+      [STORAGE_KEY_METRICS]: this.metrics,
+    });
+
+    let closed = 0;
+    for (const socket of targets) {
+      try {
+        // 先给一帧可读的原因，再关。手机侧拿不到 reason 时会无从判断
+        // "是网络断了还是我被撤销了" —— 那会让它白重连很多次。
+        this.safeSend(socket, { type: "error", code: "device_revoked", message: "设备凭据已被撤销，连接终止" });
+        socket.close(CLOSE_CODE_REVOKED, "device credential revoked");
+        closed += 1;
+      } catch {
+        // 已经关了 —— 无所谓。
+      }
+    }
+
+    await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
+    return { closed, pendingFailed: pendingIds.length };
   }
 
   /**
@@ -512,20 +836,23 @@ export class PhoneSession implements DurableObject {
   /**
    * 撤销入口。**只有** Worker 能调到它（公网没有这个路径）。
    *
-   * 语义（任务书 A1 的四条要求逐条对应）：
-   *   1. 撤销后不得接受新的设备操作请求 → `this.revoked = true`，`fetch()` 里
-   *      的 ROUTE_CONNECT 与两个请求入口都会先看这个标志；
+   * 语义（任务书 A1 的四条要求 + 集中审计问题 1/2）：
+   *   1. 撤销后不得接受新的设备操作请求 → 请求入口每次都用**当前配置**重新判定
+   *      （见 [revocationCheck]），而不是看一个落盘的布尔值；
    *   2. 已建立连接在**可验证的**撤销通知到达后关闭 → 这里立刻 close(4002)；
    *   3. 未完成请求必须明确失败 → 全部结算成 `device_revoked`；
    *   4. 不得影响其他设备 → 撤销状态只存在**这台设备自己的** DO 里。
    *
-   * 为什么代次也要 +1：关闭 socket 与 close 事件到达之间有窗口。如果不换
-   * 代次，一个在途的 tool_result/pong 仍然带着旧代次匹配得上 —— 那正是
-   * "撤销之后还收到一次成功"这种最糟的观测。换了代次，它就变成
-   * `pongsStaleGeneration` / `toolResultsStaleGeneration`，永远结算不成成功。
+   * ★ 问题 1/2 带来的两个新能力：
+   *   · `credentialId`（可选）：**凭据级**撤销。只关掉那一条凭据开出来的连接。
+   *     轮换（旧凭据 revokedAt 有值 + 新凭据上线）走的就是这条 —— 它**不是**
+   *     设备撤销，所以绝不能把设备上其他（新）凭据的连接一起关掉。
+   *   · 撤销记录本身不再是门禁：它只是一条审计记录。真正的判据永远是
+   *     "当前配置里这条凭据/这台设备还有效吗"，因此给设备补一条新凭据之后，
+   *     升级会被接受并记一次 `reauthorizationsApplied`。
    */
   private async handleRevoke(request: Request): Promise<Response> {
-    let body: { deviceId?: unknown; reason?: unknown };
+    let body: { deviceId?: unknown; reason?: unknown; credentialId?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -535,6 +862,10 @@ export class PhoneSession implements DurableObject {
     if (requestedDeviceId === null) return json({ error: "missing_device_id" }, 400);
 
     const reason = typeof body.reason === "string" && body.reason !== "" ? body.reason : "credential_revoked";
+    // 空串与缺省等价："没有指定凭据"就是设备级撤销。
+    const requestedCredentialId =
+      typeof body.credentialId === "string" && body.credentialId !== "" ? body.credentialId : null;
+    const scope: "device" | "credential" = requestedCredentialId === null ? "device" : "credential";
 
     // 交叉校验：撤销指令带错了设备 ID 时**不能**把别人的连接关掉。
     // DO 实例名就是设备 ID，所以这几乎不可能发生 —— 但"几乎不可能"不是保证，
@@ -550,48 +881,24 @@ export class PhoneSession implements DurableObject {
     }
 
     // 幂等：撤销通知**可能被重复投递**（每个被拒的升级都会推一条，
-    // `worker/src/index.ts` 就是这么做的）。重复投递不该让指标翻倍，
-    // 也不该白白再换一次代次 —— 否则"撤销了几次"这个数就没法用来判断
-    // 到底发生了多少次真实的安全事件。
-    const alreadyRevoked = this.revoked;
-    this.revoked = true;
-    if (!alreadyRevoked) this.generation += 1;
-    const generation = this.generation;
-    if (!alreadyRevoked) this.metrics.revocationsApplied += 1;
+    // `worker/src/index.ts` 就是这么做的）。重复投递不该让指标翻倍 ——
+    // 否则"撤销了几次"这个数就没法用来判断到底发生了多少次真实的安全事件。
+    const isNewRevocation = await this.recordRevocation(scope, requestedCredentialId, requestedDeviceId);
+    const alreadyRevoked = !isNewRevocation;
 
     // 幂等再次进来时这张表必然为空 —— 撤销之后没有任何入口能再登记请求。
-    const pendingIds = [...this.pending.keys()];
-    for (const requestId of pendingIds) {
-      this.metrics.pendingRevoked += 1;
-      await this.failPending(requestId, "device_revoked", "设备凭据已被撤销，该请求被明确终止", "disconnect");
-    }
-
-    // 先把"已撤销"落盘再关 socket：反过来的话，进程在两者之间挂掉就会留下
-    // "连接关了但撤销没记住"的状态，而那种状态会允许一次重连成功。
-    await this.ctx.storage.put({
-      [STORAGE_KEY_GENERATION]: generation,
-      [STORAGE_KEY_REVOKED]: true,
-      [STORAGE_KEY_METRICS]: this.metrics,
+    const terminated = await this.terminateSockets({
+      scope,
+      credentialId: requestedCredentialId,
+      reason,
     });
-
-    let closed = 0;
-    for (const socket of this.ctx.getWebSockets()) {
-      try {
-        // 先给一帧可读的原因，再关。手机侧拿不到关闭帧的 reason 时会无从判断
-        // "是网络断了还是我被撤销了" —— 那会让它白重连很多次。
-        this.safeSend(socket, { type: "error", code: "device_revoked", message: "设备凭据已被撤销，连接终止" });
-        socket.close(CLOSE_CODE_REVOKED, "device credential revoked");
-        closed += 1;
-      } catch {
-        // 已经关了 —— 无所谓。
-      }
-    }
 
     logEvent("warn", "phone_session.revoked", {
       deviceId: requestedDeviceId,
-      generation,
-      closed,
-      pendingFailed: pendingIds.length,
+      scope,
+      generation: this.generation,
+      closed: terminated.closed,
+      pendingFailed: terminated.pendingFailed,
       reason,
     });
 
@@ -599,10 +906,11 @@ export class PhoneSession implements DurableObject {
       ok: true,
       device_id: requestedDeviceId,
       revoked: true,
+      scope,
       already_revoked: alreadyRevoked,
-      closed,
-      pending_failed: pendingIds.length,
-      generation,
+      closed: terminated.closed,
+      pending_failed: terminated.pendingFailed,
+      generation: this.generation,
     });
   }
 
@@ -617,6 +925,10 @@ export class PhoneSession implements DurableObject {
     this.metrics.lastPhoneActivityAt = this.lastPhoneActivityAt;
     this.bestEffort("persist_activity", () => this.ctx.storage.put(STORAGE_KEY_ACTIVITY, this.lastPhoneActivityAt));
     this.bestEffort("flush_metrics", () => this.flushMetrics());
+    // ★ 集中审计问题 3：每一次"手机还活着"的证据（hello / 任何合法帧）都要把
+    //   存活 deadline 往后推。不重排的话，一台只在 t=0 发过一次 hello、
+    //   之后正常发心跳的手机，会在 `livenessTimeoutMs` 到点时被自己的旧 alarm 判死。
+    await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
   }
 
   /**
@@ -687,13 +999,15 @@ export class PhoneSession implements DurableObject {
     const timeoutMs = Math.min(Math.max(Math.round(requestedTimeout), 50), 60_000);
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "unknown";
 
-    // ★ Gate 1.5 / A1：撤销是不可绕过的**前置**判断，排在离线判断之前。
+    // ★ 集中审计问题 1/2：撤销是不可绕过的**前置**判断，排在离线判断之前。
     //   顺序反过来会先报 phone_offline，把"这台设备被撤销了"这个更重要的
     //   事实藏起来 —— 审计时看不出撤销到底生效没有。
-    if (this.revoked) {
-      this.metrics.requestsRejectedRevoked += 1;
-      await this.bestEffort("flush_metrics", () => this.flushMetrics());
-      return json(this.failureFor("ping", requestId, deviceId, null, "device_revoked", "设备凭据已被撤销，拒绝任何新的设备操作"), 403);
+    //   判据来自**当前配置**（`revocationCheck`），不是落盘的粘性布尔：这样
+    //   重新授权之后同一条路径会自动放行，而用旧凭据开着的连接会被当场拒。
+    const rejection = this.revocationCheck(deviceId);
+    if (rejection !== null) {
+      await this.noteRevokedRequest(rejection);
+      return json(this.failureFor("ping", requestId, deviceId, null, "device_revoked", this.revokedMessage(rejection.scope)), 403);
     }
 
     const socket = this.currentSocket();
@@ -775,10 +1089,12 @@ export class PhoneSession implements DurableObject {
     const args: Record<string, unknown> =
       typeof rawArgs === "object" && rawArgs !== null && !Array.isArray(rawArgs) ? (rawArgs as Record<string, unknown>) : {};
 
-    if (this.revoked) {
-      this.metrics.requestsRejectedRevoked += 1;
-      await this.bestEffort("flush_metrics", () => this.flushMetrics());
-      return json(this.failureFor("tool", requestId, deviceId, toolName, "device_revoked", "设备凭据已被撤销，拒绝任何新的设备操作"), 403);
+    // 与 [handlePingRequest] 同一套门禁（问题 1/2）：判据来自当前配置，
+    // 且在离线判断之前 —— 撤销优先于"手机不在线"。
+    const rejection = this.revocationCheck(deviceId);
+    if (rejection !== null) {
+      await this.noteRevokedRequest(rejection);
+      return json(this.failureFor("tool", requestId, deviceId, toolName, "device_revoked", this.revokedMessage(rejection.scope)), 403);
     }
 
     const socket = this.currentSocket();
@@ -934,9 +1250,15 @@ export class PhoneSession implements DurableObject {
   private async handleStatus(): Promise<Response> {
     const socket = this.currentSocket();
     let connectedDeviceId: string | null = null;
+    let boundCredentialActive: boolean | null = null;
     if (socket !== null) {
       const att = socket.deserializeAttachment() as SocketAttachment | null;
       connectedDeviceId = att?.deviceId ?? null;
+      // ★ 问题 1：报告的是"这条连接绑定的凭据此刻还有效吗"，用的是当前配置。
+      //   只暴露布尔值，**不暴露指纹本身** —— status 是给运维看的，不是给
+      //   任何调用方索取凭据标识的地方。
+      boundCredentialActive =
+        att !== null ? isCredentialActive(this.currentConfig(), att.deviceId, att.credentialId) : null;
     }
     if (socket !== null && !this.socketIsLive(socket)) {
       // 观测用的计数器：每一次"底层开着但应用层已死"的读取都记一笔。
@@ -945,6 +1267,7 @@ export class PhoneSession implements DurableObject {
       await this.bestEffort("flush_metrics", () => this.flushMetrics());
     }
 
+    const statusDeviceId = connectedDeviceId ?? this.lastConnectedDeviceId;
     return json({
       // ★ Gate 1.5 / A2：`connected` 的语义**收紧了** —— 它现在回答
       //   "这台设备此刻真的可以被操作"，而不是"这个代次有一个 socket 对象"。
@@ -956,7 +1279,17 @@ export class PhoneSession implements DurableObject {
       /** socket 开着但应用层已静默超阈值 —— 也就是"半开连接"。 */
       stale: socket !== null && !this.socketIsLive(socket),
       /** 设备凭据是否已被撤销。撤销过的设备不会再被接受任何操作。 */
-      revoked: this.revoked,
+      // ★ 集中审计问题 1/2：`revoked` 不再是落盘的粘性布尔，而是**按当前配置
+      //   推导**出来的 —— 给设备补一条新凭据（重新授权）之后这里会自动变回
+      //   false，同时 `revocation` 里保留"曾经被撤销过"的审计痕迹。
+      //   设备身份优先取当前连接；连接已被撤销关闭时退回最近一次建连的设备
+      //   （否则一台刚被撤销的设备会显示 revoked: false，正好看反）。
+      //   两者都不知道时退回审计记录 —— 它至少能说明"这里发生过撤销"。
+      revoked: statusDeviceId !== null ? this.deviceRevokedNow(statusDeviceId) : this.revocation !== null,
+      /** 最近一次撤销事件的审计记录（含范围与代次）；从未发生过则为 null。 */
+      revocation: this.revocation,
+      /** 当前这条连接绑定的凭据是否仍然有效；没有连接时为 null。 */
+      bound_credential_active: boundCredentialActive,
       connection_generation: this.generation,
       open_sockets: this.ctx.getWebSockets().length,
       last_phone_activity_at: this.lastPhoneActivityAt === 0 ? null : this.lastPhoneActivityAt,
@@ -981,14 +1314,21 @@ export class PhoneSession implements DurableObject {
     this.pending.clear();
     this.storedPending = {};
     this.metrics = emptyMetrics();
-    // 注意：**不清 revoked**。撤销是安全状态，测试要解除它必须显式重建对象，
-    // 而不是"顺手 reset 一下" —— 否则 reset 就成了绕过撤销的后门。
-    this.revoked = (await this.ctx.storage.get<boolean>(STORAGE_KEY_REVOKED)) === true;
+    // 注意：**不清撤销记录**。撤销是安全状态，测试要解除它必须在配置里给这台
+    // 设备补一条有效凭据（重新授权），而不是"顺手 reset 一下" —— 否则 reset
+    // 就成了绕过撤销的后门。★ 集中审计问题 2：这里读的是新的
+    // `STORAGE_KEY_REVOCATION` 审计记录，不再是那个粘性布尔。
+    this.revocation = (await this.ctx.storage.get<RevocationRecord>(STORAGE_KEY_REVOCATION)) ?? this.revocation;
     await this.ctx.storage.put({
       [STORAGE_KEY_PENDING]: {},
       [STORAGE_KEY_METRICS]: this.metrics,
     });
-    return json({ ok: true, revoked: this.revoked });
+    return json({
+      ok: true,
+      // 门禁永远按当前配置推导；没有已知设备时退回审计记录。
+      revoked: this.lastConnectedDeviceId !== null ? this.deviceRevokedNow(this.lastConnectedDeviceId) : this.revocation !== null,
+      revocation: this.revocation,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -997,6 +1337,48 @@ export class PhoneSession implements DurableObject {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     await this.ready;
+
+    // ★ 集中审计问题 1/2 的最后一道闸：这条 socket 绑定的凭据还有效吗？
+    //
+    // 位置是刻意的，三件事都靠它成立：
+    //   1. 在 `noteActivity()` **之前** —— 失效的连接不许给自己的存活计时器续命，
+    //      否则撤销之后它还能让 `connected` 一直是真的；
+    //   2. 在帧解析与结算**之前** —— 撤销之后手机发来的任何东西（包括它以为
+    //      还在途的 pong / tool_result）都不能被当作有效结果结算，
+    //      这正是"撤销之后仍收到一次成功"的根因；
+    //   3. 用 `ws` 自己的 attachment 判，而不是 `currentSocket()` —— 迟到帧
+    //      可能来自一条已被替换掉的旧 socket，拿当前 socket 的身份去判会放行它。
+    const sender = ws.deserializeAttachment() as SocketAttachment | null;
+    if (sender !== null) {
+      const config = this.currentConfig();
+      const scope: "device" | "credential" | null = isDeviceRevoked(config, sender.deviceId)
+        ? "device"
+        : !isCredentialActive(config, sender.deviceId, sender.credentialId)
+          ? "credential"
+          : null;
+      if (scope !== null) {
+        this.metrics.messagesRejected += 1;
+        this.metrics.credentialRejections += 1;
+        await this.bestEffort("flush_metrics", () => this.flushMetrics());
+        logEvent("warn", "phone_session.message_from_revoked_connection", {
+          deviceId: sender.deviceId,
+          scope,
+          generation: sender.generation,
+        });
+        this.safeSend(ws, { type: "error", code: "device_revoked", message: this.revokedMessage(scope) });
+        try {
+          ws.close(CLOSE_CODE_REVOKED, "device credential revoked");
+        } catch {
+          // 已经关了 —— 无所谓。
+        }
+        await this.terminateSockets({
+          scope,
+          credentialId: sender.credentialId,
+          reason: scope === "credential" ? "message_from_revoked_credential" : "message_from_revoked_device",
+        });
+        return;
+      }
+    }
 
     if (typeof message !== "string") {
       // Gate 0 只用文本帧。二进制帧一律拒绝，避免"两种编码两条路径"。
@@ -1462,6 +1844,18 @@ export class PhoneSession implements DurableObject {
    * Gate 1.5 / A2 起它要多考虑一件事：**存活阈值**。没有这条的话，一台
    * 手机在 t=0 连上、然后彻底静默，对象就会一直睡着直到下一次请求或驱逐 ——
    * 也就是说"半开连接"永远不会被主动清理，只在有人来问的时候才被看见。
+   *
+   * ★ 集中审计问题 3 的两处：
+   *   1. 调用点。建连（`handleConnect`）与每一次活动（`noteActivity`，覆盖所有
+   *      合法上行帧含心跳）都必须重排一次；只在登记请求时才排，会让一台
+   *      "连上但还没人问过它"的手机根本没有 alarm（`getAlarm()` 为 null），
+   *      于是静默到死也没人发现。
+   *   2. 比较方式。以前是 `existing > next`（"只让 alarm 更早、绝不更晚"），
+   *      那会让心跳**永远推迟不了**死亡时刻：第一次排下 `t0 + liveness` 之后，
+   *      后续心跳算出的 deadline 更晚，条件不成立，alarm 就停在 `t0 + liveness`
+   *      上，一台心跳完全正常的手机也会在该时刻被判死。改成 `existing !== next`
+   *      之后 alarm 会跟着真实 deadline 走 —— 安全性不受影响，因为 `next` 取的
+   *      是**全部**在途超时与存活阈值里的最小值，绝不会晚于任何一件真事。
    */
   private async rescheduleAlarm(): Promise<void> {
     const deadlines = Object.values(this.storedPending).map((p) => p.deadline);
@@ -1475,7 +1869,7 @@ export class PhoneSession implements DurableObject {
     }
     const next = Math.min(...deadlines);
     const existing = await this.ctx.storage.getAlarm();
-    if (existing === null || existing > next) {
+    if (existing === null || existing !== next) {
       await this.ctx.storage.setAlarm(next);
     }
   }
@@ -1488,7 +1882,17 @@ function json<T>(body: T, status = 200): Response {
   });
 }
 
-/** 供 Worker 侧构造请求用：把 deviceId 放进内部标记头。 */
-export function internalHeaders(deviceId: string): Record<string, string> {
-  return { [INTERNAL_DEVICE_HEADER]: deviceId };
+/**
+ * 供 Worker 侧构造请求用：把 deviceId 放进内部标记头。
+ *
+ * ★ 集中审计问题 1：`/connect` 还要带**这条连接是用哪条凭据鉴权通过的**。
+ * 两个内部头都只有 Worker 能设置（DO 的公网路由是独立命名空间，请求头
+ * 由 Worker 自己加），所以 `credentialId` 在这里是可信输入；DO 侧对
+ * `/connect` **强制**要求它，缺了就 500 —— 免得将来某条新调用路径漏传而
+ * 静默退化成"没有凭据绑定"。
+ */
+export function internalHeaders(deviceId: string, credentialId?: string): Record<string, string> {
+  const headers: Record<string, string> = { [INTERNAL_DEVICE_HEADER]: deviceId };
+  if (credentialId !== undefined) headers[INTERNAL_CREDENTIAL_HEADER] = credentialId;
+  return headers;
 }

@@ -612,9 +612,11 @@ describe("PhoneSession / 11. 重连竞态（Gate 0.1 审计 R1）", () => {
     // 刚才那次替换建立了一条**活着的**连接，而只要有活着的连接，就必须留一个
     // 存活阈值 alarm 去清理"半开连接"（TCP 连着、手机不再回任何应用层消息）。
     //
-    // 断言写成"下界"而不是等号：[rescheduleAlarm] 只会让 alarm 更早、绝不更晚
-    // （`existing > next` 才改），所以这里残留的可能是更早的那个 deadline。
-    // 真正要守住的性质是"不晚于存活阈值"，而不是某个具体毫秒数。
+    // 断言写成"下界"而不是等号：`rescheduleAlarm` 的判据是"算出来的 deadline
+    // 与存储里的不一样就重排"（集中审计问题 3 之前用的是 `existing > next`，
+    // 即只在**更早**时才改 —— 那样一台心跳正常的手机也永远推迟不了自己的死亡
+    // 时刻）。所以这里存着的可能是刚排下的 deadline，也可能是同一毫秒内的
+    // 等价值。真正要守住的性质是"不晚于存活阈值"，而不是某个具体毫秒数。
     const lastActivity = status["last_phone_activity_at"] as number;
     const liveness = status["liveness_timeout_ms"] as number;
     const alarmAt = await rig.phone.ctxOf(DEVICE).storage.getAlarm();

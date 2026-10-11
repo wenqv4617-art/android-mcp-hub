@@ -28,10 +28,10 @@
 //  如果有人往 wrangler.jsonc 里加了 D1 绑定，这里不会自动获得访问权。
 // ============================================================================
 
-import { loadConfig, activeCredentialsFor, isDeviceRevoked, type AppConfig } from "./config";
+import { loadConfig, activeCredentialsFor, findCredential, isDeviceRevoked, type AppConfig } from "./config";
 import type { PhoneSessionNamespace } from "./env";
 import type { Env } from "./env";
-import { PhoneSession, INTERNAL_DEVICE_HEADER, ROUTE_CONNECT } from "./phone/phone-session";
+import { PhoneSession, INTERNAL_CREDENTIAL_HEADER, INTERNAL_DEVICE_HEADER, ROUTE_CONNECT } from "./phone/phone-session";
 import { McpSession } from "./mcp/session-do";
 import { handleMcpRequest, revokePhoneDeviceViaDurableObject as revokePhoneDevice, SERVER_NAME, SERVER_VERSION } from "./mcp/http";
 import { OAuthStore } from "./oauth/store-do";
@@ -188,10 +188,24 @@ async function handlePhoneUpgrade(request: Request, env: Env, config: AppConfig)
   }
 
   // 只比较摘要，明文令牌在鉴权函数返回后就不再被引用。
+  //
+  // ★ 集中审计问题 1/2：从 `some()` 改成 `find()` —— 不只回答"匹配上了没有"，
+  //   还要知道**匹配的是哪一条凭据**，因为那个摘要就是这条连接的凭据身份，
+  //   必须一路带到 DO 并钉在 socket 上（见 `SocketAttachment.credentialId`）。
   const digest = await sha256Hex(presented);
-  const matched = candidates.some((c) => timingSafeEqual(digest, c.tokenSha256));
-  if (!matched) {
+  const matchedCredential = candidates.find((c) => timingSafeEqual(digest, c.tokenSha256));
+  if (matchedCredential === undefined) {
     logEvent("warn", "phone.auth_failed", { reason: "token_mismatch" });
+    // ★ 集中审计问题 2 的另一半：如果这个摘要属于**这台设备的一条已撤销凭据**
+    //   （典型情形：令牌被轮换掉之后，手机还在用旧令牌重连），那这不是一次
+    //   伪造尝试，而是一次"应该被终结的旧凭据"的自白。此时要把**凭据级**撤销
+    //   通知推到 DO：只有那条旧凭据开出来的连接该死，用新凭据重连的连接必须
+    //   活着 —— 否则一条迟到的重连请求就成了一条拒绝服务路径。
+    if (findCredential(config, deviceId, digest)?.revokedAt != null) {
+      void revokePhoneDevice(env, deviceId, "upgrade_with_rotated_credential", digest).catch(() => {
+        logEvent("warn", "phone.revoke_notify_failed", { deviceId, errorCode: "revoke_notify_failed" });
+      });
+    }
     return unauthorizedPhone();
   }
 
@@ -201,6 +215,10 @@ async function handlePhoneUpgrade(request: Request, env: Env, config: AppConfig)
 
   const headers = new Headers(request.headers);
   headers.set(INTERNAL_DEVICE_HEADER, deviceId);
+  // ★ 问题 1：把**这次鉴权实际命中的凭据摘要**放进内部头。DO 侧对 /connect
+  //   强制要求它（缺失 500），并把它写进 socket attachment —— 之后每一个
+  //   请求入口 / 上行帧都能回答"这条连接是用哪条凭据开的，它现在还有效吗"。
+  headers.set(INTERNAL_CREDENTIAL_HEADER, matchedCredential.tokenSha256);
   // ⚠ 必须改写成 DO 的内部路由，不能把公网 URL 原样转发过去：
   //   DO 只认 /internal/phone/connect，拿 /phone/ws 去问它只会得到 404。
   //   内部路由名是 DO 的实现细节，公网路径空间由 Worker 自己拥有。
