@@ -84,6 +84,9 @@ object LinkBus {
         when (state) {
             is LinkState.Error -> _lastError.value = state.message
             is LinkState.AuthFailed -> _lastError.value = state.detail
+            // ★ 问题 4：被撤销也写进「最近一次错误」。这是**终态**，界面不会再自动重连，
+            // 用户只有看到这条原因才知道该去改令牌，而不是等一个永远不来的重连。
+            is LinkState.Revoked -> _lastError.value = state.detail
             else -> Unit
         }
     }
@@ -374,6 +377,7 @@ class PhoneLinkService : Service() {
             is LinkState.Connected -> getString(R.string.notif_connected, host)
             is LinkState.Reconnecting -> getString(R.string.notif_reconnecting, state.attempt)
             is LinkState.AuthFailed -> getString(R.string.notif_auth_failed)
+            is LinkState.Revoked -> getString(R.string.notif_revoked)
             is LinkState.Error -> getString(R.string.notif_error, state.message)
         }
 

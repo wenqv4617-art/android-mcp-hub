@@ -320,6 +320,7 @@ class PhoneLinkClient(
             is LinkState.Connected -> "已连接（代次 ${state.generation}）"
             is LinkState.Reconnecting -> "重连等待（第 ${state.attempt} 次）"
             is LinkState.AuthFailed -> "认证失败（${state.detail}）"
+            is LinkState.Revoked -> "凭据已被撤销（${state.detail}）"
             is LinkState.Error -> "出错（${state.message}）"
         }
 

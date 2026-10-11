@@ -107,8 +107,10 @@ object ServerErrorCode {
     /**
      * Gate 1.5 / A1：服务端已撤销这台设备的凭据，连接必须结束。
      *
-     * 手机侧对它没有特殊动作（socket 随后会被服务端以 4002 关掉），
-     * 把它列进闭集只是为了**日志里能出现一个可读的名字**，而不是 unrecognized。
+     * 手机侧**有**特殊动作（集中审计问题 4）：`PhoneLink.onTextFrame` 收到它、
+     * 以及 `onSocketClosed` 收到 close 4002 时，都会进入终态 [LinkState.Revoked]
+     * 并**停止自动重连** —— 因为拿同一份凭据重连只会被升级阶段同样地拒掉。
+     * 把它列进闭集同时也保证日志里出现的是这个可读名字，而不是 unrecognized。
      */
     const val DEVICE_REVOKED = "device_revoked"
 

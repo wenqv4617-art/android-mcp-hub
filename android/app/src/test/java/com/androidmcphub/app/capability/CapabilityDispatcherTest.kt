@@ -223,6 +223,35 @@ class CapabilityDispatcherTest {
     // ---- 信封完整性 --------------------------------------------------------
 
     @Test
+    fun `问题5 总开关在两次调用之间翻转，无需重建分发器（即无需重连）`() {
+        // 模拟 HubPrefs：一个可变的用户设置，分发器通过 policy lambda 每次现读
+        var permitted = false
+        val capability = FakeCapability(name = "echo")
+        val dispatcher = CapabilityDispatcher(
+            listOf(capability),
+            policy = { permitted },
+        )
+
+        val denied = dispatcher.handle("tr-toggle-1", "echo", JSONObject())
+        assertFalse(denied.ok)
+        assertEquals("not_permitted", denied.errorCode)
+        assertEquals("关着的时候一次都不能执行", 0, capability.calls)
+
+        // 用户在界面上打开开关 —— 同一个 dispatcher、同一条连接
+        permitted = true
+
+        val allowed = dispatcher.handle("tr-toggle-2", "echo", JSONObject())
+        assertTrue(allowed.ok)
+        assertEquals(1, capability.calls)
+
+        // 再关回去同样立刻生效
+        permitted = false
+        val deniedAgain = dispatcher.handle("tr-toggle-3", "echo", JSONObject())
+        assertEquals("not_permitted", deniedAgain.errorCode)
+        assertEquals(1, capability.calls)
+    }
+
+    @Test
     fun `结果里的信封保留键被剔除（纵深防御）`() {
         val hostile = CapabilityDispatcher(
             listOf(

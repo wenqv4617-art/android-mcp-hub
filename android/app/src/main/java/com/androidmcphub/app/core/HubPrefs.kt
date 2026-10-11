@@ -44,14 +44,21 @@ class HubPrefs(context: Context) {
     /**
      * 本机是否允许把只读能力交给已授权的服务端调用（Gate 2 工作包 D "本地授权策略"）。
      *
-     * 默认**开**：能力白名单本身（`CapabilityDispatcher` 的注册表）已经决定了
-     * "哪些能力存在"，这个开关是用户手里的第二个、也是更粗的闸门 ——
-     * 关掉之后手机对任何 `tool_request` 都回 `not_permitted`，且不执行任何能力。
+     * 默认**关**（集中审计问题 5）。这条默认值是**安全默认**，不是体验取舍：
+     *  - 白名单（`CapabilityDispatcher` 的注册表）决定"哪些能力存在"，是编译期的；
+     *    这个开关是用户手里的第二个、也是更粗的闸门 —— 关掉之后手机对任何
+     *    `tool_request` 都回 `not_permitted`，且**不执行**任何能力。
+     *  - 首次安装时用户还没有对这个应用授权过任何事。默认开等于"装完即可被远端
+     *    读电池状态"，而用户从未表达过同意；默认关则把同意变成一次**明确动作**
+     *    （用户自己到界面上打开总开关）。
+     *  - 代价是升级上来的老用户要自己打开一次开关。这是可接受的：功能不会被
+     *    破坏，只是被挡住，并且服务端会拿到明确的 `not_permitted`（而不是超时）。
      *
-     * 默认开而不是默认关：默认关会让首次升级后的用户莫名其妙地发现新功能不可用，
-     * 而这个开关本来就是为了"我不想要"而存在的。
+     * 与"用户已明确设置过"的关系：该键**存在**时一律以用户的值为准，只有键不存在
+     * （全新安装、或用户从未动过）才落到 [DEFAULT_CAPABILITIES_ENABLED]。
+     * 所以老用户此前手动关掉的设置、以及手动打开的设置，都不会因为这次改默认值而变化。
      */
-    fun capabilitiesEnabled(): Boolean = prefs.getBoolean(KEY_CAPABILITIES_ENABLED, true)
+    fun capabilitiesEnabled(): Boolean = prefs.getBoolean(KEY_CAPABILITIES_ENABLED, DEFAULT_CAPABILITIES_ENABLED)
 
     /** 写入能力开关。默认值不落盘：删掉这个键就回到默认。 */
     fun saveCapabilitiesEnabled(enabled: Boolean) {
@@ -153,6 +160,15 @@ class HubPrefs(context: Context) {
 
         /** 只读能力总开关（布尔）。它不是 [HubConfig] 的一部分，见 [capabilitiesEnabled]。 */
         const val KEY_CAPABILITIES_ENABLED = "capabilities_enabled"
+
+        /**
+         * 总开关的**安全默认**：首次安装（键不存在）时为 `false`，即"未授权"。
+         *
+         * 集中审计问题 5：这里单独提成一个常量，是为了让"默认值"可被单测直接钉住
+         * （见 `CapabilitySwitchDefaultTest`）—— 任何把它改回 `true` 的改动都必须
+         * 显式地改测试并给出理由，而不是在 `getBoolean` 的第二个实参里悄悄发生。
+         */
+        const val DEFAULT_CAPABILITIES_ENABLED: Boolean = false
 
         /** [load] 时一律跳过的键：凭据与所有非 [HubConfig] 的开关。 */
         val NON_CONFIG_KEYS: Set<String> = SECRET_KEYS + KEY_CAPABILITIES_ENABLED

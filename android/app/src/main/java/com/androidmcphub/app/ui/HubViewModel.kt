@@ -54,8 +54,9 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 是否允许服务端调用本机的只读能力（Gate 2 工作包 D 的"本地授权策略"）。
      *
-     * 默认**开**，与 [HubPrefs.capabilitiesEnabled] 的默认值一致 ——
-     * 两处默认值必须一起改，所以这里直接从 prefs 读初始值，不写第二份字面量。
+     * 初始值只有一个来源（[HubPrefs.capabilitiesEnabled]，集中审计问题 5 之后
+     * 首次安装默认**关**）：这里直接从 prefs 读，**不写第二份字面量** ——
+     * 否则两处默认值总有一天会不一致，而那种不一致正好是"以为关着其实开着"。
      */
     val capabilitiesEnabled: StateFlow<Boolean> = _capabilitiesEnabled.asStateFlow()
 

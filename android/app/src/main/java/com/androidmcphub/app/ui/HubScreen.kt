@@ -248,6 +248,7 @@ private fun statusText(state: LinkState, nowMs: Long): String = when (state) {
         "重连等待（第 ${state.attempt} 次，${remainSec}s 后）"
     }
     is LinkState.AuthFailed -> "认证失败"
+    is LinkState.Revoked -> "凭据已被撤销"
     is LinkState.Error -> "出错"
 }
 
@@ -258,6 +259,10 @@ private fun statusDetail(state: LinkState, serviceRunning: Boolean): String = wh
     is LinkState.Connected -> "前台服务在运行，保持应用层心跳"
     is LinkState.Reconnecting -> "按指数退避 + 抖动重连，成功后计数归零"
     is LinkState.AuthFailed -> "凭据被拒绝（${state.detail}），需修改设备令牌后手动重连"
+    // ★ 问题 4：说清"为什么不会自己好"，并给出唯一出口（改令牌后点「连接」）。
+    is LinkState.Revoked ->
+        "服务端撤销了本机凭据（${state.detail}），已停止自动重连；" +
+            "请到「高级设置」更新设备令牌或重新配对后手动重连"
     is LinkState.Error -> state.message
 }
 
@@ -278,7 +283,7 @@ private fun StatusCard(
         is LinkState.Connecting -> connectingColor
         is LinkState.Connected -> connectedColor
         is LinkState.Reconnecting -> reconnectingColor
-        is LinkState.AuthFailed, is LinkState.Error -> failedColor
+        is LinkState.AuthFailed, is LinkState.Revoked, is LinkState.Error -> failedColor
     }
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -550,7 +555,9 @@ private fun AdvancedSettingsCard(
                     Text(
                         text = "关掉之后，手机对任何工具请求都回 not_permitted，且不执行任何能力。" +
                             "当前已启用的能力只有 battery_get_status（电池状态，只读、不需要任何权限）。" +
-                            "开关立即生效，不需要重新连接。",
+                            "开关立即生效，不需要重新连接。" +
+                            "首次安装默认关闭（需要你在这里主动打开），以及 phone_ping 这类" +
+                            "连通性探测不受这个开关影响。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 2.dp),

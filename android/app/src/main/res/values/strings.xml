@@ -12,6 +12,7 @@
     <string name="notif_connected">已连接到 %1$s</string>
     <string name="notif_reconnecting">正在重连（第 %1$d 次）</string>
     <string name="notif_auth_failed">认证失败，请检查设备令牌与设备 ID</string>
+    <string name="notif_revoked">凭据已被服务端撤销，已停止自动重连；请更新设备令牌后手动重连</string>
     <string name="notif_error">连接出错：%1$s</string>
     <string name="notif_idle">未连接</string>
     <string name="action_disconnect">断开</string>

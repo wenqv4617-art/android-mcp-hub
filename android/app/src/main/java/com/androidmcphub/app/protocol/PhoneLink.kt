@@ -18,6 +18,7 @@ import kotlin.random.Random
  *  - [Connected] → 已连接（代次 N）
  *  - [Reconnecting] → 重连等待（第 N 次，Xs 后）
  *  - [AuthFailed] → 认证失败
+ *  - [Revoked] → 设备凭据已被服务端撤销
  *  - [Error] → 出错
  */
 sealed interface LinkState {
@@ -26,6 +27,19 @@ sealed interface LinkState {
     data class Connected(val generation: Long) : LinkState
     data class Reconnecting(val attempt: Int, val delayMs: Long, val deadlineMs: Long) : LinkState
     data class AuthFailed(val detail: String) : LinkState
+
+    /**
+     * ★ 集中审计问题 4：服务端**明确撤销了这台设备的凭据**，连接必须到此为止。
+     *
+     * 为什么它必须与 [AuthFailed]、[Reconnecting] 分开：
+     *  - 与 [Reconnecting] 分开：这是"重试多少次都会被同样拒绝"的**终态**，
+     *    继续自动重连只会把"有人把凭据撤了"伪装成"网络不稳定"；
+     *  - 与 [AuthFailed] 分开：401/403 是**握手**被拒（凭据从一开始就没通过），
+     *    而这里是**已经连上之后**服务端主动终结（`error{device_revoked}` +
+     *    close 4002）。两者的排查动作相同（改令牌），但证据不同，
+     *    所以状态与文案都分开，日志里能直接区分"没连上"与"连上后被撤"。
+     */
+    data class Revoked(val detail: String) : LinkState
     data class Error(val message: String) : LinkState
 }
 
@@ -134,6 +148,9 @@ class PhoneLink(
 
     /** 用户点「连接」。 */
     fun start(): List<LinkAction> = synchronized(lock) {
+        // ★ 问题 4：这里是终态（AuthFailed / Revoked / Error）**唯一**的出口。
+        // 用户在「高级设置」改完设备令牌（或重新配对）后点「连接」，状态先回到
+        // [LinkState.Connecting]，[isTerminal] 随即不再成立，重连逻辑恢复工作。
         userStopped = false
         consecutiveFailures = 0
         reconnectScheduled = false
@@ -198,6 +215,9 @@ class PhoneLink(
                     LogLevel.ERROR,
                     "认证失败（HTTP $httpStatus）category=$safeCategory；不自动重连，请检查设备令牌与设备 ID",
                 )
+                // 终态就得把**还挂着的**重连定时器一并作废，否则一个在认证失败之前
+                // 排下的定时器到点后会把连接重新拉起来，绕过"不自动重连"这条规则。
+                reconnectScheduled = false
                 setState(LinkState.AuthFailed("HTTP $httpStatus"))
                 return@synchronized emptyList()
             }
@@ -225,6 +245,17 @@ class PhoneLink(
         attemptInFlight = false
         socketOpen = false
         if (userStopped) return@synchronized emptyList()
+
+        // ★ 集中审计问题 4：4002 是**服务端明确撤销了这台设备的凭据**
+        // （`worker/src/phone/messages.ts` 的 `CLOSE_CODE_REVOKED`）。
+        // 这不是"网络抖了一下"：拿同一份凭据重连多少次，都会在升级阶段被 403 拒掉。
+        // 所以这里进入**可诊断的终态**并停止自动重连 —— 否则一个必须由人来处理的
+        // 配置问题（凭据被撤/被轮换）会被无限重连伪装成"网络不稳定"。
+        if (code == CLOSE_CODE_REVOKED) {
+            enterRevoked(code = code)
+            return@synchronized emptyList()
+        }
+
         scheduleReconnect("服务端关闭连接（code=$code, reason=$reason）")
     }
 
@@ -232,6 +263,12 @@ class PhoneLink(
     fun onReconnectTimerFired(): List<LinkAction> = synchronized(lock) {
         if (userStopped) return@synchronized emptyList()
         if (!reconnectScheduled) return@synchronized emptyList()
+        // ★ 问题 4：终态之后任何残留的定时器都必须失效 —— 它是"被撤销"与
+        // "用户改完令牌重新连接（start）"之间唯一可能偷偷复活连接的东西。
+        if (isTerminal(state)) {
+            reconnectScheduled = false
+            return@synchronized emptyList()
+        }
         reconnectScheduled = false
         attemptInFlight = true
         attemptStartedAtMs = clock()
@@ -245,6 +282,10 @@ class PhoneLink(
     fun onNetworkAvailable(): List<LinkAction> = synchronized(lock) {
         if (userStopped) return@synchronized emptyList()
         if (socketOpen) return@synchronized emptyList()
+
+        // ★ 问题 4：终态不因为"网络恢复了"而复活 —— 网络与"凭据被撤销"这个结论
+        // 毫无关系，自动重连只会再被同样地拒一次，还会把界面上的原因覆盖掉。
+        if (isTerminal(state)) return@synchronized emptyList()
 
         if (reconnectScheduled) {
             // 定时器还在等退避，提前唤醒
@@ -294,7 +335,16 @@ class PhoneLink(
             }
 
             is IncomingFrame.ServerError -> {
-                log(LogLevel.ERROR, "服务端错误帧 code=${ServerErrorCode.normalize(frame.code)}")
+                val safeCode = ServerErrorCode.normalize(frame.code)
+                if (safeCode == ServerErrorCode.DEVICE_REVOKED) {
+                    // ★ 问题 4：服务端在这里之后**通常**会紧接着以 4002 关掉 socket，
+                    // 但关闭回调不一定总能到达（进程被杀、网络黑洞、连接被中间设备吞掉）。
+                    // 所以终态在**收到错误帧的这一刻**就置上：让"凭据被撤销"这件事
+                    // 无论如何都能被看到，且不会被任何还挂着的重连定时器复活。
+                    enterRevoked(code = null)
+                    return@synchronized listOf(LinkAction.Close)
+                }
+                log(LogLevel.ERROR, "服务端错误帧 code=$safeCode")
                 emptyList()
             }
 
@@ -464,6 +514,9 @@ class PhoneLink(
     /** 调用前必须已持有 [lock]。 */
     private fun scheduleReconnect(why: String): List<LinkAction> {
         if (userStopped) return emptyList()
+        // ★ 问题 4：终态没有"再试一次"这条路（见 [isTerminal]）。这一道是兜底，
+        // 防止将来新增的调用点绕过各回调里的显式判断。
+        if (isTerminal(state)) return emptyList()
         if (reconnectScheduled) return emptyList()
 
         val attemptIndex = consecutiveFailures
@@ -486,8 +539,59 @@ class PhoneLink(
         onStateChanged?.invoke(next)
     }
 
+    /**
+     * ★ 集中审计问题 4：进入"凭据被服务端撤销"的终态。调用前必须已持有 [lock]。
+     *
+     * 幂等：无论先到的是 `error{device_revoked}` 帧还是 close 4002，结果都一样，
+     * 重复调用不会产生第二条日志、也不会改变状态。
+     *
+     * [code] 为 null 表示"从错误帧进入"，非 null 表示"从关闭码进入"——分开记日志，
+     * 是为了排查时能一眼看出**哪条证据先到**。
+     */
+    private fun enterRevoked(code: Int?) {
+        reconnectScheduled = false
+        attemptInFlight = false
+        socketOpen = false
+        if (state is LinkState.Revoked) return
+
+        val evidence = if (code == null) "error 帧 code=device_revoked" else "close code=$code"
+        log(
+            LogLevel.ERROR,
+            "服务端撤销了本机凭据（$evidence）；**不自动重连**。" +
+                "请到「高级设置」更新设备令牌（或重新配对）后手动点「连接」",
+        )
+        setState(LinkState.Revoked(REVOKED_DETAIL))
+    }
+
+    /**
+     * 终态：这些状态下**绝不**自动重连，也绝不被残留的定时器 / 网络恢复事件复活。
+     *
+     * 为什么把三种状态放在一起：[AuthFailed]（握手被拒）、[Revoked]（连上后被撤）、
+     * [Error]（本地配置不合法）都是"重试不会让结果变好，必须由人改点什么"。
+     * 唯一的出口是用户点「连接」——[start] 会把状态重置为 [LinkState.Connecting]。
+     */
+    private fun isTerminal(current: LinkState): Boolean = when (current) {
+        is LinkState.AuthFailed, is LinkState.Revoked, is LinkState.Error -> true
+        is LinkState.Idle, is LinkState.Connecting, is LinkState.Connected, is LinkState.Reconnecting -> false
+    }
+
     companion object {
         /** 建连看门狗：超过这个时间还没握上手就当这次尝试失败，交给退避重连。 */
         const val HANDSHAKE_TIMEOUT_MS: Long = 20_000L
+
+        /**
+         * ★ 集中审计问题 4：服务端的"设备凭据已撤销"关闭码。
+         *
+         * 必须与 `worker/src/phone/messages.ts` 的 `CLOSE_CODE_REVOKED` 保持一致
+         * （Worker 测试 `worker/test/phone-session.test.ts` 也断言 4002）。
+         * 它属于 4000–4999 的"应用私有"区间，不会和 WebSocket 标准码撞车。
+         */
+        const val CLOSE_CODE_REVOKED: Int = 4002
+
+        /**
+         * 终态文案。刻意**不含**任何对端给的自由文本（服务端的 `message` 不落地、
+         * 不入日志），只描述手机侧该做什么。
+         */
+        const val REVOKED_DETAIL: String = "设备凭据已被服务端撤销"
     }
 }

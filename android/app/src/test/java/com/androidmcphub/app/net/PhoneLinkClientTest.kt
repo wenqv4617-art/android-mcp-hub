@@ -4,6 +4,7 @@ import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.TokenFailure
 import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.protocol.LinkState
+import com.androidmcphub.app.protocol.PhoneLink
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -146,6 +147,74 @@ class PhoneLinkClientTest {
             assertTrue(
                 "应当是认证失败，实际 $states",
                 awaitState(states) { it is LinkState.AuthFailed },
+            )
+        } finally {
+            client.shutdown()
+            runCatching { server.shutdown() }
+        }
+    }
+
+    @Test
+    fun `问题4 服务端以 4002 撤销时进入终态，且整条链路上不再发起第二次连接`() {
+        val server = MockWebServer()
+        val serverOpened = CountDownLatch(1)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        serverOpened.countDown()
+                        // 与 Worker 的真实行为一致：先发 error 帧，再以 4002 关闭
+                        webSocket.send("""{"type":"error","code":"device_revoked","message":"revoked"}""")
+                        webSocket.close(4002, "device credential revoked")
+                    }
+                },
+            ),
+        )
+        // 第二、三次连接若真的发生，会被 MockWebServer 按队列顺序立刻放行，
+        // 所以「只发生一次连接」这件事可以被 requestCount 精确测出来。
+        repeat(3) {
+            server.enqueue(
+                MockResponse().withWebSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(webSocket: WebSocket, response: Response) = Unit
+                    },
+                ),
+            )
+        }
+        server.start()
+
+        val states = CopyOnWriteArrayList<LinkState>()
+        val config = HubConfig(
+            serverUrl = server.url("/phone/ws").toString(),
+            deviceId = "test-phone-1",
+            // 退避窗口压到 300ms，让"本来会重连"在测试时限内必然发生
+            reconnectInitialDelayMs = 300L,
+            reconnectMaxDelayMs = 300L,
+            reconnectJitterRatio = 0.0,
+        )
+        val client = PhoneLinkClient(
+            configProvider = { config },
+            credentialProvider = { TokenLoadResult.Present("test-token-not-a-secret") },
+            androidSdk = 35,
+            onStateChanged = { states += it },
+        )
+
+        try {
+            client.start()
+            assertTrue("服务端已握手", serverOpened.await(5, TimeUnit.SECONDS))
+            assertTrue(
+                "应当是「凭据已被撤销」的终态，实际 $states",
+                awaitState(states) { it is LinkState.Revoked },
+            )
+
+            // 等待时间远长于退避窗口：若还留着自动重连，这里必然出现第二次连接
+            Thread.sleep(1_500L)
+
+            assertEquals("撤销之后不得再发起任何新连接，状态历史=$states", 1, server.requestCount)
+            assertFalse("不得再进入重连等待", states.any { it is LinkState.Reconnecting })
+            assertEquals(
+                LinkState.Revoked(PhoneLink.REVOKED_DETAIL),
+                states.filterIsInstance<LinkState.Revoked>().last(),
             )
         } finally {
             client.shutdown()

@@ -2,11 +2,13 @@ package com.androidmcphub.app.protocol
 
 import com.androidmcphub.app.capability.Capability
 import com.androidmcphub.app.capability.CapabilityDispatcher
+import com.androidmcphub.app.capability.CapabilityPolicy
 import com.androidmcphub.app.capability.CapabilityResult
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.random.Random
@@ -36,6 +38,10 @@ class PhoneLinkTest {
          * 也就是说默认情况下任何 `tool_request` 都应当得到 `unsupported_tool`。
          */
         capabilities: List<Capability> = emptyList(),
+        /**
+         * 集中审计问题 5：本地授权策略。默认放行，只有需要测总开关的用例才传。
+         */
+        policy: CapabilityPolicy = CapabilityPolicy.AllowAll,
     ) {
         var now: Long = 1_760_000_000_000L
         val logs = mutableListOf<Pair<LogLevel, String>>()
@@ -47,7 +53,7 @@ class PhoneLinkTest {
             random = Random(20241201),
             clock = { now },
             log = { level, text -> logs += level to text },
-            dispatcher = CapabilityDispatcher(capabilities, clock = { now }),
+            dispatcher = CapabilityDispatcher(capabilities, clock = { now }, policy = policy),
         )
 
         init {
@@ -452,6 +458,114 @@ class PhoneLinkTest {
         assertEquals(LinkState.AuthFailed("HTTP 403"), h.link.state)
     }
 
+    // ---- 集中审计问题 4：4002 服务端撤销 → 终态、不自动重连 -----------------
+
+    @Test
+    fun `问题4 close 4002 进入可诊断的终态且不再自动重连`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.onSocketClosed(code = 4002, reason = "device credential revoked")
+
+        assertEquals("撤销后的关闭不得派发任何动作（尤其是 ScheduleReconnect）", emptyList<LinkAction>(), actions)
+        assertEquals(LinkState.Revoked(PhoneLink.REVOKED_DETAIL), h.link.state)
+        assertTrue("日志必须说清「不自动重连」与下一步动作", h.logTexts().contains("不自动重连"))
+        assertTrue(h.logTexts().contains("close code=4002"))
+    }
+
+    @Test
+    fun `问题4 普通断线仍然照旧自动重连（4002 不改变既有行为）`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.onSocketClosed(code = 1006, reason = "连接被重置")
+
+        assertEquals(LinkAction.Close, actions.first())
+        assertTrue(h.link.state is LinkState.Reconnecting)
+    }
+
+    @Test
+    fun `问题4 服务端换连接（4001）仍然自动重连`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.onSocketClosed(code = 4001, reason = "connection replaced")
+
+        assertEquals(
+            "4001 是「有别人接管了」，不是终止信号：必须保留原有的重连行为",
+            LinkAction.Close,
+            actions.first(),
+        )
+        assertTrue(actions.any { it is LinkAction.ScheduleReconnect })
+        assertTrue(h.link.state is LinkState.Reconnecting)
+    }
+
+    @Test
+    fun `问题4 收到 device_revoked 错误帧就立刻进入终态（关闭回调可能永远不来）`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.onTextFrame(
+            """{"type":"error","code":"device_revoked","message":"SERVER-TEXT-MUST-NOT-BE-LOGGED"}""",
+        )
+
+        assertEquals("收到撤销帧要主动关掉 socket，不能让半死的连接挂着", listOf(LinkAction.Close), actions)
+        assertEquals(LinkState.Revoked(PhoneLink.REVOKED_DETAIL), h.link.state)
+        assertTrue(h.logTexts().contains("error 帧 code=device_revoked"))
+        // 对端给的 message 绝不进日志（Gate 0.3 审计发现项 1）
+        assertTrue("服务端自由文本不得出现在日志里", !h.logTexts().contains("SERVER-TEXT-MUST-NOT-BE-LOGGED"))
+    }
+
+    @Test
+    fun `问题4 错误帧与 4002 都到达时只进一次终态、只记一条日志`() {
+        val h = Harness()
+        h.connect()
+
+        h.link.onTextFrame("""{"type":"error","code":"device_revoked","message":"撤销"}""")
+        val logsAfterFrame = h.logs.count { it.second.contains("撤销了本机凭据") }
+
+        val actions = h.link.onSocketClosed(code = 4002, reason = "device credential revoked")
+
+        assertEquals(emptyList<LinkAction>(), actions)
+        assertEquals(LinkState.Revoked(PhoneLink.REVOKED_DETAIL), h.link.state)
+        assertEquals("两条证据是同一件事，不能记两遍", 1, logsAfterFrame)
+        assertEquals(1, h.logs.count { it.second.contains("撤销了本机凭据") })
+    }
+
+    @Test
+    fun `问题4 撤销之后网络恢复、心跳节拍、残留定时器都不得复活连接`() {
+        val h = Harness()
+        h.connect()
+        h.link.onSocketClosed(code = 4002, reason = "device credential revoked")
+
+        assertEquals("网络恢复与「凭据被撤销」无关", emptyList<LinkAction>(), h.link.onNetworkAvailable())
+        h.now += 60_000L
+        assertEquals("心跳节拍也不得重启连接", emptyList<LinkAction>(), h.link.onTick())
+        assertEquals("残留的重连定时器到点必须失效", emptyList<LinkAction>(), h.link.onReconnectTimerFired())
+        assertEquals(LinkState.Revoked(PhoneLink.REVOKED_DETAIL), h.link.state)
+    }
+
+    @Test
+    fun `问题4 用户更新令牌后点连接可以恢复（终态是可逆的出口）`() {
+        val h = Harness()
+        h.connect()
+        h.link.onSocketClosed(code = 4002, reason = "device credential revoked")
+
+        // 用户在「高级设置」换上新令牌后点「连接」：这就是唯一的出口
+        val actions = h.link.start()
+        assertEquals(listOf(LinkAction.Open), actions)
+        assertEquals(LinkState.Connecting, h.link.state)
+
+        // 新凭据下重新连上，且之后的普通断线恢复自动重连
+        h.link.onSocketOpened(androidSdk = 35)
+        h.link.onTextFrame(h.welcomeFrame())
+        assertTrue(h.link.state is LinkState.Connected)
+
+        val afterDrop = h.link.onSocketClosed(code = 1006, reason = "连接被重置")
+        assertTrue("终态出口之后必须恢复正常的重连行为", h.link.state is LinkState.Reconnecting)
+        assertTrue(afterDrop.any { it is LinkAction.ScheduleReconnect })
+    }
+
     @Test
     fun `本地配置错误进入出错状态且不重连`() {
         val h = Harness()
@@ -659,6 +773,32 @@ class PhoneLinkTest {
         assertTrue(obj.getBoolean("ok"))
         assertEquals(42, obj.getJSONObject("result").getInt("battery_level_percent"))
         assertEquals("能力应当被调用一次", 1, tool.calls)
+    }
+
+    @Test
+    fun `问题5 总开关关着时工具回 not_permitted 且不执行，而 phone_ping 不受影响`() {
+        val tool = FakeTool(name = "battery_get_status")
+        var permitted = false
+        val h = Harness(capabilities = listOf(tool), policy = { permitted })
+        h.connect()
+
+        // phone_ping 是连通性探测，不属于「本地能力」，总开关管不着它
+        val pong = h.link.onTextFrame(h.pingFrame("ping-toggle"))
+        assertEquals("phone_ping 必须照常回 pong", 1, pong.size)
+
+        val denied = h.link.onTextFrame(toolFrame("tr-toggle-1"))
+        val deniedObj = JSONObject((denied.single() as LinkAction.Send).frame)
+        assertFalse(deniedObj.getBoolean("ok"))
+        assertEquals("not_permitted", deniedObj.getJSONObject("error").getString("code"))
+        assertEquals("开关关着的时候能力绝不能被执行", 0, tool.calls)
+
+        // 用户在界面上打开总开关：**不重连**，同一条连接上立刻生效
+        permitted = true
+
+        val allowed = h.link.onTextFrame(toolFrame("tr-toggle-2"))
+        val allowedObj = JSONObject((allowed.single() as LinkAction.Send).frame)
+        assertTrue(allowedObj.getBoolean("ok"))
+        assertEquals(1, tool.calls)
     }
 
     @Test
