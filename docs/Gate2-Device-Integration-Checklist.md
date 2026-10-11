@@ -94,6 +94,10 @@ APK 里可核对的内容（都是**从产物里读出来的**，不是从源码
 2. 页面上方/右侧找 **Run workflow** 按钮（下拉，默认收起）→ 点开。
 3. **Branch** 下拉：默认是 `gate0`，**必须改成 `feat/gate2-core`**。
 4. **confirm_deploy** 输入框：一字不差填 `DEPLOY-GATE2`（全大写，中间是连字符）。
+   > 输入框旁边的说明文字可能还写着 `Type DEPLOY to authorize a real Cloudflare deployment`
+   > —— 表单项的文案取自**默认分支（gate0）那份文件**，不一定跟着你选的分支变
+   > （要是你那边显示的已经是 Gate 2 的文案，忽略这一条）。
+   > 字段名只有一个 `confirm_deploy`，以本文档为准填 `DEPLOY-GATE2`。
 5. 点绿色的 **Run workflow**。页面出现一个新的 run，点进去。
 6. 逐步看：`Validate target and configuration` 会打印
    `::warning::Gate 2 临时路径：…` 与 `部署目标：feat/gate2-core (Gate 2 联调，临时路径) @ <sha>`；
@@ -110,7 +114,11 @@ APK 里可核对的内容（都是**从产物里读出来的**，不是从源码
 9. 关于 **GitHub 手机 App**：GitHub 官方文档只写了网页路径的手动派发。App 里进
    `仓库 → Actions → Worker manual deployment`，**如果**上方有 `Run workflow` 按钮，填法完全一样；
    **没有这个按钮就回浏览器**（网页版最稳，必要时用浏览器菜单里的"桌面版网站/Request desktop site"）。
-10. 别顺手做的两件事：**不要合并 `gate0`**；**不要**给这个工作流加 `push` 触发器（加了会被闸门测试和 review 拦下）。
+10. **万一 run 一上来就是 `skipped`、一个步骤都没跑**：那说明这次 run 取的是默认分支那份工作流
+   （它的 `if` 只认 `gate0`）。这时**不要**反复点 —— 本次不会部署任何东西（安全的失败方向），
+   把 run 页面截图发回来即可；那种情况下要走"有电脑"那条路（A2）。正常情况应能看到
+   run 的 ref 是 `feat/gate2-core`，且第一个步骤打出 Gate 2 的 `::warning::`。
+11. 别顺手做的两件事：**不要合并 `gate0`**；**不要**给这个工作流加 `push` 触发器（加了会被闸门测试和 review 拦下）。
     这条 Gate 2 路径是临时的：真机验证通过、代码并入 `gate0` 之后，要连同闸门里那两条配对约束与反向用例一起删掉。
 
 ---
