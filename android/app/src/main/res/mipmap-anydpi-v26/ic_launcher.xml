@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  自适应图标：底色是图标卡片的近白灰，前景是新版线条图案（蓝色 M/C + 云 + 锁）。
-  图案只占画布中央 72%，所以圆角方形遮罩与圆形遮罩都不会切到内容。
-  <monochrome> 是 Android 13+ 的「主题图标」层：系统拿它当作蒙版再自己上色，
-  所以它必须是纯色剪影（这里用图案的 alpha 通道做成黑色），彩色前景不能直接复用。
+  自适应图标（Gate 2 换的新设计稿）。
+  前景是那张满幅插画（两块玻璃片 + 轨道 + 星空），铺满 108dp 画布；
+  圆形、圆角方形、圆角矩形三种启动器遮罩都只切掉四个角，切不到构图主体。
+  底色取插画卡片顶部夜空的主色 #283C5C，只在极端遮罩/视差偏移下才会露出来。
+  <monochrome> 是 Android 13+ 的「主题图标」层：系统拿它的 alpha 当蒙版、自己上色，
+  所以它必须是纯色剪影（同构画的两块圆角玻璃 + 轨道 + 两个光点），彩色前景不能直接复用。
+  两层资源都由 android/art/make_launcher_icon.py 从 android/art/ic_launcher_source.png 生成。
 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/ic_launcher_background" />

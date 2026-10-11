@@ -27,16 +27,31 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AndroidMcpHub">
 
+        <!--
+          桌面图标入口是启动页（SplashActivity），它停一下再把用户交给 MainActivity。
+          通知栏点进来走的是 MainActivity 自己（PendingIntent 直接指向它），不经过启动页 ——
+          「回来看一眼连接状态」不该再看一遍启动页。
+        -->
         <activity
-            android:name=".MainActivity"
+            android:name=".SplashActivity"
             android:exported="true"
-            android:launchMode="singleTop"
-            android:theme="@style/Theme.AndroidMcpHub">
+            android:theme="@style/Theme.AndroidMcpHub.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          主界面。exported 保持 true，但不再有 intent-filter：它只能被显式启动
+          （启动页、通知栏），联调时也还能用 `adb shell am start -n
+          com.androidmcphub.app/.MainActivity` 直接打开主界面，跳过启动页。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.AndroidMcpHub" />
 
         <!--
           前台服务：类型是 specialUse —— 协议要求 6 种类型之外的「其它」，

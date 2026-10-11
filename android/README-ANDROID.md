@@ -331,19 +331,33 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 
 | 层 | 资源 | 说明 |
 | --- | --- | --- |
-| `background` | `@color/ic_launcher_background` = `#F0F0F1` | 从原始图标卡片内部采到的中位色 |
-| `foreground` | `@mipmap/ic_launcher_foreground`（mdpi→xxxhdpi 五档 PNG） | 蓝色 M/C + 云 + 锁的线条图案；**只占画布中央 72%**，所以圆角方形与圆形遮罩都不会切到内容 |
-| `monochrome` | `@mipmap/ic_launcher_monochrome` | Android 13+ 的**主题图标**层：系统拿它当蒙版自己上色，所以它必须是**纯色剪影**（这里用图案的 alpha 通道做成黑色），不能直接复用彩色前景 |
+| `background` | `@color/ic_launcher_background` = `#283C5C` | 图标设计稿卡片顶部夜空的主色 |
+| `foreground` | `@mipmap/ic_launcher_foreground`（mdpi→xxxhdpi 五档 PNG） | Gate 2 的新设计稿：两块玻璃片 + 轨道 + 星空的满幅插画，**铺满 108dp 画布**；圆形/圆角方形/圆角矩形遮罩都只切四个角，切不到构图主体 |
+| `monochrome` | `@mipmap/ic_launcher_monochrome` | Android 13+ 的**主题图标**层：系统拿它当蒙版自己上色，所以它必须是**纯色剪影**（同构画两块圆角玻璃 + 轨道 + 两个光点，白色 + alpha），不能直接复用彩色前景 |
 
-前景/单色层由 [art/make_adaptive_icon.py](art/make_adaptive_icon.py) 从 [art/ic_launcher_source.png](art/ic_launcher_source.png)（设计稿）生成，**脚本与源图都在仓库里**，所以这一步是可复现的：
+> Gate 0/1 的旧图标（浅灰卡片 + 蓝色 M/C 线条图案，图案只占中央 72%）在 Gate 2 被这张新设计稿替换。旧稿的转换脚本 `art/make_adaptive_icon.py` 已删除：新稿整张卡片就是图案，没有"抠出图案再缩到 72%"这一步。
+
+前景/单色层由 [art/make_launcher_icon.py](art/make_launcher_icon.py) 从 [art/ic_launcher_source.png](art/ic_launcher_source.png)（设计稿）生成，**脚本与源图都在仓库里**，所以这一步是可复现的：
 
 ```bash
-python3 android/art/make_adaptive_icon.py    # 只需要 Pillow，不需要 Android SDK
+python3 android/art/make_launcher_icon.py    # 只需要 Pillow，不需要 Android SDK
 ```
 
-实测该脚本重跑一遍，五个密度的 PNG **字节完全一致**（改脚本请连 `res/values/colors.xml` 里的 `ic_launcher_background` 一起改，脚本会把它测出来的中位色打印出来）。
+实测该脚本重跑一遍，五个密度的 PNG **字节完全一致**（改脚本请连 `res/values/colors.xml` 里的 `ic_launcher_background` 一起改，脚本会把它测出来的边缘色打印出来）。
 
-### 5.2 边到边（edge-to-edge）
+### 5.2 启动页
+
+冷启动先经过 `SplashActivity`：满屏铺 `res/drawable-nodpi/splash_poster.png`（设计稿海报，`ContentScale.Crop`，9:16 的图在更长的屏幕上裁两侧而不是留边框），停 900ms 后淡入交给 `MainActivity`，随即 `finish()`。
+
+三件事刻意这样做：
+
+* **只有桌面图标走启动页**。Manifest 里 `LAUNCHER` 入口指向 `SplashActivity`，`MainActivity` 不再有 `intent-filter`（`exported` 仍为 `true`，所以通知栏的 `PendingIntent` 与 `adb shell am start -n com.androidmcphub.app/.MainActivity` 都能直接打开主界面、跳过启动页）。"回来看一眼连接状态"不该再看一遍启动页。
+* **三处底色同色**：`values/colors.xml` 的 `splash_background` = `#324262`（海报顶部夜空色）同时用于 `Theme.AndroidMcpHub.Splash` 的 `windowBackground`（Android 11 及以下拿它当冷启动首帧）与 `values-v31/themes.xml` 的 `android:windowSplashScreenBackground`（Android 12+ 的系统启动屏），海报顶部也是同色 —— 从点图标到海报之间没有色块跳动。
+* **配置变更不重放**：`savedInstanceState != null`（旋转、深浅色切换导致重建）时直接跳主界面，不会"转个屏又看 1 秒启动页"。
+
+海报不做任何处理，所以仓库里只有 `res/drawable-nodpi/splash_poster.png` 这一份（不另存设计稿副本）：`drawable-nodpi` 表示按原始像素使用，屏幕适配交给 Compose 的 `ContentScale.Crop`。
+
+### 5.3 边到边（edge-to-edge）
 
 `MainActivity.onCreate` 显式调用 `enableEdgeToEdge()`。理由：Android 15/16 对 `targetSdk 35+` **强制**边到边，而且 Android 16 上 `windowOptOutEdgeToEdgeEnforcement` **已弃用且被禁用**（想退出也退不出）。显式调用让低版本走同一条布局路径，避免"在 Android 14 上正常、在 16 上被系统栏盖住"这类只在新机上出现的差异。
 
@@ -357,7 +371,8 @@ python3 android/art/make_adaptive_icon.py    # 只需要 Pillow，不需要 Andr
 
 ```
 app/src/main/java/com/androidmcphub/app/
-├── MainActivity.kt              # 唯一的 Activity，只负责挂 Compose
+├── SplashActivity.kt            # 启动页：满屏海报 → 淡入 MainActivity（LAUNCHER 入口）
+├── MainActivity.kt              # 主界面 Activity，只负责挂 Compose
 ├── HubApplication.kt            # 进程启动打一条日志
 ├── core/
 │   ├── HubConfig.kt             # 配置 + 表单草稿 + toMap/fromMap（纯逻辑）
@@ -409,6 +424,8 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 
 合计 **171** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
+> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与"能力总开关默认关闭"那条防回归）没有逐条展开。**当前实测**（Gate 2，`--rerun` 强制重跑）：**19 个测试类、255 条用例、0 failures、0 errors**（命令见本节开头）。
+
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >
 > ⚠ 一个真实的坑：新写的 `SocketFailureTest` 里放了**字面量**的 `ghp_` + 32 个 `A` 作为垃圾输入，`worker/test/security.test.ts` 的「没有 GitHub 令牌形状的字符串」当场变红（第四次被自家扫描抓到）。处置是**改被扫的内容**（`"ghp_" + "A".repeat(32)`），不是给文件开白名单。`service/ConnectGateTest.kt:15` 早就留了注释讲这个坑。
@@ -430,7 +447,12 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 
 | # | 要验证的事 | 期望结果 | 为什么自动化覆盖不到 |
 | --- | --- | --- | --- |
-| **0** | **安装 Gate 0.2 的 APK 后冷启动**（**Gate 0.2 本轮最需要的一步**） | 点图标进入主界面，**不再立刻回桌面**。若仍闪退，请抓 `adb logcat -b crash` 与 `adb shell dumpsys package com.androidmcphub.app` 回传 | 本环境没有真机/模拟器。已经证明的只是"Manifest 要的那个类现在确实在 dex 里"（真实 APK + 真实 dex），**不等于**"启动不会因别的原因崩" |
+| **0** | **安装 APK 后冷启动**（**Gate 0.2 起每轮都要过的一步**） | 点图标进入主界面，**不再立刻回桌面**。若仍闪退，请抓 `adb logcat -b crash` 与 `adb shell dumpsys package com.androidmcphub.app` 回传 | 本环境没有真机/模拟器。已经证明的只是"Manifest 要的那个类现在确实在 dex 里"（真实 APK + 真实 dex），**不等于**"启动不会因别的原因崩" |
+| **0a** | 桌面图标（Gate 2 新设计稿） | 图标是那张蓝白玻璃片插画：**满幅显示**、圆心/圆角遮罩下构图不被切；长按弹出的菜单里也是同一张；系统设置里的"应用信息"页一致 | 图标遮罩由各启动器自己决定，无法在 JVM 里复现 |
+| **0b** | 主题图标（Android 13+，「主题图标」开关打开时） | 图标变成单色剪影（两块圆角玻璃 + 轨道 + 两个光点），跟随壁纸取色，**不是**一块实心方块 | 主题图标只由系统渲染 |
+| **0c** | 启动页（Gate 2 新增） | 点图标：系统启动屏（Android 12+）→ 满屏海报，**没有白屏/黑屏闪一下**；约 0.9 秒后淡入主界面 | 窗口底色、系统启动屏与转场动画都要真实系统 |
+| **0d** | 通知栏点进来 | **不经过启动页**，直接是主界面 | `PendingIntent` → Activity 的真实投递 |
+| **0e** | 启动页停留期间旋转屏幕 | 不再重新播一遍启动页，直接进主界面 | 配置变更重建只在真机发生 |
 | 1 | 安装后首次点「连接」，通知栏出现前台服务通知 | 通知存在、文案为「正在连接…」→「已连接到 <host>」，有「断开」按钮 | 通知渲染与前台服务提升要真实系统 |
 | 2 | Android 13+ 首次点「连接」弹权限询问 | 允许 → 通知可见；**拒绝 → 依然能连接成功**，不崩溃、不弹错误 | 运行时权限对话框是系统 UI |
 | 3 | 点通知上的「断开」 | 连接断开、服务停止、通知消失（`STOP_FOREGROUND_REMOVE`） | `PendingIntent` → Service 的真实投递 |
@@ -459,6 +481,6 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - 没有 `androidTest`/仪器测试（环境里没有模拟器）。第 8 节是真机验证的替代方案。
 - **Lint 现在是硬门禁（Gate 0.3 改的）**：`app/build.gradle.kts` 里 `lint { abortOnError = true }`，`:app:lintDebug` 出现任何 Error 都会让构建失败；`./gradlew check` 的依赖图里包含 `:app:lintDebug`，所以 `check` 也会被拦下。被它抓出来的 `service/PhoneLinkService.kt` 的 `MissingPermission` 已经修好（同一方法内**内联** `ContextCompat.checkSelfPermission(...)` + 显式 `catch (e: SecurityException)`）——注意**不能在调用点所在方法之外抽一个 `canPostNotifications()` 之类的布尔守卫**，实测 lint 的流分析不跟踪间接守卫，照样报红。
   证据（含"故意注入故障 → `BUILD FAILED in 1m 12s` → 恢复 → `BUILD SUCCESSFUL`"两段原始输出）在 `../test-reports/lint-gate.log`。
-  当前树上还剩 **29 条 warning**（本轮没有逐条处理）。**残余风险**：本仓库没有任何会自动跑的 CI，那个手动 Actions 工作流也只构建 APK、不跑 lint —— 所以将来有人把 `abortOnError` 改回 `false`，**不会有东西自动变红**（`../TEST_REPORT.md` 的 K12）。Manifest 类名这一类问题仍由 §1.0 的第 ② 层硬门禁独立把守。
+  当前树上还剩 **30 条 warning**（本轮没有逐条处理）。Gate 2 从 29 变 30，多出来的那一条是 **`CustomSplashScreen`**：lint 建议用 `androidx.core:core-splashscreen`（SplashScreen API）实现启动页，而不是自己写一个 Activity。这里**接受**这条 warning、不引依赖：该 API 只能显示"纯色底 + 图标"，而本轮的启动页是一张满幅海报（`ContentScale.Crop`），两者不是同一件事；系统启动屏那部分该配的已经配了（`values-v31/themes.xml` 的 `windowSplashScreenBackground`，见 §5.2）。**残余风险**：本仓库没有任何会自动跑的 CI，那个手动 Actions 工作流也只构建 APK、不跑 lint —— 所以将来有人把 `abortOnError` 改回 `false`，**不会有东西自动变红**（`../TEST_REPORT.md` 的 K12）。Manifest 类名这一类问题仍由 §1.0 的第 ② 层硬门禁独立把守。
 - 界面只做了单屏，没有历史图表、没有多设备管理（按任务要求，不做工具管理与跨设备控制）。
 - 服务被系统杀掉的极端情况下，只有用户重新点「连接」才会恢复 —— 这是刻意的取舍，不做任何后台自启。

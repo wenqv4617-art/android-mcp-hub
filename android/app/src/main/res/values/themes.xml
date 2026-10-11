@@ -5,4 +5,14 @@
       MaterialTheme（见 ui/Theme.kt）负责，这里刻意不引 Material Components 的 XML 主题。
     -->
     <style name="Theme.AndroidMcpHub" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!--
+      启动页主题：窗口底色直接用启动页海报顶部的夜空色。
+      Android 11 及以下没有系统启动屏，冷启动时会先画这层 windowBackground，
+      再画 Compose 里的海报 —— 用同色就不会有白/黑闪一下。
+      Android 12+ 的系统启动屏参数在 values-v31/themes.xml 里补。
+    -->
+    <style name="Theme.AndroidMcpHub.Splash" parent="Theme.AndroidMcpHub">
+        <item name="android:windowBackground">@color/splash_background</item>
+    </style>
 </resources>

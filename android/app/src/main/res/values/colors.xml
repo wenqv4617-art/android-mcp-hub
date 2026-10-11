@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 自适应图标的底色：取自图标卡片内部的中位色 #F0F0F1。
-         图案（前景）是从那张卡片里抠出来的，所以底色与卡片观感一致。 -->
-    <color name="ic_launcher_background">#F0F0F1</color>
+    <!--
+      自适应图标的底色：取自图标设计稿卡片顶部夜空的主色 (#283C5C)。
+      前景（@mipmap/ic_launcher_foreground）就是那张卡片本身，已铺满 108dp 画布，
+      所以这个底色只在极端遮罩或视差偏移下露出一点；选卡片自身的边缘色，露出来也不突兀。
+      这个值是 android/art/make_launcher_icon.py 测出来的，改图标请重跑脚本并同步这里。
+    -->
+    <color name="ic_launcher_background">#283C5C</color>
+
+    <!--
+      启动页的窗口底色：取启动页海报顶部夜空的主色 (#324262)。
+      Android 12+ 先拿它当系统启动屏底色，再画启动页海报（海报顶部同色）——
+      两者之间没有色差；Android 11 及以下用它当"冷启动首帧"的底色。
+    -->
+    <color name="splash_background">#324262</color>
 </resources>

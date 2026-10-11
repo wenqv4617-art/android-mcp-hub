@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Android 12（API 31）强制要求所有应用都有一个"系统启动屏"：先画
+      windowSplashScreenBackground + 应用图标，再交给 Activity。
+      把底色对齐成启动页海报顶部的夜空色，并把图标动画时长压短，
+      系统启动屏与启动页海报之间就不会出现色块跳动（视觉上是一次连续启动）。
+      图标本身不在这里指定，用应用默认的自适应图标。
+    -->
+    <style name="Theme.AndroidMcpHub.Splash" parent="Theme.AndroidMcpHub">
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenAnimationDuration">200</item>
+    </style>
+</resources>
