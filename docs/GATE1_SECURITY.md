@@ -20,7 +20,7 @@ Gate 1 把 `/mcp` 从"共享一个静态 Bearer"升级成"**完整的 OAuth 2.1 
 | 新增面 | 路径 | 认证 | 为什么它危险 | 本项目的处理 |
 | --- | --- | --- | --- | --- |
 | OAuth 发现元数据 | `/.well-known/oauth-protected-resource`<br>`/.well-known/oauth-protected-resource/mcp`<br>`/.well-known/oauth-authorization-server`<br>`/.well-known/openid-configuration` | 无（**公开是规范要求**） | 泄漏 issuer、endpoint、scope | 只暴露"接通所必需"的字段；不含任何凭据、不含设备信息、不含账号 |
-| 动态客户端注册 DCR | `/oauth/register` | 无（**RFC 7591 定义如此**） | 任何人都能注册客户端，客户记录会无限增长 | redirect_uri 必须过**主机白名单**；同 `client_id` 重复注册**不覆盖** `redirect_uris`；**已知问题 G1-K1（无客户端额度上限）** |
+| 动态客户端注册 DCR | `/oauth/register` | 无（**RFC 7591 定义如此**） | 任何人都能注册客户端，客户记录会无限增长 | redirect_uri 必须过**主机白名单**；同 `client_id` 重复注册**不覆盖** `redirect_uris`；**客户端记录数上限 500（超出回 429，`MAX_CLIENTS`）**；一次最多 10 个 `redirect_uris`（`MAX_REDIRECT_URIS`）。原 G1-K1 已关闭 |
 | 同意页 | `/oauth/authorize`（GET 渲染表单） | 需要**有效且未过期的一次性 `consent_id`** | 钓鱼/CSRF/点击劫持 | 表单**只**提交 `consent_id` + 口令 + 决定；`consent_id` 是 24 字节随机数且一次性；CSP `default-src 'none'`、`frame-ancestors 'none'`；**不根据 Origin/Referer 做任何信任判断** |
 | 同意提交 | `/oauth/authorize`（POST） | **运维口令** `OAUTH_OWNER_SECRET` | 口令是唯一的人为闸门 | 常数时间比较；连续失败 10 次锁 5 分钟；**先 peek 再验口令最后才消费**（输错一次不作废授权请求）；**已知问题 G1-K2（限流是全局的，可被用来锁死运维）** |
 | 令牌端点 | `/oauth/token` | 公开客户端（PKCE 代替密钥） | 授权码拦截、重放 | 强制 `S256`；码只能用一次；码绑定 `client_id` + `redirect_uri` + `resource`；刷新令牌**轮换**（旧的重放必然 `invalid_grant`） |
@@ -94,7 +94,7 @@ Gate 1 把 `/mcp` 从"共享一个静态 Bearer"升级成"**完整的 OAuth 2.1 
 | T16 | 跨客户端令牌混用 | **已防** | 码记录带 `clientId`；换令牌时比对；刷新令牌带 `clientId`，A 的刷新令牌拿到 B 必 `invalid_grant`（oauth.test.ts 有专条） |
 | T17 | 同意页 CSRF / 伪造表单 | **已防** | `consent_id` 一次性随机、必须先在服务端存在；CSP + `form-action 'self'`；不信任 Origin/Referer |
 | T18 | 暴力猜 `OAUTH_OWNER_SECRET` | **已缓解** | 常数时间比较 + 10 次失败锁 5 分钟；口令由运维用高熵随机串生成 |
-| T19 | 未授权者注册恶意客户端 | **部分防** | DCR 本来就匿名（规范如此）；恶意客户端**拿不到**任何东西，除非运维在同意页上亲手批准。真正的风险是**存储增长**（G1-K1） |
+| T19 | 未授权者注册恶意客户端 | **部分防** | DCR 本来就匿名（规范如此）；恶意客户端**拿不到**任何东西，除非运维在同意页上亲手批准。真正的风险是**存储增长** —— 已用 `MAX_CLIENTS=500` / `MAX_REDIRECT_URIS=10` 挡住 |
 | T20 | 用随机 Bearer 放大 DO 调用 | **已防** | `/mcp` 只有 `mcp_at_` 前缀才去敲 DO；静态令牌路径不碰 DO |
 | T21 | 刷新令牌重放 | **已防** | 轮换 + 读出即删；旧令牌重放 `invalid_grant` |
 | T22 | 混淆代理（拿本服务的令牌去用别的服务） | **已防** | `resource` 参数 + 令牌记录里的 `resource` 逐字节校验 |
@@ -122,7 +122,7 @@ Gate 1 把 `/mcp` 从"共享一个静态 Bearer"升级成"**完整的 OAuth 2.1 
 
 | 编号 | 问题 | 影响 | 现在的缓解 | 建议 |
 | --- | --- | --- | --- | --- |
-| **G1-K1** | `OAuthStore.alarm()` 只清理 `code:`/`access:`/`refresh:`/`consent:` 四个前缀，**客户端记录（`client:`）没有过期时间、也没有数量上限** | 任何人都能反复调用 `/oauth/register` 把 DO 存储撑大（费用 + 容量） | 无 | 上线前加客户端上限（例如 200 个，超出回 429）或给客户端记录加 TTL |
+| ~~**G1-K1**~~ **已修复** | `OAuthStore.alarm()` 只清理 `code:`/`access:`/`refresh:`/`consent:` 四个前缀，**客户端记录（`client:`）没有过期时间、也没有数量上限** | 任何人都能反复调用 `/oauth/register` 把 DO 存储撑大（费用 + 容量） | 已加 `MAX_CLIENTS = 500`：`handleClientRegister` 在**新建**记录前用 `storage.list({ prefix: PREFIX_CLIENT, limit: MAX_CLIENTS })` 探一次，到顶回 **429**（不是 503，避免被当成基础设施故障）并记 `oauth.client_register_rejected`。刻意**不淘汰最旧的记录**：被淘汰的若正是 ChatGPT 在用的那个，下次 authorize 就会带着未知 `client_id` 进来、表现为「突然要重新连」。本次不做（记为剩余风险）：`client:` 记录仍无 TTL |
 | **G1-K2** | 口令失败节流是**全局单计数器**，不区分来源 IP | 攻击者故意输错 10 次，就能把运维锁在同意页外 5 分钟（自我 DoS） | 窗口 5 分钟后自愈 | 若真实暴露到公网，考虑按来源 IP/ASN 分桶，或改成指数退避而非硬锁 |
 | **G1-K3** | `OAUTH_OWNER_SECRET` 是**共享秘密**，不是多因素 | 口令泄漏 = 任何人都能替运维批准任意客户端 | 用户只在自己终端配置、不进聊天、不进仓库 | 可考虑加 Cloudflare Access 或 WebAuthn（本轮不做） |
 | **G1-K4** | 静态 `MCP_ACCESS_TOKEN` 路径仍然保留 | 多一条长期凭据 | 默认不配置；仅本机 e2e 用 | 真实部署时**不要**设置它 |

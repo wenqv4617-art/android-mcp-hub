@@ -14,7 +14,7 @@
 
 | 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | Gate 1（本轮） | 结果 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **203（8 个文件）** | ✅ 全过 |
+| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **206（8 个文件）** | ✅ 全过 |
 | Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
 | 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
 | Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
@@ -29,7 +29,7 @@
 | ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN（OAuth 已就绪，但没连过）** | §7 / §12.4 |
 | 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ **仍未执行，等用户批准** | §12.4 |
 
-**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→203）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
+**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→206）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
 
 ### 0.1 Gate 0.1 审计问题 → 修复 → 对应测试
 
@@ -760,7 +760,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | 类别 | 通过 | 失败 | 跳过 | NOT RUN |
 | --- | --- | --- | --- | --- |
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
-| Worker/DO 单元测试 | **203** | 0 | 0 | 6（workerd 相关，§5） |
+| Worker/DO 单元测试 | **206** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
 | Android JVM 单测 | **171** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
@@ -770,7 +770,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | GitHub Actions 工作流 | **3（不开启自动部署的静态门禁，§12.13）** | 0 | 0 | 1（工作流本身仍未被执行过，§11.2） |
 | 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
 | ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
-| **合计（已执行）** | **402** | **0** | **0** | **45+** |
+| **合计（已执行）** | **405** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -1192,3 +1192,50 @@ npm run smoke -- --base https://<WORKER>
 
 **这条检查的边界（写在代码注释里了）**：它是**文本级**的，不是 YAML 解析（仓库没有 yaml 依赖，也不想为此引一个）。
 它挡不住刻意用 YAML 花招绕过的人，但**足以挡住无意的自动部署**——而"无意"才是真实风险。
+
+### 12.14 G1-K1 是真的：一个公开端点能无限往 DO 里写
+
+§12.13 是把硬约束变成测试；这一节是**把一个"已知问题"从推测变成结论，然后修掉**。
+
+`docs/GATE1_SECURITY.md` 里记着 G1-K1：「`client:` 记录没有过期时间、也没有数量上限」。
+记着是一回事，**它到底成不成立**是另一回事 —— 于是把它读到代码级确认：
+
+| 环节 | 代码 | 结论 |
+| --- | --- | --- |
+| DCR 必须公开吗 | `worker/src/oauth/endpoints.ts:120` 起，`handleRegister` 无任何认证 | **是**。RFC 7591 如此，ChatGPT 接入时要自己注册，我们没机会要求它先出示凭据 |
+| 一次调用会新建记录吗 | `worker/src/oauth/store-do.ts:221-223`：`clientId` 取调用方传入的值，否则 `mcp_${base64url(randomBytes(16))}`；`endpoints.ts:146-155` 的公开处理器**不转发** `clientId` | **会**。攻击者控制不了 id，但他**不需要**控制 —— 每次 POST 就是一个新的随机 id |
+| 会被清理吗 | `store-do.ts:553-566` `alarm()` 的循环只有 `[PREFIX_CODE, PREFIX_ACCESS, PREFIX_REFRESH, PREFIX_CONSENT]` | **不会**。`PREFIX_CLIENT` 不在里面，而客户端记录本身就没有 `expiresAt` |
+| 上限呢 | 加闸之前，`handleClientRegister` 里没有任何计数检查 | **没有** |
+
+⇒ **一个不需要任何凭据的循环，可以让这块 DO 存储单调增长。** 这是真实的资源耗尽路径，不是理论担忧。
+
+**最小修法**（不重构，只加闸）：
+
+- `worker/src/oauth/store-do.ts` 新增 `export const MAX_CLIENTS = 500` 与 `export const MAX_REDIRECT_URIS = 10`；
+- `handleClientRegister` 在**新建**记录前（放在 `existing` 检查**之后**，因为同 id 重复注册不算新增）
+  用 `storage.list({ prefix: PREFIX_CLIENT, limit: MAX_CLIENTS })` 探一次，到顶返回 **429**
+  并记 `oauth.client_register_rejected`；
+- `worker/src/oauth/endpoints.ts` 把 `store_http_429` 映射成 **429 `temporarily_unavailable`** ——
+  **不能混成 503**，否则运维会去查根本不存在的基础设施故障；
+- `endpoints.ts` 另外给 `redirect_uris` 数组加长度闸（`MAX_REDIRECT_URIS`），否则每个元素都会被写进存储；
+- **刻意不淘汰最旧的记录**：被淘汰的若正是 ChatGPT 在用的那个，它下次 authorize 会带着一个未知
+  `client_id` 进来，用户侧表现为「突然要重新连」。拒绝新增最坏只是暂时挡住新客户端。
+
+**为什么是 500 而不是 200**：单用户 + 单连接器 + 偶尔用别的客户端调试，真实用量是个位数。
+取一个远大于真实用量的值，让正常使用**永远碰不到**它，而循环灌入会在很早就被挡住。
+（剩余风险照旧记为已知问题：`client:` 记录仍没有 TTL。）
+
+**测试与故障注入**（`oauth.test.ts` 46→49）：
+
+| 用例 | 断言 |
+| --- | --- |
+| 一次注册里塞太多 callback 会被拒 | 11 个 `redirect_uris` → 400 `invalid_client_metadata` |
+| 注册记录数到上限后拒绝新增，并且回 429 而不是 503 | 灌满 `MAX_CLIENTS` 次 → 第 `MAX_CLIENTS+1` 次 429、`error=temporarily_unavailable`、文案含「上限」 |
+| 已经连上的客户端不受上限影响 | 容量满之后，**已注册**客户端的同意页仍然 200（防止闸门误伤） |
+
+故障注入：把上限闸门整段删掉 → `× 注册记录数到上限后拒绝新增…` → `Tests 1 failed | 48 passed (49)`；
+还原后 `cmp` 与备份**逐字节一致**。
+
+**顺带修了测试替身的一处不忠实**（K2）：`worker/test/harness/runtime.ts` 的 `FakeDurableObjectStorage.list()`
+原本忽略 `options.limit`，把全部匹配项都返回。真实 workerd 的 `list()` 是**会**尊重 `limit` 的 ——
+替身不忠实就有可能让一个在真运行时成立的断言在替身上以错误的理由通过（或反之）。现在它按插入顺序取到 `limit` 为止。

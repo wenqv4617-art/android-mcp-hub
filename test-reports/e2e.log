@@ -4,7 +4,7 @@
 ══════════════════════════════════════════════════════════════════════════════
   ⚠ Worker / DO 跑在 Node shim 上，不是 workerd —— 见 TEST_REPORT.md
 
-  本地网关已启动：http://127.0.0.1:43555
+  本地网关已启动：http://127.0.0.1:35353
 
 ① /healthz 健康契约
   ✅ PASS  healthz 返回 200  —— status=200
@@ -27,30 +27,30 @@
   ✅ PASS  错误码是 phone_offline（而不是伪造一个 pong）  —— error={"code":"phone_offline","message":"该设备当前没有已建立的连接"}
 
 ⑥ 起一个真实的模拟手机进程（scenario=normal），再 ping
-     [phone] [phone] 连接 ws://127.0.0.1:43555/phone/ws
+     [phone] [phone] 连接 ws://127.0.0.1:35353/phone/ws
      [phone] [phone] device=test-phone-1 scenario=normal
      [phone] [phone] WebSocket 已打开
-     [phone] [phone] phone_ping #0 request_id=39304ab7-50f7-4913-95ec-73d6846132cb
+     [phone] [phone] phone_ping #0 request_id=74bb011b-36a3-473a-aa58-028fb32bacad
   ✅ PASS  phone_ping 成功（真的过了 Worker → DO → WebSocket → 手机进程）
-  ✅ PASS  RTT 由服务端测量且是数字  —— rtt_ms=6
-  ✅ PASS  返回的 request_id 与手机收到的 ping 一致  —— request_id=39304ab7-50f7-4913-95ec-73d6846132cb
+  ✅ PASS  RTT 由服务端测量且是数字  —— rtt_ms=7
+  ✅ PASS  返回的 request_id 与手机收到的 ping 一致  —— request_id=74bb011b-36a3-473a-aa58-028fb32bacad
   ✅ PASS  连接代次 ≥ 1
   ✅ PASS  echo 原样回传  —— （见下一步）
-     [phone] [phone] phone_ping #1 request_id=1b455f0e-e0da-4d64-b814-2da57c894a14
+     [phone] [phone] phone_ping #1 request_id=dc4548b6-3823-4653-b964-7e708442bca6
   ✅ PASS  带 echo 的 ping 成功且 echo 原样返回  —— echo=hello-from-e2e
 
 ⑦ 第二台手机收到 ping 不回（scenario=no-response）→ 必须超时失败
-     [phone] [phone] 连接 ws://127.0.0.1:43555/phone/ws
+     [phone] [phone] 连接 ws://127.0.0.1:35353/phone/ws
      [phone] [phone] device=test-phone-2 scenario=no-response
      [phone] [phone] WebSocket 已打开
-     [phone] [phone] phone_ping #0 request_id=edcecc54-0ccb-4183-a262-b3848061abe6
+     [phone] [phone] phone_ping #0 request_id=80d08186-3557-4364-a396-1971d9f34dbe
      [phone] [phone] scenario=no-response：故意不回 pong
-     [phone] [phone] phone_ping #1 request_id=ab99b31f-5955-44ca-9309-69270ac4bb91
+     [phone] [phone] phone_ping #1 request_id=251c0e2a-7cfb-4771-a670-223d36d88f26
      [phone] [phone] scenario=no-response：故意不回 pong
   ✅ PASS  不回应 → isError=true
   ✅ PASS  错误码是 phone_timeout（服务端测量超时，不是本地说谎）  —— code=phone_timeout
-  ✅ PASS  确实等了配置的超时时间（≥250ms）  —— elapsed=310ms
-     [phone] [phone] phone_ping #2 request_id=a71b4b56-80e4-4ae6-b1bd-709c8dea2937
+  ✅ PASS  确实等了配置的超时时间（≥250ms）  —— elapsed=306ms
+     [phone] [phone] phone_ping #2 request_id=0ee882f7-07ce-4a5d-902a-7fd5de0e88f9
      [phone] [phone] scenario=no-response：故意不回 pong
   ✅ PASS  连续超时仍然是 phone_timeout（连接没被误关，状态没被写坏）  —— code=phone_timeout
 

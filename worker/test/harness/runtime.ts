@@ -337,11 +337,14 @@ export class FakeDurableObjectStorage {
     this.map.clear();
   }
 
-  async list<T>(options?: { prefix?: string }): Promise<Map<string, T>> {
+  async list<T>(options?: { prefix?: string; limit?: number }): Promise<Map<string, T>> {
     const out = new Map<string, T>();
     const prefix = options?.prefix ?? "";
+    const limit = options?.limit ?? Infinity;
     for (const [k, v] of this.map) {
-      if (k.startsWith(prefix)) out.set(k, structuredClone(v) as T);
+      if (!k.startsWith(prefix)) continue;
+      if (out.size >= limit) break;
+      out.set(k, structuredClone(v) as T);
     }
     return out;
   }

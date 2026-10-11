@@ -1,23 +1,25 @@
 
  RUN  v4.1.11 /root/android-mcp-hub
 
- ✓ worker/test/logging.test.ts (12 tests) 66ms
- ✓ worker/test/worker-index.test.ts (20 tests) 42ms
- ✓ worker/test/tools.test.ts (19 tests) 158ms
- ✓ worker/test/mcp-http.test.ts (31 tests) 103ms
- ✓ worker/test/oauth.test.ts (46 tests) 199ms
- ✓ worker/test/mcp-session.test.ts (11 tests) 45ms
- ✓ worker/test/security.test.ts (18 tests) 1040ms
- ✓ worker/test/phone-session.test.ts (46 tests) 5123ms
-     ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  417ms
-     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  312ms
-     ✓ alarm 处理器自己的记账失败不会向外抛，指标照常记一笔  318ms
+ ✓ worker/test/logging.test.ts (12 tests) 58ms
+ ✓ worker/test/tools.test.ts (19 tests) 153ms
+ ✓ worker/test/worker-index.test.ts (20 tests) 60ms
+ ✓ worker/test/mcp-http.test.ts (31 tests) 113ms
+ ✓ worker/test/mcp-session.test.ts (11 tests) 33ms
+ ✓ worker/test/security.test.ts (18 tests) 764ms
+ ✓ worker/test/oauth.test.ts (49 tests) 1481ms
+     ✓ 注册记录数到上限后拒绝新增，并且回 429 而不是 503  653ms
+     ✓ 已经连上的客户端不受上限影响：容量满了之后 authorize 仍然可用  682ms
+ ✓ worker/test/phone-session.test.ts (46 tests) 4956ms
+     ✓ 超过 MAX_PENDING_REQUESTS 的请求立刻失败为 too_many_pending_requests  415ms
+     ✓ 重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功  314ms
+     ✓ alarm 处理器自己的记账失败不会向外抛，指标照常记一笔  315ms
      ✓ 落盘永不返回：调用方仍在超时那一刻拿到 phone_timeout，而不是永远挂着  312ms
-     ✓ 同一个 request_id 的第二个未完成请求被拒绝为 409 duplicate_request_id  311ms
+     ✓ 同一个 request_id 的第二个未完成请求被拒绝为 409 duplicate_request_id  313ms
 
  Test Files  8 passed (8)
-      Tests  203 passed (203)
-   Start at  04:44:46
-   Duration  8.19s (transform 3.83s, setup 2.42s, import 4.34s, tests 6.78s, environment 13ms)
+      Tests  206 passed (206)
+   Start at  04:49:00
+   Duration  6.32s (transform 2.86s, setup 1.40s, import 3.41s, tests 7.62s, environment 1ms)
 
 VITEST_EXIT=0

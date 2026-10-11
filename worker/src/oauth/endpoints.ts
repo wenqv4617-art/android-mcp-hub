@@ -40,7 +40,7 @@ import type { Env } from "../env";
 import { logEvent } from "../util/log";
 import { sha256Hex, timingSafeEqual } from "../util/crypto";
 import { jsonResponse, notFound } from "../util/http";
-import { newOpaqueToken, OAUTH_STORE_ROUTES, type OAuthClientRecord } from "./store-do";
+import { MAX_REDIRECT_URIS, newOpaqueToken, OAUTH_STORE_ROUTES, type OAuthClientRecord } from "./store-do";
 import { HTML_HEADERS, renderConsentPage, renderErrorPage } from "./pages";
 
 /** 授权服务器元数据里声明的端点路径。集中在这里，改一处即可。 */
@@ -125,6 +125,15 @@ export async function handleRegister(request: Request, env: Env, config: AppConf
   if (body === null) return oauthError(request, "invalid_client_metadata", "请求体必须是 JSON 对象", 400);
 
   const rawRedirects = Array.isArray(body["redirect_uris"]) ? body["redirect_uris"] : [];
+  // 数组长度也要有界：每个元素都会被写进 DO 存储，不设上限就是一条灌存储的路径。
+  if (rawRedirects.length > MAX_REDIRECT_URIS) {
+    return oauthError(
+      request,
+      "invalid_client_metadata",
+      `redirect_uris 最多 ${MAX_REDIRECT_URIS} 个`,
+      400,
+    );
+  }
   const redirectUris: string[] = [];
   for (const candidate of rawRedirects) {
     if (typeof candidate !== "string") continue;
@@ -153,6 +162,10 @@ export async function handleRegister(request: Request, env: Env, config: AppConf
       source: "dcr",
     },
   );
+  // 429 是"到上限了"，不是"服务坏了" —— 混成 503 会让人去查根本不存在的基础设施故障。
+  if (!created.ok && created.error === "store_http_429") {
+    return oauthError(request, "temporarily_unavailable", "此服务器的客户端注册数量已达上限", 429);
+  }
   if (!created.ok) return oauthError(request, "server_error", "客户端注册暂时不可用", 503);
 
   logEvent("info", "oauth.client_registered", { count: redirectUris.length, outcome: method });

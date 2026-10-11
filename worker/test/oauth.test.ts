@@ -32,6 +32,7 @@ import { describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { handleMcpRequest, MCP_SESSION_HEADER } from "../src/mcp/http";
 import { sha256Hex } from "../src/util/crypto";
+import { MAX_CLIENTS, MAX_REDIRECT_URIS } from "../src/oauth/store-do";
 import type { Env } from "../src/env";
 import {
   capturedLogs,
@@ -362,6 +363,48 @@ describe("OAuth / 动态客户端注册", () => {
     const rig = await enabledRig();
     const response = await postJson(rig, "/oauth/register", { redirect_uris: ["http://localhost:8787/callback"] });
     expect(response.status).toBe(201);
+  });
+
+  it("一次注册里塞太多 callback 会被拒（数组长度也是有界资源）", async () => {
+    const rig = await enabledRig();
+    const many = Array.from({ length: MAX_REDIRECT_URIS + 1 }, (_, i) => `https://chatgpt.com/cb${i}`);
+    const response = await postJson(rig, "/oauth/register", { redirect_uris: many });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as Record<string, unknown>)["error"]).toBe("invalid_client_metadata");
+  });
+
+  it("注册记录数到上限后拒绝新增，并且回 429 而不是 503", async () => {
+    // ★ 这条守卫的由来：/oauth/register 必须公开（ChatGPT 接入时自己注册，我们没机会
+    //   要求它先出示凭据），而 client: 记录没有 expiresAt、alarm() 也清不掉它们。
+    //   于是"无认证调用者能无限往里写"在加这道闸之前是成立的。
+    const rig = await enabledRig();
+
+    for (let i = 0; i < MAX_CLIENTS; i += 1) {
+      const response = await postJson(rig, "/oauth/register", { redirect_uris: [CALLBACK] });
+      expect(response.status, `第 ${i + 1} 次注册`).toBe(201);
+    }
+
+    const overflow = await postJson(rig, "/oauth/register", { redirect_uris: [CALLBACK] });
+    expect(overflow.status).toBe(429);
+    const body = (await overflow.json()) as Record<string, unknown>;
+    // 429 是"到上限了"，不是"服务坏了"。混成 503 会让人去查不存在的基础设施故障。
+    expect(body["error"]).toBe("temporarily_unavailable");
+    expect(String(body["error_description"])).toContain("上限");
+
+    // 已有记录不能被这道闸误伤：拿一个已注册的 client_id 重复注册仍然正常返回。
+    const first = await postJson(rig, "/oauth/register", { redirect_uris: [CALLBACK] });
+    expect(first.status).toBe(429);
+  });
+
+  it("已经连上的客户端不受上限影响：容量满了之后 authorize 仍然可用", async () => {
+    const rig = await enabledRig();
+    const client = await registerClient(rig);
+    for (let i = 0; i < MAX_CLIENTS; i += 1) {
+      await postJson(rig, "/oauth/register", { redirect_uris: [CALLBACK] });
+    }
+    // 上限只挡"新增注册"，不该让已注册的客户端连同意页都打不开。
+    const page = await get(rig, authorizeUrl(client.clientId, CALLBACK, pkce().challenge));
+    expect(page.status).toBe(200);
   });
 
   it("未注册的 client_id 拿不到同意页", async () => {

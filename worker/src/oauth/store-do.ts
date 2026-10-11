@@ -29,6 +29,7 @@
 // ============================================================================
 
 import { sha256Hex, timingSafeEqual } from "../util/crypto";
+import { logEvent } from "../util/log";
 
 export interface OAuthClientRecord {
   clientId: string;
@@ -92,6 +93,28 @@ const PREFIX_ACCESS = "access:";
 const PREFIX_REFRESH = "refresh:";
 const PREFIX_CONSENT = "consent:";
 const KEY_THROTTLE = "consent_throttle";
+
+/**
+ * 最多保留多少个客户端注册记录。
+ *
+ * `/oauth/register`（RFC 7591 DCR）**必须是公开的**：ChatGPT 在接入时会自己注册，
+ * 我们没有办法在那一刻要求它先出示凭据。于是它天然是一个"未认证调用者能往里写"的入口。
+ *
+ * 而 `client:` 记录**没有 expiresAt**，`alarm()` 也就清不掉它们 ——
+ * 也就是说，只要不加这道闸，任何人都能用一个循环把这块存储慢慢撑大
+ * （每次 POST 换一个随机 client_id，就多一条记录）。
+ *
+ * 所以这里给一个上限。取值刻意远大于真实用量（单用户 + 单连接器 + 偶尔用别的
+ * 客户端调试，通常个位数），让正常使用**永远碰不到**它，而循环灌入会在很早就被挡住。
+ *
+ * 为什么是"拒绝"而不是"淘汰最旧的"：被淘汰的记录一旦正是 ChatGPT 正在用的那个，
+ * 它下次 authorize 就会拿着一个未知的 client_id 进来、用户侧表现为"突然要重新连"。
+ * 拒绝新增最坏只是暂时挡住新客户端，不会破坏已经连上的。
+ */
+export const MAX_CLIENTS = 500;
+
+/** 一次注册最多接受多少个 redirect_uri —— 避免有人用超长数组灌存储。 */
+export const MAX_REDIRECT_URIS = 10;
 
 /** 同意页连续失败多少次之后开始拒绝。 */
 export const CONSENT_MAX_FAILURES = 10;
@@ -227,6 +250,19 @@ export class OAuthStore implements DurableObject {
     const existing = await this.ctx.storage.get<OAuthClientRecord>(PREFIX_CLIENT + clientId);
     if (existing !== undefined) {
       return json({ client: summarize(existing), clientSecret: null, created: false });
+    }
+
+    // 上限闸门。放在 existing 检查**之后**：同一个 client_id 重复注册不算新增，
+    // 不该被这道闸挡住（那是正常流程的一部分）。
+    //
+    // list 的 limit 让这里不需要把全部记录读进来 —— 我们只关心"到没到上限"。
+    const probe = await this.ctx.storage.list({ prefix: PREFIX_CLIENT, limit: MAX_CLIENTS });
+    if (probe.size >= MAX_CLIENTS) {
+      logEvent("warn", "oauth.client_register_rejected", {
+        reason: "client_limit_reached",
+        limit: MAX_CLIENTS,
+      });
+      return json({ error: "client_limit_reached", limit: MAX_CLIENTS }, 429);
     }
 
     const clientSecret = method === "none" ? null : newOpaqueToken("mcp_cs");
