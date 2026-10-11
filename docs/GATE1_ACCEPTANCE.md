@@ -44,7 +44,7 @@
 | # | 项目 | 命令 | 结果 | 证据文件 |
 | --- | --- | --- | --- | --- |
 | A1 | TypeScript 类型检查 | `npx tsc --noEmit -p tsconfig.json` | **PASS**（`TYPECHECK_EXIT=0`） | `test-reports/typecheck.log` |
-| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 200 passed (200)` | `test-reports/vitest.log` |
+| A2 | Worker / DO / MCP 协议单元测试 | `npx vitest run --config worker/vitest.config.ts` | **PASS** — `Test Files 8 passed (8)` / `Tests 203 passed (203)` | `test-reports/vitest.log` |
 | A3 | 端到端（Worker + 两个 DO + 模拟手机客户端，走真实 WebSocket） | `npx tsx e2e/run-local-e2e.ts` | **PASS** — `端到端结果：21 通过，0 失败（共 21 项）` | `test-reports/e2e.log` |
 | A4 | Android JVM 单元测试 | `ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest` | **PASS** — `TOTAL tests=171 failures=0 errors=0 skipped=0`（14 个测试类） | `test-reports/android-build.log` |
 | A5 | Manifest 组件类名 ↔ **真实 dex** | `./gradlew --no-daemon :app:verifyManifestClasses` | **PASS**（`VERIFY_EXIT=0`） | `test-reports/android-build.log` |
@@ -64,11 +64,13 @@
 | `worker/test/mcp-http.test.ts` | 31 | `/mcp` 传输层、鉴权、会话、方法派发 |
 | `worker/test/tools.test.ts` | 19 | `phone_ping` 参数校验与结果形状 |
 | `worker/test/worker-index.test.ts` | 20 | 路由、`/healthz` 契约、OAuth 开启/关闭时的认证路径自检 |
-| `worker/test/security.test.ts` | 15 | 仓库凭据扫描、隔离性、DO 绑定数 |
+| `worker/test/security.test.ts` | 18 | 仓库凭据扫描、隔离性、DO 绑定数、**不开启自动部署**（见表下注） |
 | `worker/test/logging.test.ts` | 12 | 日志白名单 / 错误类别 / 凭据形状终检 |
 | `worker/test/mcp-session.test.ts` | 11 | `McpSession` 生命周期与 TTL |
 
-> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+20+19+15+12+11 = **200**，与 vitest 自报的 `200 passed` 逐条吻合。
+> 逐文件计数用 `npx vitest run --config worker/vitest.config.ts --reporter=json --outputFile=…` 解析得到，合计 46+46+31+20+19+18+12+11 = **203**，与 vitest 自报的 `203 passed` 逐条吻合。
+>
+> `security.test.ts` 由 15 增至 18：新增 `describe("安全 / 不开启任何自动部署")` 三条，把任务书硬约束「不开启 GitHub Actions 自动部署」从"人读过工作流文件"变成会失败的测试。三条都做过故障注入验证（`on: push` → 1 红；`id-token: write` + `wrangler deploy` → 2 红），注入后还原到逐字节一致（`3d9cec79…18c8c`）。
 
 ### A4 明细（Android 14 个类，171 条）
 

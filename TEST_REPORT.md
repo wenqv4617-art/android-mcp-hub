@@ -14,7 +14,7 @@
 
 | 测试面 | Gate 0 | Gate 0.1 | Gate 0.2 | Gate 0.3 | Gate 1（本轮） | 结果 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **200（8 个文件）** | ✅ 全过 |
+| Worker / MCP 协议 | 118 | 140（7 个文件） | 140 | 146（7 个文件） | **203（8 个文件）** | ✅ 全过 |
 | Durable Object（PhoneSession / McpSession / **OAuthStore**） | 含在上行（37） | 含在上行（45） | 含在上行（45） | 含在上行（51） | 含在上行（**103**：46 + 11 + 46） | ✅ 全过 |
 | 真实端到端链路（Worker → DO → WebSocket → 独立手机进程） | 21 | 21/21 | 21/21 | 21/21 | **21/21** | ✅ 全过 |
 | Android 编译 + 打包 Debug APK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ `BUILD SUCCESSFUL` |
@@ -29,7 +29,7 @@
 | ChatGPT 官方客户端真实接入 | NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ 仍 NOT RUN | ⛔ **仍 NOT RUN（OAuth 已就绪，但没连过）** | §7 / §12.4 |
 | 真实 Cloudflare 部署 | 未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ 仍未执行 | ⛔ **仍未执行，等用户批准** | §12.4 |
 
-**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→200）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
+**一句话**：Gate 0.1 把审计提出的 R1–R4 都改了、都补了会红的测试（Worker 118→140、Android 90→132）；Gate 0.2 修掉了一个 Gate 0.1 **交付件里真实存在、且用户已经踩到**的启动闪退（`HubApplication.kt` 的 package 与 Manifest 对不上），并补上两层自动化检查（Android 132→135）；Gate 0.3 按独立审计的三项发现做最小修复（手机端日志脱敏、Lint 门禁恢复阻塞、DO 结算路径的故障注入加固，Worker 140→146、Android 135→157）。**Gate 1 做的是任务书第四节的核心任务**：把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 **OAuth 2.1 授权服务器**（新增第三个 DO `OAuthStore`、发现元数据、DCR、强制 PKCE S256、受众绑定、`iss`、刷新轮换、运维同意页），并修掉 Gate 0.3 遗留的三项结算/重建问题（Worker 146→203）。**平台层（workerd）与真机层依旧没测过**，原因在 §5/§6.4 里写清楚 —— 这两块不是"忘了做"，是当前环境做不到；**尤其"这个 APK 装上之后到底还会不会闪退"，依然只能说"修掉了查出来的那一处原因"，不能说"保证不闪退"**（§6.6 末尾）。**Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，那条链目前还没有真的跑过**（§12.4）。
 
 ### 0.1 Gate 0.1 审计问题 → 修复 → 对应测试
 
@@ -125,7 +125,7 @@ $ npx vitest run --config worker/vitest.config.ts
  ✓ worker/test/worker-index.test.ts  (18 tests)
  ✓ worker/test/mcp-http.test.ts      (31 tests)
  ✓ worker/test/tools.test.ts         (19 tests)
- ✓ worker/test/security.test.ts      (15 tests)   ← 13 → 15
+ ✓ worker/test/security.test.ts      (18 tests)   ← 13 → 18
  ✓ worker/test/phone-session.test.ts (40 tests)   ← 26 → 34 → 40
 
  Test Files  7 passed (7)
@@ -237,7 +237,7 @@ entry.settle(build({ ...entry }))           // ← ④ 调用方永远等不到
 
 **★ 一条专门守着"Worker 内不可能伪造 pong"的测试**：给 `dispatchToolCall` 注入一个**永不 resolve** 的转发函数，断言整个调用一直挂起（`Promise.race` 必须拿到 `"still-waiting"`）。谁哪天在工具层加一句"本地兜底 / 超时后自己造个成功"，这条就会红。
 
-### 3.6 安全与隔离（`security.test.ts` 15 个，Gate 0 是 13）
+### 3.6 安全与隔离（`security.test.ts` 18 个，Gate 0 是 13）
 
 - 静态扫描：仓库内**不得**出现 `d1_databases`、`new D1Database`、`env.DB`、`D1Database` 类型引用；`worker/src/env.ts` 里不得声明任何 D1/KV/R2/Queue 绑定字段（**这是"没有 D1"的编译期 + 测试期双重断言**）。
 - 静态扫描：源码/配置/wrangler 配置里不得出现真令牌形状的字面量；`.dev.vars` 与 `local.properties` 必须在 `.gitignore` 里。
@@ -711,7 +711,7 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 8. 真实 Cloudflare 部署后的验收（**任务书明确禁止**，不是遗漏）
 9. 时序侧信道抗性（`SECURITY.md` T1）—— **没测过，只有判断**
 10. 超大请求体压测（T10）—— 未做
-11. 跨凭据负向测试：持有 A 设备令牌者不能冒充 B —— `security.test.ts` 的 15 个用例主要是静态扫描 + 日志安全 + 隔离扫描，**没有逐条核对这条已存在**，阶段 2 必须显式补上并确认它会红
+11. 跨凭据负向测试：持有 A 设备令牌者不能冒充 B —— `security.test.ts` 的 18 个用例主要是静态扫描 + 日志安全 + 隔离扫描，**没有逐条核对这条已存在**，阶段 2 必须显式补上并确认它会红
 12. **`AndroidManifest.xml` 里组件的 `android:exported` / `intent-filter` 语义**没有被任何自动化检查覆盖（本轮只查了"类存在不存在"）。§6.6 的两层检查是**存在性**检查，不是**语义**检查
 13. ~~**`PhoneLinkService.kt:321` 的 `MissingPermission`**（lint 当前树上唯一的 Error）**未处理** —— 见 K10~~ → **Gate 0.3 已处理**（`abortOnError = true` + 内联权限检查，见 §6.7.2）
 14. **Lint 门禁没有被任何 CI 自动执行**（Gate 0.3 新增）—— `abortOnError = true` 只在本地跑 `./gradlew lintDebug`/`check` 时生效；仓库里那个 Actions 工作流**只构建 APK，不跑 lint**，而且**从未被执行过**。所以将来有人改回 `false` 不会有东西自动变红 —— 见 K12
@@ -760,17 +760,17 @@ Gate 0/0.1 的验收范围是"A + B + C 三段链路连通"，**不含** ChatGPT
 | 类别 | 通过 | 失败 | 跳过 | NOT RUN |
 | --- | --- | --- | --- | --- |
 | TypeScript 类型检查 | 1（整包） | 0 | 0 | 0 |
-| Worker/DO 单元测试 | **200** | 0 | 0 | 6（workerd 相关，§5） |
+| Worker/DO 单元测试 | **203** | 0 | 0 | 6（workerd 相关，§5） |
 | 端到端（真实链路） | **21** | 0 | 0 | 0 |
 | Android JVM 单测 | **171** | 0 | 0 | 0 |
 | Manifest 组件类名 ↔ 真实 APK 的 dex（Gate 0.2 新增） | **1（整包 6 个组件）** | 0 | 0 | 0 |
 | Android Lint 门禁（Gate 0.3 新增，实测会红 + 放行） | **2（注入故障 / 恢复）** | 0 | 0 | 0 |
 | Android 真机行为 | 0 | 0 | 0 | 7（§6.4）+ 9（§6.5） |
 | Android Keystore 真实路径 | 0 | 0 | 0 | 1 类（§6.3） |
-| GitHub Actions 工作流 | 0 | 0 | 0 | 1（§11.2） |
+| GitHub Actions 工作流 | **3（不开启自动部署的静态门禁，§12.13）** | 0 | 0 | 1（工作流本身仍未被执行过，§11.2） |
 | 真实 Cloudflare 部署 + OAuth 联调（阶段 B） | 0 | 0 | 0 | 10（§12.4） |
 | ChatGPT 官方客户端验收（阶段 C） | 0 | 0 | 0 | 6（§12.4） |
-| **合计（已执行）** | **396** | **0** | **0** | **45+** |
+| **合计（已执行）** | **402** | **0** | **0** | **45+** |
 
 **关于"0 失败"这句话的边界**：它只覆盖"在 §5 那个 Node 替身上、在 JVM 上、在这些用例断言的那些性质上"。它**不**意味着"这套代码在 Cloudflare 上、在真机上也一定对" —— 那句话要等 §5/§6.4 的 NOT RUN 被消掉之后才能说。
 
@@ -1155,3 +1155,40 @@ npm run smoke -- --base https://<WORKER>
 
 顺带把 `/` 的文案从「Gate 0 骨架」「需要 Authorization: Bearer」改成 Gate 1 的实况
 （现在 `/mcp` 走 OAuth 2.1 访问令牌，并列出两个发现路由）。
+
+### 12.13 把「不开启自动部署」从"人读过一次"变成会失败的测试
+
+前两节是走文档；这一节是走**任务书里的硬约束**。任务书第四节写着「不开启 GitHub Actions 自动部署」——
+仓库里确实只有一个工作流（`.github/workflows/android-debug-apk.yml`），我也确实逐行读过它：
+只有 `workflow_dispatch`、`permissions: contents: read`、正文里没有 wrangler、没有 Cloudflare 凭据、没有任何 deploy 步骤。
+
+**但"我读过一次"不是约束。** 半年后谁往 `on:` 底下加一行 `push:`，不会有人记得回来复查这件事。
+更糟的是：`security.test.ts` 当时**一条**关于 `.github` / workflow / Actions 的断言都没有。
+
+于是新增 `describe("安全 / 不开启任何自动部署")` 三条（`security.test.ts` 15→18）：
+
+| # | 断言 | 为什么是这三条 |
+| --- | --- | --- |
+| 1 | 必须有 `^\s*workflow_dispatch:`，且不得有 `^\s{2}(push\|pull_request\|pull_request_target\|schedule\|repository_dispatch\|workflow_run):` | 这六种触发方式任意一种，都会让"合一次代码就自动跑"成立 |
+| 2 | 正文不得含 `wrangler\|cloudflare\|deploy\|secrets\.\|secrets\[` | 自动部署的**能力**来自这一步，不是来自触发条件 |
+| 3 | 不得含 `:\s*write\b\|id-token`；若有 `permissions:` 则必须含 `contents: read` | `id-token: write` 是 OIDC 换云厂商凭据的前提，等于把部署能力交出去 |
+
+配套加了两个小工具：`stripYamlComments()`（按行剥掉 `^\s*#`）与 `workflowFiles()`（`readdirSync` 过滤 `.ya?ml`，
+**目录不存在时返回空数组**——没有 CI 也是一种合法状态，不该因此报错）。
+
+`stripYamlComments()` 不是可有可无的：这个工作流的开头注释里明明白白写着
+「全文没有 secret、没有 Cloudflare 凭据、没有 wrangler、没有任何 deploy 步骤」——
+现有那个只处理 `//` 与 `/* */` 的 `stripComments()` 剥不掉 YAML 的 `#`，
+第 2 条断言会被**这句声明自己没有 deploy 的注释**误命中。
+
+**三条都实测过"真的会红"**（不是只测过"现在通过"）：
+
+| 注入的故障 | 结果 |
+| --- | --- |
+| `on:` 底下加 `  push:` | `× 工作流只在手动触发时运行…` → `Tests 1 failed \| 17 passed (18)` |
+| 加 `id-token: write` + 一个 `run: npx wrangler deploy` 的步骤 | `× 工作流里没有 wrangler…`、`× 工作流权限是只读的…` → `Tests 2 failed \| 16 passed (18)` |
+
+两次注入后都用备份还原，`sha256sum` 与注入前逐字节一致（`3d9cec79190c27079b057854449b1d569798a79033736a10242251a956518c8c`）。
+
+**这条检查的边界（写在代码注释里了）**：它是**文本级**的，不是 YAML 解析（仓库没有 yaml 依赖，也不想为此引一个）。
+它挡不住刻意用 YAML 花招绕过的人，但**足以挡住无意的自动部署**——而"无意"才是真实风险。

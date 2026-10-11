@@ -195,6 +195,72 @@ describe("安全 / 与既有生产项目完全隔离", () => {
 });
 
 // ---------------------------------------------------------------------------
+//  A2. 不开启任何自动部署
+// ---------------------------------------------------------------------------
+//
+//  任务书写着「不开启 GitHub Actions 自动部署」。之前这条只靠人读工作流文件保证，
+//  而"人读过一次"不构成约束：以后谁加一行 `on: push`，没人会记得回来检查。
+//  这里把它变成会失败的测试。
+//
+//  ⚠ 这是**文本级**检查，不是 YAML 解析（仓库里没有 yaml 依赖，也不想为此引一个）。
+//    它挡不住"用各种 YAML 花招绕过"的刻意攻击，但足以挡住无意的自动部署。
+
+/** 去掉 YAML 注释行 —— 工作流开头的注释里写着"没有任何 deploy 步骤"，不剥掉会误命中。 */
+function stripYamlComments(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+const WORKFLOW_DIR = join(REPO_ROOT, ".github", "workflows");
+
+/** 仓库里所有工作流文件；**没有 CI 也是一种合法状态**，所以这里不报错、回空数组。 */
+function workflowFiles(): string[] {
+  try {
+    return readdirSync(WORKFLOW_DIR)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .map((f) => join(WORKFLOW_DIR, f));
+  } catch {
+    return [];
+  }
+}
+
+describe("安全 / 不开启任何自动部署", () => {
+  it("工作流只在手动触发时运行（push / PR / 定时 / 链式触发一律不许有）", () => {
+    for (const file of workflowFiles()) {
+      const body = stripYamlComments(readFileSync(file, "utf8"));
+
+      // 允许手动与可复用工作流；其余触发方式都会让"合一次代码就自动跑"成立。
+      expect(body, rel(file)).toMatch(/^\s*workflow_dispatch:/m);
+      expect(body, rel(file)).not.toMatch(
+        /^\s{2}(push|pull_request|pull_request_target|schedule|repository_dispatch|workflow_run):/m,
+      );
+    }
+  });
+
+  it("工作流里没有 wrangler、没有任何部署命令、没有密钥注入", () => {
+    for (const file of workflowFiles()) {
+      const body = stripYamlComments(readFileSync(file, "utf8"));
+
+      expect(body, rel(file)).not.toMatch(/wrangler|cloudflare|deploy|secrets\.|secrets\[/i);
+    }
+  });
+
+  it("工作流权限是只读的（不许有 write、不许有 id-token）", () => {
+    for (const file of workflowFiles()) {
+      const body = stripYamlComments(readFileSync(file, "utf8"));
+
+      // id-token: write 是 OIDC 交换云厂商凭据的前提，等于把部署能力交出去。
+      expect(body, rel(file)).not.toMatch(/:\s*write\b|id-token/i);
+      if (/^permissions:/m.test(body)) {
+        expect(body, rel(file)).toMatch(/contents:\s*read/);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 //  B. 运行时检查
 // ---------------------------------------------------------------------------
 
