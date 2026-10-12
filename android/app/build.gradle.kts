@@ -115,6 +115,11 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
+    // ---- UI 导航（改版新增）-------------------------------------------------
+    // 只加这一条依赖：四页底部导航 + 子页路由 + 系统返回键行为都由它提供。
+    // 刻意不引 Hilt/Koin —— 一个 ViewModel、四个页面还不值得上依赖注入框架。
+    implementation(libs.androidx.navigation.compose)
+
     // ---- 协程 / 网络 -------------------------------------------------------
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)

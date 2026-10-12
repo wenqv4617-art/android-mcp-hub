@@ -20,6 +20,9 @@ activityCompose = "1.9.3"
 # BOM 统一 Compose 全家桶版本，下面的 compose-* 依赖都不写版本号。
 composeBom = "2024.12.01"
 coroutines = "1.9.0"
+# Navigation Compose：UI 改版（四页 + 子页路由）唯一新引的依赖。
+# 2.8.5 与 Compose BOM 2024.12.01（Compose 1.7.6）同期，是稳定版。
+navigation = "2.8.5"
 
 # ---- 网络 -----------------------------------------------------------------
 # OkHttp：只用来做 WebSocket 客户端。没有引 Retrofit —— 本工程没有 REST 接口。
@@ -55,6 +58,8 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+# Navigation Compose：四页底部导航 + 子页路由 + 系统返回键行为。
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
 
 # ---- 协程 / 网络 -----------------------------------------------------------
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
