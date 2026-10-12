@@ -54,7 +54,14 @@ describe("Worker / 路由", () => {
     expect(body["config_problems"]).toEqual([]);
 
     const capabilities = body["capabilities"] as Record<string, unknown>;
-    expect(capabilities["tools"]).toEqual(["phone_ping"]);
+    // Gate 2.5：这份自述从 tools.ts 的注册表派生，所以断言跟着注册表走；
+    // 少写一个工具就等于对外宣称了错误的能力清单。
+    expect(capabilities["tools"]).toEqual([
+      "phone_ping",
+      "battery_get_status",
+      "device_get_network",
+      "device_get_storage",
+    ]);
     expect(capabilities["server_initiated_notifications"]).toBe(false);
     // 默认 rig 不配置 OAUTH_OWNER_SECRET ⇒ OAuth 面整体不可用（回 404）。
     expect(capabilities["oauth_authorization_server"]).toBe(false);

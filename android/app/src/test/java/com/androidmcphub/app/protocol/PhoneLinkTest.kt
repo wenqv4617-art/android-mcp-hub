@@ -1,7 +1,9 @@
 package com.androidmcphub.app.protocol
 
 import com.androidmcphub.app.capability.Capability
+import com.androidmcphub.app.capability.CapabilityCategory
 import com.androidmcphub.app.capability.CapabilityDispatcher
+import com.androidmcphub.app.capability.CapabilityMetadata
 import com.androidmcphub.app.capability.CapabilityPolicy
 import com.androidmcphub.app.capability.CapabilityResult
 import com.androidmcphub.app.core.HubConfig
@@ -739,6 +741,13 @@ class PhoneLinkTest {
         override val allowedArguments: Set<String> = emptySet(),
         private val payload: org.json.JSONObject = org.json.JSONObject().put("battery_level_percent", 42),
     ) : Capability {
+        override val metadata: CapabilityMetadata = CapabilityMetadata(
+            name = name,
+            displayName = name,
+            description = "测试用的假能力",
+            category = CapabilityCategory.Other,
+        )
+
         var calls: Int = 0
             private set
 

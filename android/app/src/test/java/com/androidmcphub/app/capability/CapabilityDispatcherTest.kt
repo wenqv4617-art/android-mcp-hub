@@ -27,6 +27,14 @@ class CapabilityDispatcherTest {
         private val validateProblem: String? = null,
     ) : Capability {
 
+        /** 注册清单要求每个能力都带元数据；假能力给一份最小可用的。 */
+        override val metadata: CapabilityMetadata = CapabilityMetadata(
+            name = name,
+            displayName = name,
+            description = "测试用的假能力",
+            category = CapabilityCategory.Other,
+        )
+
         var calls: Int = 0
             private set
 

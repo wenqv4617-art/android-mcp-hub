@@ -11,6 +11,8 @@
 import { describe, expect, it } from "vitest";
 import {
   BATTERY_GET_STATUS_TOOL,
+  DEVICE_GET_NETWORK_TOOL,
+  DEVICE_GET_STORAGE_TOOL,
   dispatchToolCall,
   parsePhonePingArgs,
   PHONE_PING_TOOL,
@@ -41,13 +43,36 @@ const failOutcome: PingOutcome = {
 };
 
 describe("工具层 / 注册表", () => {
-  it("注册表是显式白名单：Gate 2 之后是 phone_ping + battery_get_status，一个不多", () => {
+  it("注册表是显式白名单：Gate 2.5 之后是 phone_ping + 三个只读能力，一个不多", () => {
     // 这条断言刻意用 `toEqual` 整表比对而不是 `toContain`：
     // "多了一个没人审过的工具"必须让测试变红，而不是悄悄通过。
-    // Gate 1 时期这里是 `["phone_ping"]`；Gate 2 工作包 E 显式加了第二个只读能力。
-    expect(toolNames()).toEqual(["phone_ping", "battery_get_status"]);
+    // Gate 1 时期这里是 `["phone_ping"]`；Gate 2 加了 battery_get_status；
+    // Gate 2.5A+B 加了 device_get_network 与 device_get_storage。
+    expect(toolNames()).toEqual([
+      "phone_ping",
+      "battery_get_status",
+      "device_get_network",
+      "device_get_storage",
+    ]);
     expect(PHONE_PING_TOOL.name).toBe("phone_ping");
     expect(BATTERY_GET_STATUS_TOOL.name).toBe("battery_get_status");
+    expect(DEVICE_GET_NETWORK_TOOL.name).toBe("device_get_network");
+    expect(DEVICE_GET_STORAGE_TOOL.name).toBe("device_get_storage");
+  });
+
+  it("两个新工具走 tool 通道、零能力参数、只读幂等", () => {
+    for (const tool of [DEVICE_GET_NETWORK_TOOL, DEVICE_GET_STORAGE_TOOL]) {
+      expect(tool.transport).toBe("tool");
+      // 和 battery_get_status 一样：没有可调项，多一个键就多一条要审的路径。
+      expect(tool.allowedArgs).toEqual([]);
+      expect(tool.annotations?.["readOnlyHint"]).toBe(true);
+      expect(tool.annotations?.["idempotentHint"]).toBe(true);
+      expect(tool.inputSchema["additionalProperties"]).toBe(false);
+      expect(Object.keys(tool.inputSchema["properties"] as Record<string, unknown>).sort()).toEqual([
+        "device_id",
+        "timeout_ms",
+      ]);
+    }
   });
 
   it("每个工具都声明了自己的通道，且通道只有 ping / tool 两种", () => {
