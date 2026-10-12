@@ -30,11 +30,24 @@ data class HubSpacing(
     /** 页面水平边距：**16dp**（视觉规范）。 */
     val screenHorizontal: Dp = lg
 
-    /** 卡片内边距：**16dp**（视觉规范）。 */
-    val cardPadding: Dp = lg
+    /**
+     * 卡片内边距：**14dp**。
+     *
+     * 视觉规范给的是 12–16dp。取中值是因为两边都在压：卡片内边距一旦是 16dp，
+     * 再叠加卡片之间 10dp 的间隔与字段自带的间距，一屏就只剩两三个字段。
+     */
+    val cardPadding: Dp = 14.dp
 
-    /** 列表项之间的垂直间隔：12dp。 */
-    val itemGap: Dp = md
+    /** 列表项之间的垂直间隔：10dp（视觉规范 10–12dp）。 */
+    val itemGap: Dp = 10.dp
+
+    /**
+     * 可点击列表行的最小高度：**52dp**。
+     *
+     * 视觉规范 48–56dp。紧凑的前提是不能把点击区域压到无障碍下限（48dp）以下 ——
+     * 所以"紧凑"是减少留白，不是缩小触摸目标。
+     */
+    val rowMinHeight: Dp = 52.dp
 }
 
 /**

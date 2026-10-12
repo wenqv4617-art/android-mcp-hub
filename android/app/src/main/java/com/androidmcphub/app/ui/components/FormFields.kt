@@ -1,7 +1,6 @@
 package com.androidmcphub.app.ui.components
 
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -12,7 +11,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import com.androidmcphub.app.ui.theme.spacing
 
 /**
  * 统一样式的单行输入框。
@@ -54,9 +52,11 @@ fun HubTextField(
         visualTransformation = visualTransformation,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         trailingIcon = trailing,
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(top = MaterialTheme.spacing.sm),
+        // 组件**不再自带顶部间距**：外层用 `Arrangement.spacedBy` 统一排布。
+        // Stage 1 这里写着 `padding(top = 8.dp)`，于是表单里每一行都拿到
+        // 「组件 8dp + 父布局 8dp」两份间距，十个字段的设置页被垫长了一屏多。
+        // 间距交给父布局后，组件只负责自己的样式。
+        modifier = modifier.fillMaxWidth(),
     )
 }
 

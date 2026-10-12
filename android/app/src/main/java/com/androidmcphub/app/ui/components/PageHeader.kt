@@ -15,6 +15,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 
 /**
  * 页面标题栏 —— 四个主页面和所有子页面共用同一个。
@@ -38,12 +39,17 @@ fun PageHeader(
     TopAppBar(
         title = {
             Column {
-                Text(text = title, style = MaterialTheme.typography.titleLarge)
+                // 页面标题用 headlineSmall（22sp，视觉规范 20–22sp）；
+                // TopAppBar 默认的 titleLarge 在 Stage 2 被降成卡片标题档（18sp），
+                // 所以这里必须显式指定，不能沿用默认值。
+                Text(text = title, style = MaterialTheme.typography.headlineSmall)
                 if (subtitle != null) {
                     Text(
                         text = subtitle,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }

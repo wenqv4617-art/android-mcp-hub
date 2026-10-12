@@ -14,19 +14,20 @@ import androidx.compose.ui.unit.sp
  * 不进这里 —— 它是"内容语义"，不是主题。
  */
 val HubTypography = Typography(
-    // 页面大标题（首页问候、页面名）
+    // 页面大标题（首页问候、页面名）：视觉规范 20–22sp，取上限但不做 24sp ——
+    // 中文标题在 24sp 时会明显比同屏的卡片标题大一档，且更容易折行。
     headlineSmall = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 24.sp,
-        lineHeight = 32.sp,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
     ),
-    // 卡片主标题（连接状态、工具名）
+    // 卡片主标题（连接状态、工具名）：视觉规范 16–18sp。
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 20.sp,
-        lineHeight = 28.sp,
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
     ),
     // 区块标题
     titleMedium = TextStyle(
@@ -49,12 +50,12 @@ val HubTypography = Typography(
         fontSize = 14.sp,
         lineHeight = 20.sp,
     ),
-    // 次要说明（卡片副标题、字段解释）
+    // 次要说明（卡片副标题、字段解释）：视觉规范 12–13sp。
     bodySmall = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Normal,
-        fontSize = 13.sp,
-        lineHeight = 18.sp,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
     ),
     // 小标签（卡片眉标、状态药丸）
     labelMedium = TextStyle(
