@@ -170,7 +170,8 @@ ConnectStartupSequence(
 - `windowOptOutEdgeToEdgeEnforcement` —— **零处引用**，没有要删的。
 - `setStatusBarColor` / `setNavigationBarColor` / `layoutInDisplayCutoutMode` —— **零处引用**，所以"新版本变空操作/行为改变"与我们无关。
 - `windowSoftInputMode` —— **零处引用**（默认值）。`[官方规范]` `adjustResize` 在边到边下不再真正 resize 窗口，所以靠它兜键盘是行不通的；我们用 inset 处理。
-- 内边距**只在唯一一个地方**应用：`ui/HubScreen.kt:123` 的根部 `Modifier.safeDrawingPadding()`。**没有** `Scaffold`、**没有** `imePadding()`，所以不存在"两处叠加导致双倍内边距"这个经典坑（`safeDrawing` 已经包含 `ime`）。
+- 内边距**只在唯一一个地方**应用：`hub/HubApp.kt` 的 `Scaffold` 给出 `innerPadding`，套在 `NavHost` 上；页面内部不再各自 `safeDrawingPadding()`。（UI Stage 1 改版前是 `ui/HubScreen.kt:123` 的根部 `Modifier.safeDrawingPadding()`，该文件已删除。）
+- `NavHost` 上另加 `Modifier.imePadding()`：`Scaffold` 默认的 `contentWindowInsets` **不含** `ime`，设置页的输入框需要它。系统栏与键盘分属两个 inset，不会叠加成双倍内边距。
 - 本轮新增：`MainActivity.onCreate` 里显式调用 `enableEdgeToEdge()`。`[经验判断]` 在低版本上它让布局走同一条路径，避免"在 Android 14 上正常、在 16 上被系统栏盖住"这类只在新机上出现的差异。
   （`enableEdgeToEdge` 来自 `androidx.activity`，该依赖本来就因为 `activity-compose` 在场，没有新增依赖。）
 

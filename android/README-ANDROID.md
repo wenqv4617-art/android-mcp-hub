@@ -260,7 +260,7 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 | **R3** 每 `heartbeatIntervalMs` 发一个 `{"type":"heartbeat"}` | `PhoneLink.onTick()` | `PhoneLinkTest` |
 | **R4** 未知 `type`（以及非法 JSON、缺 `request_id`）→ 忽略并记日志，**不回**错误帧 | `PhoneLinkProtocol.parseIncoming()` + `PhoneLink.onTextFrame()` | `PhoneLinkProtocolTest`、`PhoneLinkTest` |
 | **R5** 单帧超过 `maxFrameBytes`（默认 65536）→ **不回**、记日志（按 **UTF-8 字节数**判断，不是字符数） | `PhoneLink.onTextFrame()` 最前面 | `PhoneLinkTest` |
-| **R6** 收到 `welcome` → 记日志，并把 `connection_generation` 展示在界面上 | `PhoneLink.handleWelcome()` + `HubScreen` | `PhoneLinkTest` |
+| **R6** 收到 `welcome` → 记日志，并把 `connection_generation` 展示在界面上 | `PhoneLink.handleWelcome()` + `ui/model/LinkStatusView.kt`（展示模型，由首页状态卡消费） | `PhoneLinkTest`、`LinkStatusViewTest` |
 
 关于 RTT：显示的是 `(本机收到时刻 − ping 里的 timestamp) × 2`，也就是**假设两端时钟已由 NTP 同步**。
 刻意**不**用 `welcome` 里的 `server_time` 去修正：`welcome` 是单向消息，用它估出的偏移量本身已经吸收了那一次的单程延迟，
@@ -314,16 +314,25 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 
 ## 5. 界面
 
-只有一屏 `ui/HubScreen.kt`：
+四个主页面（底部导航：首页 / 工具 / 服务 / 设置）+ 三个子页（工具详情、添加 MCP 服务器、连接诊断）。
+完整的页面结构、状态来源与主题 Token 见 [../docs/UI-Architecture.md](../docs/UI-Architecture.md)。
 
-1. 「连接」/「断开」按钮（按状态互斥）。
-2. 状态卡片：已断开 / 连接中 / 已连接（代次 N）/ 重连等待（第 N 次，Xs 后）/ 认证失败 / 出错，配不同颜色。
-3. 「最近一次 ping」卡片：`request_id`（等宽字体，**长按复制**）、RTT（毫秒）、服务端时间戳、本机收到时刻；
-   下面附「最近一次错误」——它独立于当前状态，因为状态会被断开/服务销毁复位成「已断开」，
-   而失败原因必须留得下来，否则用户永远看不到连接为什么失败。
-4. 「最近连接日志」列表（时间 + 级别 + 文本，最多 200 条，可清空）。
-5. 可折叠「高级设置」：服务器 URL、设备 ID、设备令牌（密码框，带显示/隐藏切换 + 「清除已保存的令牌」）、
-   上述数值参数、一个「保存」按钮。
+| 页面 | 内容 |
+| --- | --- |
+| **首页** `ui/home/HomeScreen.kt` | 连接状态卡（含「连接」/「断开」，按状态互斥）、设备概况、最近一次 ping 摘要、「最近活动」日志摘要、快捷入口 |
+| **工具** `ui/tools/ToolsScreen.kt` | 本机能力目录（搜索 + 分类筛选 + 可用状态），点击进工具详情；第三方 / 本地 HTTP MCP 来源显示为「未开放」占位 |
+| **服务** `ui/services/ServicesScreen.kt` | 第三方 MCP 服务的容器与空状态（「尚未添加 MCP 服务」）；**不**放 phone-link / Cloudflare 的连接诊断 |
+| **设置** `ui/settings/SettingsScreen.kt` | 连接配置（服务器 URL、设备 ID、设备令牌：密码框 + 显示/隐藏 + 清除）、超时与重连（7 个数值）、能力总开关、保存配置、诊断入口 |
+| **连接诊断** `ui/settings/DiagnosticsScreen.kt` | 当前状态、最近一次 ping 明细（`request_id` 等宽字体、**长按复制**；RTT / 单向延迟 / 服务端时间戳 / 本机收到时刻）、最近一次错误（可清除）、连接日志（最多 200 条，可清空） |
+
+三处需要留意的既有设计：
+* 「最近一次错误」独立于当前状态 —— 状态会被断开/服务销毁复位成「已断开」，
+  而失败原因必须留得下来，否则用户永远看不到连接为什么失败；
+* 状态文案/颜色由 `ui/model/LinkStatusView.kt` 的 `LinkState.toStatusView(serviceRunning)`
+  统一映射（已断开 / 连接中 / 已连接（代次 N）/ 重连等待（第 N 次，Xs 后）/ 认证失败 / 凭据已被撤销 / 出错），
+  页面里不再各写一套；
+* 工具页的数据来自 **`ui/model/ToolCatalog.kt`**（只读展示目录，与
+  `capability/CapabilityDispatcher` 的注册表由单测钉住一致），不是从连接层"问"来的。
 
 ### 5.1 图标
 
@@ -361,7 +370,7 @@ python3 android/art/make_launcher_icon.py    # 只需要 Pillow，不需要 Andr
 
 `MainActivity.onCreate` 显式调用 `enableEdgeToEdge()`。理由：Android 15/16 对 `targetSdk 35+` **强制**边到边，而且 Android 16 上 `windowOptOutEdgeToEdgeEnforcement` **已弃用且被禁用**（想退出也退不出）。显式调用让低版本走同一条布局路径，避免"在 Android 14 上正常、在 16 上被系统栏盖住"这类只在新机上出现的差异。
 
-内边距**只在 `ui/HubScreen.kt:123` 的根部应用一次**（`Modifier.safeDrawingPadding()`），没有 `Scaffold`、没有 `imePadding()` —— 这样就不会出现"两处叠加导致双倍内边距"的经典坑（`safeDrawing` 本身已经包含 `ime`）。
+系统栏内边距**只在 `hub/HubApp.kt` 应用一次**：`Scaffold` 给出 `innerPadding`（systemBars + displayCutout），套在 `NavHost` 上；具体页面不再各自 `safeDrawingPadding()`。另外 `NavHost` 上单独加了 `Modifier.imePadding()` —— `Scaffold` 默认的 `contentWindowInsets` **不含** `ime`，而设置页有 10 个输入框，键盘弹出时必须把内容顶起来。两者不会叠加成双倍内边距（一个给系统栏、一个给键盘）。
 
 逐项官方规范核对（通知权限、FGS 类型与权限、启动限制、超时、Doze/锁屏、网络切换、断开释放、进程被杀、返回手势）见 [COMPATIBILITY-ANDROID-13-16.md](COMPATIBILITY-ANDROID-13-16.md)。
 
@@ -390,7 +399,18 @@ app/src/main/java/com/androidmcphub/app/
 ├── service/
 │   ├── PhoneLinkService.kt      # 前台服务 + 通知 + 网络回调 + 看门狗（LinkBus 做进程内状态总线）
 │   └── ConnectGate.kt           # 「进入前台成功才允许建连」的顺序约束（纯逻辑）
-└── ui/                          # HubViewModel / HubScreen / Theme
+├── hub/
+│   ├── HubApp.kt                # 唯一的 Composable 入口：Scaffold + 底部导航 + NavHost + Snackbar + 通知权限
+│   └── Destinations.kt          # 路由常量（四个 tab + 三个子页），只有路由定义
+└── ui/
+    ├── HubViewModel.kt          # 唯一 ViewModel：转发 LinkBus 状态 + 表单草稿 + 业务动作
+    ├── theme/                   # Color / Type / Shapes / Spacing / Theme（视觉 Token 集中管理）
+    ├── model/                   # LinkStatusView（协议状态→展示模型）、ToolDescriptor / ToolCatalog（只读工具目录）
+    ├── components/              # SectionCard / InfoRow / StatusPill / EmptyState / ToolCard / 表单 / LogRow / PageHeader / Time
+    ├── home/                    # HomeScreen.kt + HomeCards.kt
+    ├── tools/                   # ToolsScreen.kt + ToolDetailScreen.kt
+    ├── services/                # ServicesScreen.kt + AddServiceScreen.kt
+    └── settings/                # SettingsScreen.kt + DiagnosticsScreen.kt
 ```
 
 分层的要点：**状态机不碰 Android 框架**，它只返回 `LinkAction`（`Open` / `Close` / `Send(frame)` / `ScheduleReconnect(delay)`），
