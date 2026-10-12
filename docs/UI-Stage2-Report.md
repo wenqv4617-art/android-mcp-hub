@@ -12,7 +12,8 @@
 | 工作分支 | `feat/ui-revamp` |
 | Stage 1 基线 | `daf4b2c0e5cbec4a51fa14e61c13eb60213bd833` |
 | 本轮代码 tip | `22caf06`（`test(ui): 补导航决策、返回栈、主机名与主题 Token 测试`） |
-| 本轮提交 | `df41718` build(依赖) → `d18f993` feat(主题/组件) → `c80c50f` feat(导航+信息架构) → `22caf06` test → 本报告的 docs 提交 |
+| 本轮提交 | `df41718` build(依赖) → `d18f993` feat(主题/组件) → `c80c50f` feat(导航+信息架构) → `22caf06` test → `4c0920c` docs |
+| 交付分支 tip（已推送） | `4c0920c`（`docs(ui): Stage 2 架构说明、人工验收清单与交付报告`），远端 `feat/ui-revamp` 已更新为 `daf4b2c..4c0920c` |
 | 默认分支 `gate0` | `39ef38eec151b4bb21b4e6cac933ec5221a12302`，**本轮未动**（不合并、不推送） |
 | 未跟踪且永不提交 | `docs/Gate1.5-Stage0-Test-Baseline.md`（保持原状） |
 
