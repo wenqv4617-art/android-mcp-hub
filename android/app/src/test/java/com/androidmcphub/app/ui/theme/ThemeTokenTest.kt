@@ -40,7 +40,12 @@ class ThemeTokenTest {
     fun `间距 Token 符合视觉规范`() {
         val spacing = HubSpacing()
         assertEquals(16.dp, spacing.screenHorizontal)
-        assertEquals(16.dp, spacing.cardPadding)
+        // 视觉规范给的是区间：卡片内边距 12–16dp、卡片之间 10–12dp。
+        // Stage 2 为了"紧凑"取区间里的偏小值，断言跟着区间一起写死，
+        // 避免以后有人顺手把它改回 16dp 却没人看见。
+        assertEquals(14.dp, spacing.cardPadding)
+        assertEquals(10.dp, spacing.itemGap)
+        assertEquals(52.dp, spacing.rowMinHeight)
         assertEquals(4.dp, spacing.xs)
         assertEquals(8.dp, spacing.sm)
         assertEquals(12.dp, spacing.md)
