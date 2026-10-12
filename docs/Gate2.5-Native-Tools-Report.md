@@ -1,6 +1,6 @@
 # Gate 2.5A+B 交付报告：内置工具目录统一 + 网络/存储能力
 
-> 状态：已完成（自动化验证全绿；真机验证未做，见 §H）。
+> 状态：已完成（自动化验证全绿；**生产 Worker 已按用户授权部署，见 §K**；真机验证未做，见 §H）。
 > 所有结论都标了【事实】/【判断】/【建议】，与本次交付的其它文档同一口径。
 
 ---
@@ -23,6 +23,7 @@
 | 项 | 值 |
 | --- | --- |
 | **代码与文档 tip** | `bc6db0cf46479b7e13f6d178e4666611c66e5dde` |
+| 部署通道提交 | `450c7196ea59730644c2693d5db2e0cc0299f799`（§K，已在线上运行的正是这个提交） |
 | 本报告提交 | 见下方"交付提交序列" |
 
 交付提交序列（`feat/gate2-5-native-tools`，基于 `69a6848`）：
@@ -35,6 +36,7 @@
 | `b2eaf33` | Android 与 Worker 的新测试 |
 | `e83151d` | 协议契约、架构说明与本报告 |
 | `bc6db0c` | README 里实测测试数字更新为 28 类 / 347 条 |
+| `450c719` | 部署工作流增加 Gate 2.5 手动通道 + 安全测试同步（§K） |
 
 【事实】本轮**没有**合并到 `gate0`、**没有**新建 `main`、**没有**触发任何部署。
 
@@ -215,7 +217,7 @@
 | R4 | 低 | `volume` 目前只有 `internal_data` 一个取值（经 `StatFs(filesDir)` 统计内部卷），**不代表外置 SD 卡**。将来若加外置卷，应新增字段或新增工具，而不是让 `volume` 出现第二种含义。 |
 | R5 | 低 | `device_get_storage` 的 `used_bytes` 是**文件系统已占用**，与系统设置里"用户数据"口径不同（差在系统占用与保留块）。工具描述与详情页都已写明，但仍可能被误读成"用户文件占用"。 |
 | R6 | 低 | 本轮**没有**跨设备动态工具同步：Worker 注册表是静态的。手机上装旧版本（不认识新工具）时会回 `unsupported_tool` —— 这是设计上的正确行为，但用户会看到一条失败，需要在文档里说清楚。 |
-| R7 | 低 | **ChatGPT 侧的真实可见性依赖部署**。注册表改了但 Worker 没部署时，`tools/list` 里看不到新工具；在用户批准部署之前不得声称端到端已通过。 |
+| R7 | ~~低~~ **已处理** | **ChatGPT 侧的真实可见性依赖部署**。已按用户授权部署（见 §K）；真机与 ChatGPT 的实际调用仍未做（§H）。 |
 | R8 | 低 | 环境限制：无模拟器 / 无真机，Compose UI 与真机读数全部未验证（§H）。 |
 
 **本轮修掉的两处不实描述（历史遗留，如实记录）**：
@@ -246,10 +248,70 @@
 
 ---
 
+## §K 生产 Worker 部署（用户授权后执行）
+
+【事实】用户在本轮明确授权"直接触发 GitHub Actions 的 Worker manual deployment 工作流"，
+并限定范围：不改生产 Secrets、OAuth 配置、设备凭据、Durable Object 绑定或生产数据。
+
+### K1 新增的部署通道
+
+| 项 | 值 |
+| --- | --- |
+| 工作流 | `.github/workflows/deploy-worker.yml`（`Worker manual deployment`） |
+| 新增路径 | `feat/gate2-5-native-tools` ↔ 确认口令 **`DEPLOY-GATE2-5`** |
+| 修改提交 | `450c7196ea59730644c2693d5db2e0cc0299f799` |
+| 原有两条路径 | `gate0` ↔ `DEPLOY`、`feat/gate2-core` ↔ `DEPLOY-GATE2`（**保留未动**） |
+
+**闸门一条都没放宽**：仍然只有 `workflow_dispatch`（无 push / PR / 定时触发器）、
+仍然 `permissions: contents: read`、仍然 `concurrency: android-mcp-hub-manual-deploy` +
+`cancel-in-progress: false`，仍然按序跑 `npm ci` → `typecheck` → `test` → `e2e` →
+`wrangler deploy --dry-run` → 校验 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`（含 32 位十六进制格式）
+→ 才真正 `wrangler deploy`。wrangler 配置里禁用键（`account_id` / `routes` / `d1_databases` / `kv_namespaces` / …）
+与 DO 类名的校验原样保留。
+
+安全测试同步（`worker/test/security.test.ts`，35 → **38 条**）：分支白名单加新分支、
+新增"新分支必须与 `DEPLOY-GATE2-5` 精确配对"约束、真值表补「同分支拿错口令 /
+前缀串 `DEPLOY-GATE2` / 分支名差一个字母 / 多一个后缀 / 大小写」全部为假，
+并新增三条反向用例（删掉确认口令、换到未批准分支、与 Gate 2 的确认口令对调）。
+
+### K2 工作流运行
+
+| 项 | 值 |
+| --- | --- |
+| 运行链接 | https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/38246022592 |
+| 派发方式 | REST `POST /actions/workflows/deploy-worker.yml/dispatches`（`ref: feat/gate2-5-native-tools`，`confirm_deploy: DEPLOY-GATE2-5`） |
+| 派发提交 | `450c7196ea59730644c2693d5db2e0cc0299f799` |
+| 结果 | **completed success**（9 个步骤全绿：Validate target → Install → Gate 1 checks → dry-run → Check credentials → Deploy） |
+| 日志证据 | `Gate 2.5 临时路径：本次部署的是 feat/gate2-5-native-tools 上尚未在真机验证过的代码`、`Uploaded android-mcp-hub`、`Current Version ID: 553d22f2-141a-4aa5-b9b0-d2b09a1415e6` |
+
+### K3 部署后健康检查（真跑过，非推断）
+
+Worker 地址：`https://android-mcp-hub.causticrry.workers.dev`
+
+| 检查 | 结果 |
+| --- | --- |
+| `GET /healthz` | `status: ok`、`config_problems: []`、`d1_bindings: 0`、`durable_object_bindings: [PHONE_SESSION, MCP_SESSION, OAUTH_STORE]`（**绑定未变**） |
+| `capabilities.tools` | **`["phone_ping","battery_get_status","device_get_network","device_get_storage"]`** —— 四个工具，两个新的已在线上 |
+| 运行参数 | `pingTimeoutMs 10000`、`heartbeatIntervalMs 30000`、`maxPendingRequests 16`、`maxPhoneMessageBytes 65536`、`livenessTimeoutMs 90000`、`disabledTools: []`（未禁用任何工具） |
+| `auth` | `device_credentials_configured: 1`、`device_tokens_configured: true`、`oauth_owner_secret_configured: true`（**生产凭据仍在、未改**） |
+| `GET /` | 自述已从注册表派生："内置只读工具（共 4 个）：phone_ping、battery_get_status、device_get_network、device_get_storage" |
+| `POST /mcp`（不带令牌） | **401** `{"error":"unauthorized",...}` —— OAuth 2.1 鉴权仍然生效 |
+| `GET /.well-known/oauth-authorization-server` | **200** —— OAuth 元数据仍可用 |
+
+### K4 明确没做的事
+
+- 未改生产 Secrets、OAuth 配置、设备凭据、Durable Object 绑定、生产数据（K3 的
+  `device_credentials_configured: 1` / `oauth_owner_secret_configured: true` / 三个 DO 绑定即证据）。
+- 未部署 `gate0`、未合并任何分支、未创建 `main`。
+- **真机读数与 ChatGPT 实际调用仍未做** —— Worker 端现在确实对外声明了四个工具，
+  但手机装的是不是认识这两个新工具的版本、ChatGPT 连接器是否已刷新工具列表，都要按 §H 在真机确认。
+
+---
+
 ## 附：本轮"没有做"的事（范围控制）
 
 - 第三方 MCP 客户端接入 / 第三方工具聚合 / 本地 HTTP MCP 中转：**未做**。
 - 协议级授权状态机、人工授权弹窗：**未做**（§十一 范围外）。
 - 长任务、后台任务、任务持久化：**未做**。
-- 生产 Worker 部署：**未做**（等用户批准）。
+- 生产 Worker 部署：**已做**（§K，用户明确授权后执行；只部署 Gate 2.5 分支，未动 `gate0`）。
 - UI 整体重构：**未做**（只改了工具页分类筛选与详情页一行）。
