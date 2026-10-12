@@ -38,6 +38,12 @@ json = "20240303"
 # 「建连 → 发 hello → 收 phone_ping → 回 phone_pong → 断开」这条真实链路，
 # 不需要模拟器。
 mockwebserver = "4.12.0"
+# Robolectric：在 JVM 上跑真实的 Android 框架（不需要模拟器/真机）。
+# Stage 2 用它来验证导航返回栈 —— 这是本轮唯一一个用纯 JVM 逻辑测覆盖不了的
+# 故障面（"点首页进了工具页"就是返回栈记账问题，不是决策函数问题）。
+robolectric = "4.14.1"
+# androidx.test 的 AndroidJUnit4 runner（Robolectric 测试的入口）。
+androidxTestJunit = "1.2.1"
 
 # ---- 本项目自身 -----------------------------------------------------------
 appVersionName = "0.1.4-gate1"
@@ -71,6 +77,12 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 org-json = { group = "org.json", name = "json", version.ref = "json" }
 okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "mockwebserver" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+# ---- Compose UI 测试（在 JVM 上跑，靠 Robolectric 提供 Android 框架）--------
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
+androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+androidx-navigation-testing = { group = "androidx.navigation", name = "navigation-testing", version.ref = "navigation" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

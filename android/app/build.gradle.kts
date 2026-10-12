@@ -83,6 +83,9 @@ android {
             // 因此**不**打开 returnDefaultValues —— 那会让 JSON 解析静默返回空值，
             // 单测就变成假绿。
             isReturnDefaultValues = false
+            // Robolectric 需要真实的资源/Manifest 才能起 Android 环境
+            // （它同时是 Compose UI 测试在 JVM 上运行的前提）。
+            isIncludeAndroidResources = true
         }
     }
 
@@ -131,6 +134,17 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     // 在 JVM 上起假 WebSocket 服务端，验证真实链路而不依赖模拟器。
     testImplementation(libs.okhttp.mockwebserver)
+
+    // ---- Compose UI 测试（JVM + Robolectric，不需要模拟器）------------------
+    // 存在的理由：Stage 1 真机上的导航故障（点首页进了工具页）是**返回栈记账**
+    // 问题，纯逻辑单测测不到。这里用真实 NavHostController + 真实 HubApp 跑一遍
+    // 标签切换与返回键，把这条路径钉住。
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.androidx.navigation.testing)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
 // ---------------------------------------------------------------------------
