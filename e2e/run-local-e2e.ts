@@ -437,8 +437,12 @@ async function main(): Promise<void> {
     const listed = await client.listTools();
     const names = listed.tools.map((t) => t.name);
     check(
-      "工具列表恰好是 phone_ping + battery_get_status（显式白名单，一个不多）",
-      names.length === 2 && names.includes("phone_ping") && names.includes("battery_get_status"),
+      "工具列表恰好是 phone_ping + 三个只读能力（显式白名单，一个不多）",
+      names.length === 4 &&
+        names.includes("phone_ping") &&
+        names.includes("battery_get_status") &&
+        names.includes("device_get_network") &&
+        names.includes("device_get_storage"),
       `tools=[${names.join(", ")}]`,
     );
     out("");
@@ -527,7 +531,7 @@ async function main(): Promise<void> {
     // ---- 8. 会话与协议头 -------------------------------------------------
     out("⑧ 会话与协议头");
     const afterClose = await client.listTools();
-    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 2);
+    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 4);
     out("");
 
     // ---- ⑨ 异常手机场景矩阵（A2–A8）--------------------------------------
@@ -884,11 +888,12 @@ async function main(): Promise<void> {
       deviceId: string,
       timeoutMs: number,
       extraArgs: Record<string, unknown> = {},
+      toolName: string = "battery_get_status",
     ): Promise<{ isError: boolean; structured: Record<string, unknown>; elapsed: number; protocolError: string }> {
       const started = Date.now();
       try {
         const res = await client.callTool({
-          name: "battery_get_status",
+          name: toolName,
           arguments: { device_id: deviceId, timeout_ms: timeoutMs, ...extraArgs },
         });
         const elapsed = Date.now() - started;
@@ -961,6 +966,54 @@ async function main(): Promise<void> {
         (happy.structured["connection_generation"] as number) >= 1 &&
         typeof happy.structured["rtt_ms"] === "number",
       `tool=${String(happy.structured["tool_name"])} gen=${String(happy.structured["connection_generation"])}`,
+    );
+
+    // Gate 2.5A+B：两个新工具走同一条完整链路（MCP → Worker → DO → 手机 → MCP）。
+    //   ⚠ 手机侧这里是 mock-phone 的固定返回，不是真实 Android 设备；
+    //   真实设备的读数验收在真机清单里，不在这里冒充。
+    const net = await toolCall("tool-normal", 3000, {}, "device_get_network");
+    check(
+      "device_get_network 走完整链路成功（不是 Worker 自己编的）",
+      !net.isError && net.structured["ok"] === true && net.structured["tool_name"] === "device_get_network",
+      `ok=${String(net.structured["ok"])} tool=${String(net.structured["tool_name"])}`,
+    );
+    check(
+      "网络结果里有 connected / transport / transports",
+      typeof net.structured["connected"] === "boolean" &&
+        typeof net.structured["transport"] === "string" &&
+        Array.isArray(net.structured["transports"]),
+      JSON.stringify({
+        connected: net.structured["connected"],
+        transport: net.structured["transport"],
+        transports: net.structured["transports"],
+      }),
+    );
+
+    const sto = await toolCall("tool-normal", 3000, {}, "device_get_storage");
+    check(
+      "device_get_storage 走完整链路成功（不是 Worker 自己编的）",
+      !sto.isError && sto.structured["ok"] === true && sto.structured["tool_name"] === "device_get_storage",
+      `ok=${String(sto.structured["ok"])} tool=${String(sto.structured["tool_name"])}`,
+    );
+    check(
+      "存储结果满足 used = total - available，且带卷标识",
+      sto.structured["volume"] === "internal_data" &&
+        Number(sto.structured["used_bytes"]) ===
+          Number(sto.structured["total_bytes"]) - Number(sto.structured["available_bytes"]),
+      JSON.stringify({
+        volume: sto.structured["volume"],
+        total: sto.structured["total_bytes"],
+        available: sto.structured["available_bytes"],
+        used: sto.structured["used_bytes"],
+      }),
+    );
+
+    // 新增工具不该给别的工具开口子：网络/存储同样只认 device_id / timeout_ms。
+    const netBadArg = await toolCall("tool-normal", 3000, { ssid: "wifi-name" }, "device_get_network");
+    check(
+      "新工具也拒绝多余参数（协议错误，拒绝而不是静默忽略）",
+      netBadArg.protocolError.includes("-32602") && netBadArg.protocolError.includes("ssid"),
+      netBadArg.protocolError.slice(0, 120),
     );
 
     // 未知工具：协议错误（JSON-RPC error，SDK 会直接抛），且不会去问手机。

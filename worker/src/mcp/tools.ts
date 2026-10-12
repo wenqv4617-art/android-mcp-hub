@@ -173,13 +173,116 @@ export const BATTERY_GET_STATUS_TOOL: ToolDefinition = {
   },
 };
 
+export const DEVICE_GET_NETWORK_TOOL: ToolDefinition = {
+  name: "device_get_network",
+  title: "Network status (read-only)",
+  description:
+    "读取已授权 Android 手机当前的网络连接状态：是否有活动网络、系统是否验证过联网能力、" +
+    "主要传输类型（wifi/cellular/vpn/ethernet/...）、所有传输类型、是否按流量计费。" +
+    "只读、无副作用，不申请定位权限、不读取 SSID/BSSID/MAC/IP/SIM 等标识，" +
+    "**不会主动访问外部网站来试探网络**。connected 只表示有活动网络，不代表互联网一定可用；" +
+    "系统没有报告的字段返回 null，**不会推测**。",
+  transport: "tool",
+  // 与 battery_get_status 同理：没有可调项，多一个键就多一条要审的路径。
+  allowedArgs: [],
+  inputSchema: {
+    type: "object",
+    properties: {
+      device_id: DEVICE_ID_SCHEMA,
+      timeout_ms: TIMEOUT_SCHEMA,
+    },
+    required: [],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: "object",
+    properties: {
+      ok: { type: "boolean" },
+      request_id: { type: "string" },
+      device_id: { type: "string" },
+      tool_name: { type: "string" },
+      rtt_ms: { type: "number" },
+      server_timestamp: { type: "number" },
+      connection_generation: { type: "number" },
+      connected: { type: "boolean" },
+      validated: { type: ["boolean", "null"] },
+      // 主要传输类型；无活动网络时是 "none"，拿不到类型时是 "unknown"。
+      transport: { type: "string" },
+      transports: { type: "array", items: { type: "string" } },
+      metered: { type: ["boolean", "null"] },
+      internet_capable: { type: ["boolean", "null"] },
+      error_code: { type: "string" },
+      error_message: { type: "string" },
+    },
+    required: ["ok"],
+  },
+  annotations: {
+    readOnlyHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
+};
+
+export const DEVICE_GET_STORAGE_TOOL: ToolDefinition = {
+  name: "device_get_storage",
+  title: "Storage capacity (read-only)",
+  description:
+    "读取已授权 Android 手机内部存储（含内部共享存储）的总容量、可用容量与已用比例。" +
+    "只读、无副作用，不申请 MANAGE_EXTERNAL_STORAGE / READ_MEDIA_* 等任何文件权限，" +
+    "不枚举用户文件、不读取文件内容。used_bytes = total_bytes - available_bytes，" +
+    "表示**这个文件系统已被占用**的空间（系统分区、应用数据、缓存都在里面），" +
+    "不等于\"用户文件占用了多少\"。",
+  transport: "tool",
+  allowedArgs: [],
+  inputSchema: {
+    type: "object",
+    properties: {
+      device_id: DEVICE_ID_SCHEMA,
+      timeout_ms: TIMEOUT_SCHEMA,
+    },
+    required: [],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: "object",
+    properties: {
+      ok: { type: "boolean" },
+      request_id: { type: "string" },
+      device_id: { type: "string" },
+      tool_name: { type: "string" },
+      rtt_ms: { type: "number" },
+      server_timestamp: { type: "number" },
+      connection_generation: { type: "number" },
+      // 统计的是哪个卷；当前恒为 "internal_data"。
+      volume: { type: "string" },
+      total_bytes: { type: "number" },
+      available_bytes: { type: "number" },
+      used_bytes: { type: "number" },
+      usage_percent: { type: ["number", "null"] },
+      error_code: { type: "string" },
+      error_message: { type: "string" },
+    },
+    required: ["ok"],
+  },
+  annotations: {
+    readOnlyHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
+};
+
 /**
  * 唯一的一张工具清单。`tools/list` 直接读它，`tools/call` 也只认它。
  *
  * 顺序稳定（不排序、不动态生成）是为了让 `tools/list` 的输出对客户端可预测，
  * 也让测试可以用 `toEqual([...])` 这种"整表断言"而不是"包含断言"。
  */
-export const TOOL_REGISTRY: ToolDefinition[] = [PHONE_PING_TOOL, BATTERY_GET_STATUS_TOOL];
+export const TOOL_REGISTRY: ToolDefinition[] = [
+  PHONE_PING_TOOL,
+  BATTERY_GET_STATUS_TOOL,
+  DEVICE_GET_NETWORK_TOOL,
+  DEVICE_GET_STORAGE_TOOL,
+];
 
 export function findTool(name: string): ToolDefinition | undefined {
   return TOOL_REGISTRY.find((t) => t.name === name);

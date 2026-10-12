@@ -90,6 +90,25 @@ export const MOCK_CAPABILITIES: Record<string, () => Record<string, unknown>> = 
     charging_source: "unavailable",
     power_save_mode: true,
   }),
+  // Gate 2.5A+B：同样是编的固定值。刻意选一个"Wi-Fi、已验证"的组合，
+  // 让 E2E 能断言字段确实是从手机这一侧过来的。
+  device_get_network: () => ({
+    connected: true,
+    validated: true,
+    transport: "wifi",
+    transports: ["wifi"],
+    metered: false,
+    internet_capable: true,
+  }),
+  // 128 GB 总 / 48 GB 可用：used = 80 GB，usage_percent = 62.5，
+  // 三个数字互相对得上，方便 E2E 直接验算关系而不是只验"有键"。
+  device_get_storage: () => ({
+    volume: "internal_data",
+    total_bytes: 128_000_000_000,
+    available_bytes: 48_000_000_000,
+    used_bytes: 80_000_000_000,
+    usage_percent: 62.5,
+  }),
 };
 
 /** 模拟手机对一次 tool_request 的回复记录（测试用来断言"回了几个、什么形状"）。 */

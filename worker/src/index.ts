@@ -41,6 +41,8 @@ import {
   SERVER_VERSION,
 } from "./mcp/http";
 import { OAuthStore } from "./oauth/store-do";
+// Gate 2.5：健康检查与根路径的自述文档从工具注册表派生，避免与真实白名单漂移。
+import { toolNames } from "./mcp/tools";
 import { handleOAuthRequest, isOAuthPath } from "./oauth/endpoints";
 import { jsonResponse, notFound, textResponse } from "./util/http";
 import { logEvent } from "./util/log";
@@ -108,7 +110,8 @@ function handleHealthz(env: Env, config: AppConfig): Response {
     capabilities: {
       mcp_endpoint: "/mcp",
       phone_endpoint: "/phone/ws",
-      tools: ["phone_ping"],
+      // Gate 2.5：从工具注册表派生，避免这份自述文档与真实白名单漂移。
+      tools: toolNames(),
       server_initiated_notifications: false,
       oauth_authorization_server: config.oauth.enabled,
       oauth_metadata_endpoint: config.oauth.enabled ? "/.well-known/oauth-authorization-server" : null,
@@ -132,7 +135,8 @@ function handleRoot(): Response {
       `${SERVER_NAME} ${SERVER_VERSION}`,
       "",
       "Gate 1：Cloudflare Worker + Durable Object + Android 手机长连接。",
-      "唯一工具是 phone_ping；不接入任何本地 MCP 应用，也不使用 D1。",
+      `内置只读工具（共 ${toolNames().length} 个）：${toolNames().join("、")}。`,
+      "不接入任何第三方 MCP 应用，也不使用 D1。",
       "",
       "端点：",
       "  GET  /healthz    健康检查",

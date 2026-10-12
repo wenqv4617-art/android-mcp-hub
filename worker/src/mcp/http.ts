@@ -42,7 +42,7 @@ import {
   type JsonRpcId,
   type JsonRpcSuccess,
 } from "./jsonrpc";
-import { dispatchToolCall, TOOL_REGISTRY } from "./tools";
+import { dispatchToolCall, TOOL_REGISTRY, toolNames } from "./tools";
 
 export const MCP_SESSION_HEADER = "Mcp-Session-Id";
 export const MCP_PROTOCOL_HEADER = "MCP-Protocol-Version";
@@ -51,9 +51,14 @@ export const SERVER_NAME = "android-mcp-hub";
 export const SERVER_VERSION = "0.1.0-gate1";
 export const SERVER_TITLE = "Android MCP Hub (Gate 1)";
 
+// Gate 2.5：这份说明是给模型看的"能力自述"，因此**从注册表派生工具名**，
+// 而不是手写一份会过期的清单。工具的真实定义（参数、Schema、通道）仍在 tools.ts。
 const INSTRUCTIONS =
-  "这是 Android MCP Hub 的 Gate 1。当前只提供一个工具 phone_ping：" +
-  "向已通过 WebSocket 连上的 Android 手机发一条 ping 并等待 pong，返回服务端测量的 RTT。" +
+  `Android MCP Hub 的内置工具（共 ${toolNames().length} 个，全部只读）：${toolNames().join("、")}。` +
+  "phone_ping 是连接诊断：向已通过 WebSocket 连上的 Android 手机发一条 ping 并等待 pong，" +
+  "返回**服务端**测量的 RTT。" +
+  "device_* 系列是手机能力查询，经 Durable Object 转发到已连上的手机，" +
+  "由手机上的显式白名单执行；手机侧关掉能力总开关时会明确拒绝（not_permitted）。" +
   "手机没有连接时工具会以 isError=true 明确失败，不会伪造成功，也不会自动重放。";
 
 type RpcPayload = JsonRpcSuccess | JsonRpcError;
