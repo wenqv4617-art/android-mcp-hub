@@ -226,10 +226,16 @@ const DEPLOY_WORKFLOW = "deploy-worker.yml";
  * `feat/gate2-core` 是 Gate 2 联调期间进白名单的**一次性**临时路径：用户只有手机，
  * 没法在本地终端部署，所以让 Actions 从那条分支手动派发；它必须逐字输入另一个
  * 确认串 `DEPLOY-GATE2`，确认串与分支一一对应，不能互换。
- * Gate 2 并入 gate0 之后，这条临时路径要连同下面那条 `DEPLOY-GATE2` 约束、
- * 以及两条对应的反向用例一起删掉 —— 白名单回到只有 `gate0`。
+ * `feat/gate2-5-native-tools` 是同一种临时路径（Gate 2.5 内置工具目录 + 网络/存储
+ * 能力），确认串是 `DEPLOY-GATE2-5`。
+ * 两条临时路径并入 gate0 之后，要连同下面那两条确认串约束、以及对应的反向用例
+ * 一起删掉 —— 白名单回到只有 `gate0`。
  */
-const DEPLOY_BRANCH_ALLOWLIST: readonly string[] = ["gate0", "feat/gate2-core"];
+const DEPLOY_BRANCH_ALLOWLIST: readonly string[] = [
+  "gate0",
+  "feat/gate2-core",
+  "feat/gate2-5-native-tools",
+];
 
 const WORKFLOW_ALLOWLIST: readonly string[] = [...TEST_ONLY_WORKFLOWS, DEPLOY_WORKFLOW];
 
@@ -321,7 +327,8 @@ function testOnlyWorkflowViolations(fileName: string, content: string): string[]
 
 /**
  * 任务书对部署工作流提的 13 条，逐条对应下面的检查。
- * Gate 2 联调期间另加第 14 条：分支与确认串必须一一对应（见第 4 / 13 条之后那一段）。
+ * Gate 2 / Gate 2.5 联调期间另加第 14 条：分支与确认串必须一一对应（见第 4 / 13 条
+ * 之后那一段，三条人工路径各自配对，不能互换）。
  */
 function deployWorkflowViolations(fileName: string, content: string): string[] {
   const body = stripYamlComments(content);
@@ -349,8 +356,9 @@ function deployWorkflowViolations(fileName: string, content: string): string[] {
     if (!/inputs\.confirm_deploy\s*==\s*'DEPLOY'/.test(gate)) {
       out.push("执行条件必须要求 inputs.confirm_deploy == 'DEPLOY'");
     }
-    // Gate 2 临时路径：分支与确认串必须**一一对应** —— 只钉分支不行，也不能把两个
-    // 确认串对调（gate0 ↔ DEPLOY，feat/gate2-core ↔ DEPLOY-GATE2）。
+    // Gate 2 / Gate 2.5 临时路径：分支与确认串必须**一一对应** —— 只钉分支不行，也不能把
+    // 确认串对调（gate0 ↔ DEPLOY，feat/gate2-core ↔ DEPLOY-GATE2，
+    // feat/gate2-5-native-tools ↔ DEPLOY-GATE2-5）。
     // （并入 gate0 之后删掉这一段。）
     const gateOneLine = gate.replace(/\s+/g, " ");
     if (!/refs\/heads\/gate0'\s*&&\s*inputs\.confirm_deploy\s*==\s*'DEPLOY'/.test(gateOneLine)) {
@@ -363,6 +371,16 @@ function deployWorkflowViolations(fileName: string, content: string): string[] {
       )
     ) {
       out.push("feat/gate2-core 分支必须与确认串 'DEPLOY-GATE2' 配对");
+    }
+    // 注意顺序：这一条必须在 gate2-core 之后，且用 `==` 的精确匹配 —— 'DEPLOY-GATE2'
+    // 是 'DEPLOY-GATE2-5' 的前缀，反过来也成立，所以只能靠精确串区分，不能靠 startsWith。
+    if (
+      gateOneLine.includes("refs/heads/feat/gate2-5-native-tools") &&
+      !/refs\/heads\/feat\/gate2-5-native-tools'\s*&&\s*inputs\.confirm_deploy\s*==\s*'DEPLOY-GATE2-5'/.test(
+        gateOneLine,
+      )
+    ) {
+      out.push("feat/gate2-5-native-tools 分支必须与确认串 'DEPLOY-GATE2-5' 配对");
     }
   }
   const branches = [...body.matchAll(/refs\/heads\/([A-Za-z0-9._/-]+)/g)].map((m) => m[1]!);
@@ -521,18 +539,27 @@ describe("安全 / 不开启任何自动部署", () => {
     expect(expr).toContain("github.ref");
     expect(evaluate("refs/heads/gate0", "DEPLOY")).toBe(true);
     expect(evaluate("refs/heads/feat/gate2-core", "DEPLOY-GATE2")).toBe(true);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tools", "DEPLOY-GATE2-5")).toBe(true);
 
     // 分支与确认串必须一一配对，不能互换
     expect(evaluate("refs/heads/gate0", "DEPLOY-GATE2")).toBe(false);
     expect(evaluate("refs/heads/feat/gate2-core", "DEPLOY")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tools", "DEPLOY")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tools", "DEPLOY-GATE2")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-core", "DEPLOY-GATE2-5")).toBe(false);
 
     // push / 不填 / 瞎填 / 别的分支 一律不部署
     expect(evaluate("refs/heads/gate0", null)).toBe(false);
     expect(evaluate("refs/heads/feat/gate2-core", null)).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tools", null)).toBe(false);
     expect(evaluate("refs/heads/gate0", "")).toBe(false);
     expect(evaluate("refs/heads/feat/gate2-core", "deploy-gate2")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tools", "deploy-gate2-5")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tool", "DEPLOY-GATE2-5")).toBe(false);
+    expect(evaluate("refs/heads/feat/gate2-5-native-tools-2", "DEPLOY-GATE2-5")).toBe(false);
     expect(evaluate("refs/heads/main", "DEPLOY")).toBe(false);
     expect(evaluate("refs/heads/main", "DEPLOY-GATE2")).toBe(false);
+    expect(evaluate("refs/heads/main", "DEPLOY-GATE2-5")).toBe(false);
     expect(evaluate("refs/heads/gate2-core", "DEPLOY-GATE2")).toBe(false);
   });
 
@@ -591,6 +618,35 @@ describe("安全 / 部署工作流的篡改必须被拒绝", () => {
       s.replace(" && inputs.confirm_deploy == 'DEPLOY-GATE2'", ""),
     );
     expect(v.join("\n")).toMatch(/DEPLOY-GATE2/);
+  });
+
+  it("删掉 Gate 2.5 的确认串（只钉分支）→ 必须被拒绝", () => {
+    const v = violationsAfter((s) =>
+      s.replace(" && inputs.confirm_deploy == 'DEPLOY-GATE2-5'", ""),
+    );
+    expect(v.join("\n")).toMatch(/DEPLOY-GATE2-5/);
+  });
+
+  it("把 Gate 2.5 临时路径挂到未批准的分支 → 必须被拒绝", () => {
+    const v = violationsAfter((s) =>
+      s.replaceAll("refs/heads/feat/gate2-5-native-tools", "refs/heads/gate2-5-temp"),
+    );
+    expect(v.join("\n")).toMatch(/未批准的分支：gate2-5-temp/);
+  });
+
+  it("把 Gate 2.5 与 Gate 2 的确认串对调 → 必须被拒绝", () => {
+    const v = violationsAfter((s) =>
+      s
+        .replace(
+          "'refs/heads/feat/gate2-core' && inputs.confirm_deploy == 'DEPLOY-GATE2'",
+          "'refs/heads/feat/gate2-core' && inputs.confirm_deploy == 'DEPLOY-GATE2-5'",
+        )
+        .replace(
+          "'refs/heads/feat/gate2-5-native-tools' && inputs.confirm_deploy == 'DEPLOY-GATE2-5'",
+          "'refs/heads/feat/gate2-5-native-tools' && inputs.confirm_deploy == 'DEPLOY-GATE2'",
+        ),
+    );
+    expect(v.join("\n")).toMatch(/配对/);
   });
 
   it("把两个分支的确认串对调 → 必须被拒绝", () => {
