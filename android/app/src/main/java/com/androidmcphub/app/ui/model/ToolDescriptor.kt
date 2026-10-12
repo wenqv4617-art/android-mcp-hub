@@ -8,6 +8,8 @@ package com.androidmcphub.app.ui.model
  */
 enum class ToolCategory(val label: String) {
     Device("设备"),
+    Network("网络"),
+    Storage("存储"),
     File("文件"),
     Media("媒体"),
     Notification("通知"),
@@ -87,6 +89,15 @@ data class ToolDescriptor(
     val permissionLabel: String? = null,
     /** 是否只读、无副作用。 */
     val readOnly: Boolean = true,
+    /**
+     * 这个工具声明需要的系统权限（完整权限名，例如
+     * `android.permission.ACCESS_NETWORK_STATE`）。
+     *
+     * 由能力注册清单的元数据派生，**不是**界面自己编的：详情页把它当"声明"展示，
+     * 表示"这个能力要读这类系统信息"，而不是"用户现在被拦住了"。
+     * 需要用户当场批准的**运行时**权限才用 [requiresPermission]，两者不要混。
+     */
+    val declaredPermissions: List<String> = emptyList(),
 ) {
 
     /** 结合"用户此刻的授权总开关"推导出的可用性。 */

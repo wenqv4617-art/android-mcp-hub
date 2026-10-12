@@ -128,10 +128,27 @@ fun ToolDetailScreen(
                     },
                 )
                 InfoRow(label = "读写", value = if (tool.readOnly) "只读，无副作用" else "有副作用")
+                if (tool.declaredPermissions.isNotEmpty()) {
+                    InfoRow(
+                        label = "系统权限",
+                        value = tool.declaredPermissions.joinToString("、") {
+                            it.removePrefix("android.permission.")
+                        },
+                    )
+                }
                 InfoRow(
                     label = "执行入口",
                     value = "服务端经 phone-link-v1 下发请求，手机侧执行",
                 )
+                if (tool.declaredPermissions.isNotEmpty()) {
+                    Text(
+                        text = "上面这些是安装时由系统授予的普通权限，不会在运行时弹窗要你批准。" +
+                            "本机能力执行与否只看你的能力总开关；如果系统没给这个权限，" +
+                            "读取会失败并如实报错，不会回一个编造的数字。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
 

@@ -99,7 +99,8 @@ fun ToolsScreen(
                     onClick = { selectedCategory = null },
                     label = { Text("全部 (${ToolCatalog.local.size})") },
                 )
-                ToolCategory.entries.forEach { entry ->
+                // 只画目录里真的出现了的分类（见 ToolCatalog.categoriesInUse）。
+                ToolCatalog.categoriesInUse().forEach { entry ->
                     val count = ToolCatalog.local.count { it.category == entry }
                     FilterChip(
                         selected = category == entry,
@@ -107,7 +108,6 @@ fun ToolsScreen(
                             selectedCategory = if (category == entry) null else entry.name
                         },
                         label = { Text("${entry.label} ($count)") },
-                        enabled = count > 0,
                     )
                 }
             }
