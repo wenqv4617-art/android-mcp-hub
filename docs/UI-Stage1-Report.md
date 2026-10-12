@@ -187,3 +187,15 @@ $ git diff --stat d05ca19eea3ec49c3fec27d9052f0062fbe1df09 -- worker .github
 4. 工具执行入口 —— 工具详情页**刻意没有**执行按钮（执行只能由服务端经 phone-link-v1 下发并走七步校验）。
 5. 任务持久化与查询接口 —— 授权/任务状态目前只在内存中，任务书已把它列为后续工作。
 6. 截图 —— 没有运行环境，不提供截图；设计示意图不是运行截图，未混入本报告。
+
+## 9. 交付标识
+
+| 项 | 值 |
+| --- | --- |
+| 开发分支 | `feat/ui-revamp`（**已推送**到 `origin`，仅此一条分支） |
+| 基线提交 | `d05ca19eea3ec49c3fec27d9052f0062fbe1df09`（`feat/gate2-core`） |
+| 本轮提交（旧 → 新） | `e865cad` docs(ui): 把前置审计报告纳入本分支<br>`86de4ba` feat(ui): 展示模型、主题 Token 与公共组件<br>`a0ab319` feat(ui): 设置页与连接诊断页<br>`ac39b63` feat(ui): 工具列表/详情与服务容器页<br>`7c41ae9` feat(ui): 模块化导航与首页（删旧 HubScreen/Theme）<br>`2f41375` test(ui): 展示模型、工具目录与主题 Token 的单测<br>`bc0aa55` docs(ui): UI 架构说明、人工验收清单与 Stage 1 交付报告 |
+| 代码 tip | `bc0aa553679770e105b360316d8c06466c94dfd4`（本文件所在的 `bc0aa55` 之上只追加记录性提交） |
+| 下载地址（手机浏览器） | `http://127.0.0.1:8933/AndroidMCPHub-UI-Stage1-debug.apk` |
+| 未做 | 未创建 PR，未合并任何分支，未推送 `gate0`，未触发生产部署 |
+
