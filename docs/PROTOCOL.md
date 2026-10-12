@@ -336,7 +336,10 @@ Gate 0 **不做**自动重试：上层（人或未来的调度器）看到 `isEr
 协议上必须认得这个名字，才能回一个明确的 `not_permitted`；一个"查不到的装备名"回
 `unsupported_tool` 会让用户以为是版本不对，而不是"我自己关的"。开关由
 `HubPrefs.capabilitiesEnabled()` 提供，分发器**每次调用都重读**，所以拨开关立即生效、
-不需要重连。开关默认**开**：默认关会让升级后的用户莫名其妙发现新功能不可用。
+不需要重连。开关的**安全默认是关**（`HubPrefs.DEFAULT_CAPABILITIES_ENABLED = false`，
+由 `CapabilitySwitchDefaultTest` 钉住）：首次安装时服务端调用会被回 `not_permitted`，
+用户必须在设置页显式打开。这个默认值是安全取舍 —— "先拒绝、等用户授权"，
+而不是"先允许、等用户发现"。
 
 **为什么 `not_permitted` 排在参数校验之前。** 不允许执行的能力，不该因为"参数不合法"
 而漏出任何关于它自己的信息（连"它接受哪些参数"都不该漏）。
@@ -344,3 +347,43 @@ Gate 0 **不做**自动重试：上层（人或未来的调度器）看到 `isEr
 **为什么禁止任何形式的通用执行。** 这个协议里没有 `shell`、没有 `intent`、
 没有 `reflection`、没有 `file_path`、没有 `url`。新增一个能力 = 新增一个显式的
 `ToolDefinition` + 手机侧一条显式的分支 + 两侧各自的测试。没有"通用执行"这个逃生口。
+
+---
+
+## 10. Gate 2.5 的两个只读能力：字段契约
+
+`device_get_network` 与 `device_get_storage` 与 `battery_get_status` 同形：
+`transport = "tool"`、**零能力参数**（`allowedArgs` 为空，只有 `device_id` / `timeout_ms` 是
+信封参数）、只读幂等。它们的 `result` 字段（`tool_result.result`，Worker 摊平进
+`structuredContent`）如下 —— 手机侧 `OUTPUT_KEYS`、Worker 侧 `outputSchema`、
+E2E 断言三处必须同时包含这些键：
+
+**`device_get_network`**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `connected` | boolean | 系统是否有默认网络（**不等于**互联网可用） |
+| `validated` | boolean \| null | 系统是否报告该网络通过了联网验证；`null` = 系统没报 |
+| `transport` | string | 主要传输类型，或 `"none"`（无网络）/ `"unknown"`（有网络但认不出类型） |
+| `transports` | string[] | 全部已知传输类型（去重、去掉 `"unknown"`），如 `["vpn","wifi"]` |
+| `metered` | boolean \| null | 是否计费网络；`null` = 系统没报 |
+| `internet_capable` | boolean \| null | 系统认为该网络具备互联网能力 |
+
+优先级（多个传输并存时 `transport` 取哪个）：VPN > 以太网 > Wi-Fi > USB > 蜂窝 >
+蓝牙 > Wi-Fi Aware > LoWPAN > Thread > 卫星。**不返回漫游状态**：可靠的
+`isNetworkRoaming` 需要 `READ_PHONE_STATE`，靠网络类型反推就是编数据。
+**不读** SSID / BSSID / MAC / IP / SIM 标识，也不主动访问外部站点去"测试"联网。
+
+**`device_get_storage`**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `volume` | string | 统计的是哪个卷，当前固定 `"internal_data"`（内部存储卷，经 `StatFs(filesDir)`） |
+| `total_bytes` | number | 该卷总容量 |
+| `available_bytes` | number | 该卷可用容量（夹在 `[0, total]`） |
+| `used_bytes` | number | `total - available`，即**文件系统已占用**；**不代表用户文件占用** |
+| `usage_percent` | number | 一位小数，如 `62.5`（是数字，不是 `"62.5%"`） |
+
+容量为 0 / 不可访问时**明确失败**（`tool_unavailable`「存储卷不可用：系统报告的容量为 0」），
+绝不返回一串 0 假装"手机是空的"。该能力不申请 `MANAGE_EXTERNAL_STORAGE`、
+`READ_MEDIA_*` 或任何传统整盘权限，也不枚举用户文件。

@@ -133,36 +133,51 @@ ui/settings/DiagnosticsScreen.kt                           ← 只消费 LinkSta
 
 ## 3. 工具目录的数据来源
 
-工具页**没有假数据**，当前也确实只有**一个**内置能力。
+工具页**没有假数据**，条目**由本机能力注册清单派生**（Gate 2.5 起是单一可信来源）。
 
-- 真实来源：`capability/CapabilityDispatcher` 的执行白名单，唯一实例化点在
-  `service/PhoneLinkService.kt:214`（`listOf(BatteryCapability(AndroidBatterySource(this)))`）。
+- **单一来源**：`capability/BuiltInCapabilities.kt` 的 `ALL` —— 一份
+  `BuiltInCapability(metadata, factory)` 列表，登记本机有哪些内置能力。
+  每个能力的元数据与实现放在同一个文件里（`BatteryCapability.METADATA`、
+  `NetworkCapability.METADATA`、`StorageCapability.METADATA`）。
+- **执行白名单仍然是 `capability/CapabilityDispatcher`**：`service/PhoneLinkService.kt`
+  用 `BuiltInCapabilities.androidCapabilities(this)` 构造它；`CapabilityDispatcher.init`
+  里有一条 `require(registry.values.all { it.metadata.name == it.name })`，
+  把"界面看到的元数据"和"真实注册的能力"钉死（打错名字时构造直接抛异常，
+  而不是安静地显示一个不存在的工具）。
 - `protocol/PhoneLink.kt` 的工具请求处理**不经过 UI**，也**不向 UI 上报**工具目录
-  （工具名只出现在环形日志里），所以界面无法从连接层"问"到工具列表。
-- 因此有 `ui/model/ToolCatalog.kt`：一份**只读**目录适配层，目前只有
-  `ToolCatalog.BatteryGetStatus`（id/name = `battery_get_status`，分类「设备」，
-  来源「本机能力」，无参数、只读）。
+  （工具名只出现在环形日志里），所以 UI 侧仍走 `ui/model/ToolCatalog.kt`：
+  `val local = BuiltInCapabilities.metadata.map { it.toToolDescriptor() }`
+  —— 只读**派生**，不是手写清单。
+- 当前三个内置能力（全部零参数、只读）：
+
+| 工具 ID | 名称 | 分类 | 声明的权限 |
+| --- | --- | --- | --- |
+| `battery_get_status` | 电池状态 | 设备 | 无 |
+| `device_get_network` | 网络状态 | 网络 | `ACCESS_NETWORK_STATE`（普通权限，安装即授予） |
+| `device_get_storage` | 存储空间 | 存储 | 无 |
 
 它满足五条约束：
 
-1. 不改能力执行白名单（执行仍在 `CapabilityDispatcher`）；
+1. 不改能力执行白名单（执行仍在 `CapabilityDispatcher`，UI 无法触发执行）；
 2. 不改七步校验；
 3. 不加任何动态执行入口（详情页没有"执行"按钮）；
 4. 不改 Worker 协议；
-5. UI 不维护第二套**可执行**白名单 —— `ToolCatalog` 只是展示数据，
-   名字对不对由 `ui/model/ToolCatalogTest.kt` 钉住（断言 `ToolCatalog.localNames`
-   与 `CapabilityDispatcher` 用 `BatteryCapability(FakeBatterySource())` 注册出来的
-   `names()` 逐字一致）。
+5. UI 不维护第二套**可执行**白名单 —— `ToolCatalog` 是展示数据，
+   与注册表的一致性由 `ui/model/ToolCatalogTest.kt`（比对真实
+   `CapabilityDispatcher.names()`）与 `capability/BuiltInCapabilitiesTest.kt`
+   共同钉住。
 
-**技术限制（如实记录）**：`ToolCatalog` 是手写的，与 `PhoneLinkService` 的注册表
-之间**存在重复定义**。它还不能自动生成，是因为注册表在 `PhoneLinkService` 内部构造、
-没有对外暴露只读快照，而暴露它需要改受保护的 `service/PhoneLinkService.kt`。
-后续收敛方案见 `docs/UI-Stage2-Report.md`「已知限制」。
+**仍然存在的重复定义（如实记录）**：Android 的 `BuiltInCapabilities` 与
+Worker 的 `worker/src/mcp/tools.ts::TOOL_REGISTRY` 是**两处**登记，
+因为两边是不同运行时、不能共享注册表。这靠契约测试对齐，而不是靠人记得改：
+`worker/test/tools.test.ts` 整表断言工具名，`worker/test/device-tools.test.ts`
+断言 `outputSchema` 覆盖手机侧会返回的全部字段，`e2e/run-local-e2e.ts`
+断言工具列表恰好是这四个并真的走一遍全链路。
 
 `phone_ping` **不**出现在工具列表里：它是连接层的诊断通道
 （`protocol/PingResponder.kt`），不是本机能力，也不受能力总开关影响。
-这段说明从工具页正文里挪到了 `ui/tools/ToolsHelpScreen.kt`
-（工具页正文优先显示工具，而不是先让人读实现原理）。
+这段说明在 `ui/tools/ToolsHelpScreen.kt`（工具页正文优先显示工具，
+而不是先让人读实现原理）。
 
 ---
 
@@ -171,14 +186,15 @@ ui/settings/DiagnosticsScreen.kt                           ← 只消费 LinkSta
 以将来新增内置能力 `foo_get_bar` 为例：
 
 1. 在 `capability/` 实现 `Capability`（名字需匹配
-   `CapabilityDispatcher.TOOL_NAME_PATTERN = ^[a-z][a-z0-9_]{0,63}$`），并在
-   `service/PhoneLinkService.kt:214` 的 `listOf(...)` 里注册 —— 受保护范围，按安全流程走；
-2. 在 `ui/model/ToolCatalog.kt` 加一条 `ToolDescriptor`（id / name / 一句话说明 /
-   分类 / 来源 `BuiltIn` / 参数表 / 是否只读）；
-3. `ToolCatalogTest` 会因为第 2 步没做而先失败，逼着两处同步 —— 这是刻意的：
-   与其让界面悄悄少一个工具，不如让单测红；
-4. 页面**不需要**改动：`ToolsScreen` 由 `ToolCatalog.local` 驱动，搜索、筛选、卡片、
-   详情模板全部通用。**不要**为单个工具加 `when (toolId) { ... }` 分支。
+   `CapabilityDispatcher.TOOL_NAME_PATTERN = ^[a-z][a-z0-9_]{0,63}$`），
+   带上 `metadata`（同一个文件里定义 `METADATA`）；
+2. 在 `capability/BuiltInCapabilities.kt` 的 `ALL` 里加一条 —— **这是 Android 侧
+   唯一需要登记的地方**，`service/PhoneLinkService.kt` 不再逐个列举能力；
+3. Worker 侧在 `worker/src/mcp/tools.ts` 的 `TOOL_REGISTRY` 里加一条
+   `ToolDefinition`，`outputSchema` 必须覆盖手机侧会返回的全部字段；
+   `worker/test/tools.test.ts` 的整表断言会先红，逼着两处同步；
+4. 页面**不需要**改动：`ToolsScreen` 由 `ToolCatalog.local` 驱动，搜索、筛选、
+   卡片、详情模板全部通用。**不要**为单个工具加 `when (toolId) { ... }` 分支。
 
 第三方（未来）：`ToolSource.ThirdPartyMcp` / `LocalHttpMcp` 两个枚举位已经在展示模型里
 存在，`ToolDescriptor.source` 决定卡片上的来源标签；但**当前没有任何条目**属于它们。
