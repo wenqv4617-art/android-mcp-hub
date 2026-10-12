@@ -444,7 +444,7 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 
 合计 **171** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
-> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与"能力总开关默认关闭"那条防回归）没有逐条展开。**当前实测**（Gate 2，`--rerun` 强制重跑）：**19 个测试类、255 条用例、0 failures、0 errors**（命令见本节开头）。
+> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（Gate 2.5，`--rerun` 强制重跑）：**28 个测试类、347 条用例、0 failures、0 errors、0 skipped**（命令见本节开头）。
 
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >
