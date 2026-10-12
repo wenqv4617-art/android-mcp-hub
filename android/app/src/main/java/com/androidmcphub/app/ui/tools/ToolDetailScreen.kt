@@ -22,7 +22,6 @@ import com.androidmcphub.app.ui.components.availabilityColor
 import com.androidmcphub.app.ui.model.ToolArgument
 import com.androidmcphub.app.ui.model.ToolAvailability
 import com.androidmcphub.app.ui.model.ToolCatalog
-import com.androidmcphub.app.ui.model.ToolDescriptor
 import com.androidmcphub.app.ui.theme.spacing
 
 /**
@@ -49,9 +48,8 @@ fun ToolDetailScreen(
         item {
             PageHeader(
                 title = tool?.name ?: "工具详情",
-                subtitle = "工具详情",
+                subtitle = "本机能力",
                 onBack = onBack,
-                modifier = Modifier.padding(horizontal = spacing.sm),
                 actions = {
                     if (tool != null) {
                         StatusPill(
@@ -143,11 +141,11 @@ fun ToolDetailScreen(
                 subtitle = "为将来的敏感操作预留的说明",
                 modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
             ) {
+                InfoRow(label = "只读工具", value = "收到请求即执行（仍受总开关与七步校验约束）")
+                InfoRow(label = "有副作用的工具", value = "将来需要你在手机上逐次确认，超时按拒绝处理")
                 Text(
-                    text = "只读能力会直接执行。将来接入有副作用的工具时，" +
-                        "每次调用都需要你在手机上确认（授权窗口有超时，超时按拒绝处理）。" +
-                        "本轮没有实现协议级授权状态机，所以这里没有" +
-                        "「允许 / 拒绝」按钮 —— 不会给一个点了没用的按钮。",
+                    text = "本版本还没有实现授权状态机，所以这里没有「允许 / 拒绝」按钮 —— " +
+                        "不会放一个点了没用的按钮。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -193,10 +191,4 @@ private fun SchemaBlock(arguments: List<ToolArgument>) {
             )
         }
     }
-}
-
-/** 仅供将来的"工具步骤/调用链"页面复用的占位（当前没有调用方）。 */
-@Composable
-private fun ToolIdentityBlock(tool: ToolDescriptor) {
-    Text(text = tool.name, style = MaterialTheme.typography.titleMedium)
 }

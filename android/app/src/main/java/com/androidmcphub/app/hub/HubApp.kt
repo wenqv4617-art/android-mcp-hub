@@ -4,12 +4,14 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -25,8 +27,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -35,58 +37,62 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.androidmcphub.app.ui.HubViewModel
+import com.androidmcphub.app.ui.home.ConnectionDetailScreen
 import com.androidmcphub.app.ui.home.HomeScreen
-import com.androidmcphub.app.ui.services.AddServiceScreen
 import com.androidmcphub.app.ui.services.ServicesScreen
+import com.androidmcphub.app.ui.settings.AdvancedSettingsScreen
+import com.androidmcphub.app.ui.settings.ConnectionSettingsScreen
 import com.androidmcphub.app.ui.settings.DiagnosticsScreen
 import com.androidmcphub.app.ui.settings.SettingsScreen
+import com.androidmcphub.app.ui.settings.TokenSettingsScreen
 import com.androidmcphub.app.ui.tools.ToolDetailScreen
+import com.androidmcphub.app.ui.tools.ToolsHelpScreen
 import com.androidmcphub.app.ui.tools.ToolsScreen
 
 /**
- * 应用唯一的 Composable 入口：底部四页 + 子页路由。
+ * 应用骨架：底部四个标签 + 二级页面 + 一次性提示。
  *
- * 职责边界（刻意保持得比 HubScreen 时代更窄）：
- *  * 这里**只**做导航、系统栏内边距、一次性消息（Snackbar）和通知权限；
- *  * 连接、保存、清令牌等业务动作全部留在 [HubViewModel]，页面通过方法引用调用它；
- *  * 页面之间不直接互相调用，一律走路由 —— 这样返回键行为和状态保留由
- *    Navigation Compose 统一负责，而不是每个页面各写一套布尔开关。
+ * Stage 2 的关键改动是**导航只有一个入口**：底栏和页面内快捷入口都调
+ * [navigateToTopLevel]（见该函数的注释，里面写了真机上"点首页进了工具页"的根因）。
+ * 这样返回栈的记账方式只有一套，`restoreState` 恢复出来的栈顶必然就是用户点的那页。
+ *
+ * 二级页面（工具详情、工具说明、连接详情、诊断、三个设置子页）不显示底栏：
+ * `currentTab == null` 时 `bottomBar` 直接不渲染，而不是靠隐藏/占位去糊。
  */
 @Composable
 fun HubApp(viewModel: HubViewModel) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
-    val currentTab = HubTab.entries.firstOrNull { it.route == backStackEntry?.destination?.route }
-
+    val currentTab = hubTabOf(backStackEntry?.destination?.route)
     val capabilitiesEnabled by viewModel.capabilitiesEnabled.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
+
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // 一次性消息（保存成功、令牌无法解密…）统一走 Snackbar：
-    // 看完即 dismiss，不会像原来那样把消息永久留在首页正文里。
+    // 一次性提示（保存成功 / 校验失败 / 令牌读不出来）：显示完立刻消费掉，
+    // 否则旋转屏幕或切页回来会再弹一次。
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(text)
         viewModel.dismissMessage()
     }
 
-    RequestNotificationPermissionOnce()
-
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (currentTab != null) {
-                HubBottomBar(currentTab, navController)
+                HubBottomBar(currentTab = currentTab, navController = navController)
             }
         },
     ) { innerPadding ->
         NavHost(
             navController = navController,
             startDestination = HubTab.Home.route,
-            // 系统栏内边距只在这里应用一次（Scaffold 给的 innerPadding）。
-            // 另外单独补 imePadding：Scaffold 默认的 contentWindowInsets 不含 ime，
-            // 设置页有 10 个输入框，键盘弹出时必须把内容顶起来，否则输入框会被挡住。
+            // 系统栏内边距由 Scaffold 的 innerPadding 统一给；
+            // 键盘（ime）不在 Scaffold 的默认 contentWindowInsets 里，
+            // 而设置子页有一屏输入框 —— 不单独加 imePadding 会被键盘挡住。
+            // 两者不叠加：imePadding 只吃键盘 inset。
             modifier = Modifier
                 .padding(innerPadding)
                 .imePadding(),
@@ -94,30 +100,29 @@ fun HubApp(viewModel: HubViewModel) {
             composable(HubTab.Home.route) {
                 HomeScreen(
                     viewModel = viewModel,
-                    onOpenTools = { navController.navigate(HubTab.Tools.route) },
-                    onOpenServices = { navController.navigate(HubTab.Services.route) },
+                    onOpenTools = { navController.navigateToTopLevel(HubTab.Tools) },
                     onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
-                    onOpenSettings = { navController.navigate(HubTab.Settings.route) },
+                    onOpenConnectionDetail = { navController.navigate(Routes.CONNECTION_DETAIL) },
                 )
             }
+
+            composable(Routes.CONNECTION_DETAIL) {
+                ConnectionDetailScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                    onOpenConnectionSettings = { navController.navigate(Routes.CONNECTION_SETTINGS) },
+                )
+            }
+
             composable(HubTab.Tools.route) {
                 ToolsScreen(
                     capabilitiesEnabled = capabilitiesEnabled,
                     onOpenTool = { toolId -> navController.navigate(Routes.toolDetail(toolId)) },
+                    onOpenHelp = { navController.navigate(Routes.TOOLS_HELP) },
                 )
             }
-            composable(HubTab.Services.route) {
-                ServicesScreen(
-                    onAddService = { navController.navigate(Routes.ADD_SERVICE) },
-                    onOpenSettings = { navController.navigate(HubTab.Settings.route) },
-                )
-            }
-            composable(HubTab.Settings.route) {
-                SettingsScreen(
-                    viewModel = viewModel,
-                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
-                )
-            }
+
             composable(
                 route = Routes.TOOL_DETAIL,
                 arguments = listOf(navArgument(Routes.ARG_TOOL_ID) { type = NavType.StringType }),
@@ -128,12 +133,53 @@ fun HubApp(viewModel: HubViewModel) {
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable(Routes.ADD_SERVICE) {
-                AddServiceScreen(
+
+            composable(Routes.TOOLS_HELP) {
+                ToolsHelpScreen(
                     onBack = { navController.popBackStack() },
-                    onOpenTools = { navController.navigate(HubTab.Tools.route) },
+                    onOpenSettings = { navController.navigateToTopLevel(HubTab.Settings) },
                 )
             }
+
+            composable(HubTab.Services.route) {
+                ServicesScreen(
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                    onOpenConnectionSettings = { navController.navigate(Routes.CONNECTION_SETTINGS) },
+                )
+            }
+
+            composable(HubTab.Settings.route) {
+                SettingsScreen(
+                    viewModel = viewModel,
+                    onOpenConnectionSettings = { navController.navigate(Routes.CONNECTION_SETTINGS) },
+                    onOpenAdvancedSettings = { navController.navigate(Routes.ADVANCED_SETTINGS) },
+                    onOpenTokenSettings = { navController.navigate(Routes.TOKEN_SETTINGS) },
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                )
+            }
+
+            composable(Routes.CONNECTION_SETTINGS) {
+                ConnectionSettingsScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                    onOpenTokenSettings = { navController.navigate(Routes.TOKEN_SETTINGS) },
+                )
+            }
+
+            composable(Routes.ADVANCED_SETTINGS) {
+                AdvancedSettingsScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+
+            composable(Routes.TOKEN_SETTINGS) {
+                TokenSettingsScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+
             composable(Routes.DIAGNOSTICS) {
                 DiagnosticsScreen(
                     viewModel = viewModel,
@@ -142,35 +188,60 @@ fun HubApp(viewModel: HubViewModel) {
             }
         }
     }
+
+    RequestNotificationPermissionOnce()
 }
 
 /**
- * 底部导航。
+ * 底部导航栏。
  *
- * 三段 `navigate` 配置是"状态保留"的关键：
- *  * `popUpTo(起始页)` 把返回栈压到只剩首页，避免来回点工具/服务把栈堆成一长串；
- *  * `launchSingleTop` 防止重复点同一页再压一份；
- *  * `restoreState = true` 让每个标签页记住自己的滚动位置与页面栈。
+ * 只有一处导航逻辑：已经在这一页就什么都不做（[topLevelNavDecision]），
+ * 否则交给 [navigateToTopLevel]。图标固定 22dp —— 默认的 24dp 在四标签下
+ * 会显得底栏很重，而选中态本身已经由 M3 的指示器表达。
  */
 @Composable
-private fun HubBottomBar(currentTab: HubTab, navController: NavHostController) {
+private fun HubBottomBar(
+    currentTab: HubTab,
+    navController: NavHostController,
+) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
         HubTab.entries.forEach { tab ->
             NavigationBarItem(
                 selected = tab == currentTab,
                 onClick = {
-                    if (tab != currentTab) {
-                        navController.navigate(tab.route) {
-                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
+                    when (topLevelNavDecision(currentTab, tab)) {
+                        TopLevelNavDecision.StayOnCurrentTab -> Unit
+                        is TopLevelNavDecision.SwitchTo -> navController.navigateToTopLevel(tab)
                     }
                 },
-                icon = { Icon(imageVector = tab.icon, contentDescription = null) },
+                icon = {
+                    Icon(
+                        imageVector = tab.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                    )
+                },
                 label = { Text(tab.label) },
             )
         }
+    }
+}
+
+/**
+ * Requesting POST_NOTIFICATIONS once on first composition (Android 13+).
+ *
+ * Denial does not block anything: the foreground-service notification simply
+ * won't show. 保持改版前的行为，不新增二次请求/引导弹窗。
+ */
+@Composable
+private fun RequestNotificationPermissionOnce() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { },
+    )
+    LaunchedEffect(Unit) {
+        launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 }
 
@@ -181,17 +252,3 @@ private val HubTab.icon: ImageVector
         HubTab.Services -> Icons.AutoMirrored.Filled.List
         HubTab.Settings -> Icons.Filled.Settings
     }
-
-/**
- * 通知权限：前台服务在没有通知渠道权限时无法展示常驻通知（Android 13+）。
- * 行为与改版前一致 —— 每次进程启动请求一次，被拒绝也不阻塞任何功能。
- */
-@Composable
-private fun RequestNotificationPermissionOnce() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-    val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { /* 拒绝也不影响连接，只是没有常驻通知 */ },
-    )
-    LaunchedEffect(Unit) { launcher.launch(Manifest.permission.POST_NOTIFICATIONS) }
-}

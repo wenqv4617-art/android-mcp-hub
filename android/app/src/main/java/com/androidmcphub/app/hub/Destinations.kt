@@ -14,20 +14,32 @@ enum class HubTab(val route: String, val label: String) {
     Settings("settings", "设置"),
 }
 
-/** 子页面路由。 */
+/** 二级页面路由。 */
 object Routes {
 
-    /** 工具详情：`tools/{toolId}`。 */
+    /** 连接详情：首页状态卡的"连接详情"入口。 */
+    const val CONNECTION_DETAIL = "home/connection"
+
+    /** 工具详情：`tools/detail/{toolId}`。 */
     const val TOOL_DETAIL = "tools/detail/{toolId}"
 
     /** 单个参数名的唯一来源，避免 `composable` 与 `navigate` 两处写错。 */
     const val ARG_TOOL_ID = "toolId"
 
-    /** 添加 MCP 服务器（本轮是**结构预览**页，见 `AddServiceScreen`）。 */
-    const val ADD_SERVICE = "services/add"
+    /** 工具目录的说明页（把原来堆在工具列表页里的开发说明搬到这里）。 */
+    const val TOOLS_HELP = "tools/help"
 
-    /** 连接诊断（从设置页进入；首页的 ping 摘要也跳这里）。 */
+    /** 连接诊断（设置 → 诊断与维护，首页 ping 摘要也跳这里）。 */
     const val DIAGNOSTICS = "settings/diagnostics"
+
+    /** 服务器与设备配置（二级设置页）。 */
+    const val CONNECTION_SETTINGS = "settings/connection"
+
+    /** 高级连接参数：ping 超时、心跳、重连、抖动、并发与帧上限（二级设置页）。 */
+    const val ADVANCED_SETTINGS = "settings/advanced"
+
+    /** 设备令牌管理（二级设置页）。 */
+    const val TOKEN_SETTINGS = "settings/token"
 
     fun toolDetail(toolId: String): String = "tools/detail/$toolId"
 }
