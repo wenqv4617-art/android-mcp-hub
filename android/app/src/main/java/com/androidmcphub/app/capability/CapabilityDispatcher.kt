@@ -57,6 +57,15 @@ interface Capability {
     /** 工具名（小写 + 下划线，与 `TOOL_NAME_PATTERN` 一致）。 */
     val name: String
 
+    /**
+     * 这个能力的元数据（说明、分类、参数表、权限声明）。
+     *
+     * 它是**展示与契约**用的，不是执行依据 —— 能执行什么只由注册表决定。
+     * `metadata.name` 必须与 [name] 相等，构造 [CapabilityDispatcher] 时会强制检查；
+     * 这样"界面上显示的工具"与"真正能执行的工具"就不可能各说各话。
+     */
+    val metadata: CapabilityMetadata
+
     /** 允许出现的参数名。这是**显式白名单**：多出任何一个键都会被拒绝。 */
     val allowedArguments: Set<String>
 
@@ -152,6 +161,9 @@ class CapabilityDispatcher(
     init {
         require(capabilities.size == registry.size) { "能力名重复：注册表里出现了同名能力" }
         require(registry.keys.all { TOOL_NAME_PATTERN.matches(it) }) { "能力名必须匹配 $TOOL_NAME_PATTERN" }
+        require(registry.values.all { it.metadata.name == it.name }) {
+            "能力元数据的 name 必须与 Capability.name 一致（否则界面会显示一个不存在的工具）"
+        }
     }
 
     /** 注册的能力数量（单测用）。 */
@@ -159,6 +171,14 @@ class CapabilityDispatcher(
 
     /** 注册的能力名（有序，便于断言与界面展示）。 */
     fun names(): List<String> = registry.keys.sorted()
+
+    /**
+     * 注册表里每个能力的**元数据**（按工具名有序）。
+     *
+     * UI 的工具目录与"Worker / Android / 目录三者名称一致"的契约测试都读它，
+     * 数据源只有一个：构造时注册进来的能力对象。
+     */
+    fun catalog(): List<CapabilityMetadata> = registry.values.sortedBy { it.name }.map { it.metadata }
 
     /** 清空去重窗口（用户主动发起新会话时调用，与 `PingResponder.reset()` 对称）。 */
     fun reset() {

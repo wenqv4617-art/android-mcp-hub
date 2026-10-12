@@ -20,6 +20,7 @@ coverage/
 
 # Android / Gradle
 android/.gradle/
+android/.kotlin/    # Kotlin 编译器的本地缓存（不含源码，Gate 2.5 起忽略）
 android/build/
 android/app/build/
 android/local.properties

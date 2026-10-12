@@ -113,6 +113,8 @@ class BatteryCapability(
 
     override val name: String = NAME
 
+    override val metadata: CapabilityMetadata = METADATA
+
     /** 刻意不接受任何参数：多一个键就多一条要审的路径。 */
     override val allowedArguments: Set<String> = emptySet()
 
@@ -138,6 +140,21 @@ class BatteryCapability(
     companion object {
 
         const val NAME = "battery_get_status"
+
+        /**
+         * 元数据（展示与契约用）。
+         *
+         * 这份数据同时被两处读：`capability/BuiltInCapabilities.kt`（注册清单）
+         * 与 `ui/model/ToolCatalog.kt`（工具页目录）—— 界面上的名字、说明、分类
+         * 不再由 UI 自己手写，改名字只可能改这里。
+         */
+        val METADATA: CapabilityMetadata = CapabilityMetadata(
+            name = NAME,
+            displayName = "电池状态",
+            description = "查询手机电量百分比、是否在充电、充电来源与省电模式。只读、不需要任何权限。",
+            category = CapabilityCategory.Device,
+            readOnly = true,
+        )
 
         /** 回给服务端的字段集合（测试与文档共用一份）。 */
         val OUTPUT_KEYS: Set<String> = setOf(
