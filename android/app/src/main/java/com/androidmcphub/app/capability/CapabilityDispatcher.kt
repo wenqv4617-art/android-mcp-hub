@@ -146,6 +146,16 @@ class CapabilityDispatcher(
     private val maxResultBytes: Int = 16 * 1024,
     /** 运行期授权策略；默认允许。见 [CapabilityPolicy]。 */
     private val policy: CapabilityPolicy = CapabilityPolicy.AllowAll,
+    /**
+     * Gate 3：聚合命令（第三方 MCP 工具）的路由器。
+     *
+     * 默认 `null` = **这台设备上不存在第三方工具这条路**，行为与 Gate 2.5 完全一致
+     * （老测试一条都不用改，也证明这条分支是纯增量的）。
+     * 传入实现之后，`hub_list_tools` / `hub_call_tool` 这两个**保留命令名**
+     * 会在下面的第 2 步被它接走，第三方工具名则继续走原来的白名单路径 ——
+     * 永远不可能借道绕过本机白名单。
+     */
+    private val hubCommands: HubCommandRouter? = null,
 ) {
 
     /**
@@ -202,6 +212,32 @@ class CapabilityDispatcher(
                     elapsedMs = 0L,
                     duplicate = true,
                     frame = null,
+                )
+            }
+
+            // 1.5. Gate 3：**保留命令**在进白名单之前被接走。
+            //      位置是刻意的：去重先做（聚合命令同样不许重放），
+            //      而**白名单查找之后**再处理就晚了 —— 那两个名字不在注册表里，
+            //      会被直接判成 unsupported_tool。
+            //      注意这里只认路由器自己声明的保留名；第三方工具的真实名字
+            //      一个都进不来（见 [HubCommandRouter.handles] 的契约）。
+            val hub = hubCommands?.takeIf { it.handles(toolName) }
+            if (hub != null) {
+                val hubResult = try {
+                    hub.route(toolName, arguments)
+                } catch (t: Throwable) {
+                    // 兜底：路由器自己承诺不抛，但远端数据不可信，这里不赌它守约。
+                    CapabilityResult.Failure(
+                        code = ToolResultErrorCode.TOOL_FAILED,
+                        message = "第三方工具调用失败（${t.javaClass.simpleName}）",
+                    )
+                }
+                return@synchronized settle(
+                    requestId = requestId,
+                    // 保留命令名是我们自己的常量，回显它是安全的（它已经过 handles 判定）。
+                    toolName = toolName,
+                    result = hubResult,
+                    startedAt = startedAt,
                 )
             }
 
@@ -283,46 +319,66 @@ class CapabilityDispatcher(
                 )
             }
 
-            when (result) {
-                is CapabilityResult.Success -> {
-                    val payload = stripReservedKeys(result.payload)
-                    val frame = encodeToolResult(requestId = requestId, ok = true, result = payload)
-                    if (frame.toByteArray(Charsets.UTF_8).size > maxResultBytes) {
-                        failure(
-                            requestId = requestId,
-                            toolName = capability.name,
-                            code = ToolResultErrorCode.TOOL_FAILED,
-                            message = "结果过大，已被本机丢弃",
-                            startedAt = startedAt,
-                        )
-                    } else {
-                        ToolDispatchOutcome(
-                            requestId = requestId,
-                            toolName = capability.name,
-                            ok = true,
-                            errorCode = null,
-                            elapsedMs = clock() - startedAt,
-                            duplicate = false,
-                            frame = frame,
-                        )
-                    }
-                }
+            settle(
+                requestId = requestId,
+                toolName = capability.name,
+                result = result,
+                startedAt = startedAt,
+            )
+        }
 
-                is CapabilityResult.Failure -> {
-                    // 能力自己回的错误：同样在本地收敛一遍 code。
-                    val code = if (result.code in ToolResultErrorCode.ALL) {
-                        result.code
-                    } else {
-                        ToolResultErrorCode.TOOL_FAILED
-                    }
+    /**
+     * 把一次执行的结论变成 [ToolDispatchOutcome]（含要回发的帧）。
+     *
+     * Gate 3 抽出这个函数，是为了让**本机能力**与**聚合命令**走同一段收口逻辑：
+     * 剔除信封保留键、结果字节上限、错误码收敛到闭集 —— 三条都一样。
+     * 两段各写一遍的话，迟早只有一边被修。
+     */
+    private fun settle(
+        requestId: String,
+        toolName: String,
+        result: CapabilityResult,
+        startedAt: Long,
+    ): ToolDispatchOutcome =
+        when (result) {
+            is CapabilityResult.Success -> {
+                val payload = stripReservedKeys(result.payload)
+                val frame = encodeToolResult(requestId = requestId, ok = true, result = payload)
+                if (frame.toByteArray(Charsets.UTF_8).size > maxResultBytes) {
                     failure(
                         requestId = requestId,
-                        toolName = capability.name,
-                        code = code,
-                        message = result.message,
+                        toolName = toolName,
+                        code = ToolResultErrorCode.TOOL_FAILED,
+                        message = "结果过大，已被本机丢弃",
                         startedAt = startedAt,
                     )
+                } else {
+                    ToolDispatchOutcome(
+                        requestId = requestId,
+                        toolName = toolName,
+                        ok = true,
+                        errorCode = null,
+                        elapsedMs = clock() - startedAt,
+                        duplicate = false,
+                        frame = frame,
+                    )
                 }
+            }
+
+            is CapabilityResult.Failure -> {
+                // 能力/路由器自己回的错误：同样在本地收敛一遍 code。
+                val code = if (result.code in ToolResultErrorCode.ALL) {
+                    result.code
+                } else {
+                    ToolResultErrorCode.TOOL_FAILED
+                }
+                failure(
+                    requestId = requestId,
+                    toolName = toolName,
+                    code = code,
+                    message = result.message,
+                    startedAt = startedAt,
+                )
             }
         }
 

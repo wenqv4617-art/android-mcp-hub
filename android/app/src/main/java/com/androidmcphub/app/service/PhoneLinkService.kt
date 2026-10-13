@@ -22,12 +22,14 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.androidmcphub.app.MainActivity
 import com.androidmcphub.app.R
+import com.androidmcphub.app.aggregation.McpHubRouter
 import com.androidmcphub.app.capability.BuiltInCapabilities
 import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.core.HubLog
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.LogEntry
 import com.androidmcphub.app.core.LogLevel
+import com.androidmcphub.app.mcp.McpStores
 import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.hostOf
 import com.androidmcphub.app.net.PhoneLinkClient
@@ -214,6 +216,16 @@ class PhoneLinkService : Service() {
             capabilityDispatcher = CapabilityDispatcher(
                 capabilities = BuiltInCapabilities.androidCapabilities(this),
                 policy = { prefs.capabilitiesEnabled() },
+                // Gate 3：聚合入口。两个保留命令名（hub_list_tools / hub_call_tool）
+                // 由这里接走，**不进**上面那份本机能力白名单 —— 第三方工具不是本机能力，
+                // 它的参数校验、授权判定、执行都在 McpHubRouter 里自己完成。
+                // 执行总开关复用同一个用户设置：用户关掉「允许服务端调用本机能力」，
+                // 第三方工具也一起停。
+                hubCommands = McpHubRouter(
+                    serverStore = McpStores.serverStore(this),
+                    authorizationStore = McpStores.authorizationStore(this),
+                    enabled = { prefs.capabilitiesEnabled() },
+                ),
             ),
         ).also { created ->
             client = created
