@@ -1,5 +1,7 @@
 package com.androidmcphub.app.hub
 
+import android.net.Uri
+
 /**
  * 全部导航目的地。
  *
@@ -41,5 +43,27 @@ object Routes {
     /** 设备令牌管理（二级设置页）。 */
     const val TOKEN_SETTINGS = "settings/token"
 
+    /** 添加 MCP 服务器（服务 → 我的服务 → 添加）。 */
+    const val MCP_SERVER_NEW = "services/mcp/new"
+
+    /** 编辑 MCP 服务器：`services/mcp/edit/{serverId}`。 */
+    const val MCP_SERVER_EDIT = "services/mcp/edit/{serverId}"
+
+    /** 一台服务器的工具与授权：`services/mcp/tools/{serverId}`。 */
+    const val MCP_SERVER_TOOLS = "services/mcp/tools/{serverId}"
+
+    /**
+     * 服务器编号的参数名。
+     *
+     * 服务器编号的形状由 [com.androidmcphub.app.aggregation.HubIdentity.SERVER_ID_PATTERN]
+     * 限定（只可能是小写字母、数字、`-`、`_`），本来就不会出现 `/`；这里仍然编码一次，
+     * 是为了不把"编号里一定有非法字符"当成路由能不能用的前提。
+     */
+    const val ARG_SERVER_ID = "serverId"
+
     fun toolDetail(toolId: String): String = "tools/detail/$toolId"
+
+    fun mcpServerEdit(serverId: String): String = "services/mcp/edit/${Uri.encode(serverId)}"
+
+    fun mcpServerTools(serverId: String): String = "services/mcp/tools/${Uri.encode(serverId)}"
 }

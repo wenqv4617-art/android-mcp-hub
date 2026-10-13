@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -39,6 +40,9 @@ import androidx.navigation.navArgument
 import com.androidmcphub.app.ui.HubViewModel
 import com.androidmcphub.app.ui.home.ConnectionDetailScreen
 import com.androidmcphub.app.ui.home.HomeScreen
+import com.androidmcphub.app.ui.mcp.McpViewModel
+import com.androidmcphub.app.ui.services.McpServerEditScreen
+import com.androidmcphub.app.ui.services.McpServerToolsScreen
 import com.androidmcphub.app.ui.services.ServicesScreen
 import com.androidmcphub.app.ui.settings.AdvancedSettingsScreen
 import com.androidmcphub.app.ui.settings.ConnectionSettingsScreen
@@ -67,6 +71,12 @@ fun HubApp(viewModel: HubViewModel) {
     val capabilitiesEnabled by viewModel.capabilitiesEnabled.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
+    // MCP 服务器列表是**另一个** ViewModel：它管的是"用户配了哪些第三方服务器、
+    // 其中哪些工具被授权"，与连接/诊断状态互不相干。放在骨架层建一次，
+    // 服务页与两个二级页共用同一个实例（否则添加完回到列表会看不到）。
+    val mcpViewModel: McpViewModel = viewModel()
+    val mcpMessage by mcpViewModel.message.collectAsStateWithLifecycle()
+
     val snackbarHostState = remember { SnackbarHostState() }
 
     // 一次性提示（保存成功 / 校验失败 / 令牌读不出来）：显示完立刻消费掉，
@@ -75,6 +85,13 @@ fun HubApp(viewModel: HubViewModel) {
         val text = message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(text)
         viewModel.dismissMessage()
+    }
+
+    // 服务页的提示（保存成功 / 地址不合法 / 请求头被拒）走同一个 snackbar。
+    LaunchedEffect(mcpMessage) {
+        val text = mcpMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(text)
+        mcpViewModel.dismissMessage()
     }
 
     Scaffold(
@@ -143,8 +160,45 @@ fun HubApp(viewModel: HubViewModel) {
 
             composable(HubTab.Services.route) {
                 ServicesScreen(
+                    viewModel = mcpViewModel,
+                    capabilitiesEnabled = capabilitiesEnabled,
                     onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
                     onOpenConnectionSettings = { navController.navigate(Routes.CONNECTION_SETTINGS) },
+                    onAddServer = { navController.navigate(Routes.MCP_SERVER_NEW) },
+                    onOpenServer = { serverId -> navController.navigate(Routes.mcpServerTools(serverId)) },
+                )
+            }
+
+            composable(Routes.MCP_SERVER_NEW) {
+                McpServerEditScreen(
+                    viewModel = mcpViewModel,
+                    serverId = null,
+                    onBack = { navController.popBackStack() },
+                    onSaved = { navController.popBackStack() },
+                )
+            }
+
+            composable(
+                route = Routes.MCP_SERVER_EDIT,
+                arguments = listOf(navArgument(Routes.ARG_SERVER_ID) { type = NavType.StringType }),
+            ) { entry ->
+                McpServerEditScreen(
+                    viewModel = mcpViewModel,
+                    serverId = entry.arguments?.getString(Routes.ARG_SERVER_ID),
+                    onBack = { navController.popBackStack() },
+                    onSaved = { navController.popBackStack() },
+                )
+            }
+
+            composable(
+                route = Routes.MCP_SERVER_TOOLS,
+                arguments = listOf(navArgument(Routes.ARG_SERVER_ID) { type = NavType.StringType }),
+            ) { entry ->
+                McpServerToolsScreen(
+                    viewModel = mcpViewModel,
+                    serverId = entry.arguments?.getString(Routes.ARG_SERVER_ID).orEmpty(),
+                    onBack = { navController.popBackStack() },
+                    onDeleted = { navController.popBackStack() },
                 )
             }
 
