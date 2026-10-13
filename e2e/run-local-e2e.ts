@@ -94,14 +94,22 @@ const TOOL_BEHAVIOR_DEVICES: ReadonlyArray<{ deviceId: string; toolBehavior: str
 
 const TOOL_CONTROL_DEVICE_ID = "tool-control";
 
+/**
+ * Gate 3 真实协议段的设备：这台手机替身会把 hub_* 命令**真的转发**给一台
+ * 本地起的第三方 MCP 服务器（见 `tools/mock-phone/mcp-bridge.ts`）。
+ */
+const LIVE_MCP_DEVICE_ID = "live-3p";
+
 const E2E_DEVICE_TOKENS = [
   { deviceId: TEST_DEVICE_ID, token: TEST_DEVICE_TOKEN, label: "e2e mock phone" },
   { deviceId: TEST_DEVICE_ID_2, token: TEST_DEVICE_TOKEN_2, label: "e2e mock phone 2" },
-  ...[...TOOL_BEHAVIOR_DEVICES.map((d) => d.deviceId), TOOL_CONTROL_DEVICE_ID].map((deviceId) => ({
-    deviceId,
-    token: relToken(deviceId),
-    label: "stage1b tool channel device",
-  })),
+  ...[...TOOL_BEHAVIOR_DEVICES.map((d) => d.deviceId), TOOL_CONTROL_DEVICE_ID, LIVE_MCP_DEVICE_ID].map(
+    (deviceId) => ({
+      deviceId,
+      token: relToken(deviceId),
+      label: "stage1b tool channel device",
+    }),
+  ),
   ...[...REL_SCENARIO_DEVICES.map((d) => d.deviceId), REL_CONTROL_DEVICE_ID].map((deviceId) => ({
     deviceId,
     token: relToken(deviceId),
@@ -280,6 +288,67 @@ async function startServer(rig: Awaited<ReturnType<typeof makeRig>>): Promise<Lo
   };
 }
 
+
+// ---------------------------------------------------------------------------
+//  真实第三方 MCP 服务器（Gate 3 用）
+// ---------------------------------------------------------------------------
+
+interface LiveMcpServer {
+  /** 形如 http://127.0.0.1:PORT/mcp */
+  url: string;
+  name: string;
+  /** 读控制面状态：工具被调了几次、收到过哪些请求头、有几个会话。 */
+  state(): Promise<Record<string, unknown>>;
+  close(): Promise<void>;
+}
+
+/**
+ * 起一台**真实**的 MCP Streamable HTTP 服务器（`tools/mcp-test-server/server.mjs`，
+ * 零依赖 Node 实现，走的是与线上同一套协议，不是替身）。
+ *
+ * `--port 0` 让内核分配端口，再从它的启动日志里读回真实地址 —— 这样并行跑多个
+ * e2e 也不会抢端口。
+ */
+async function startLiveMcpServer(name: string, pageSize = 0): Promise<LiveMcpServer> {
+  const child = spawn(
+    process.execPath,
+    ["tools/mcp-test-server/server.mjs", "--port", "0", "--name", name, "--page-size", String(pageSize)],
+    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
+  );
+
+  const url = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`等待 ${name} 监听超时`)), 10_000);
+    let buffer = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const matched = /listening on (http:\/\/[^\s]+)/.exec(buffer);
+      if (matched !== null) {
+        clearTimeout(timer);
+        resolve(matched[1] as string);
+      }
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`${name} 启动即退出（code=${String(code)}）`));
+    });
+  });
+
+  return {
+    url,
+    name,
+    async state() {
+      const res = await fetch(`${url.replace(/\/mcp$/, "")}/__test/state`);
+      return (await res.json()) as Record<string, unknown>;
+    },
+    async close() {
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        await Promise.race([once(child, "exit"), new Promise((r) => setTimeout(r, 2000))]);
+      }
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 //  模拟手机子进程
 // ---------------------------------------------------------------------------
@@ -295,6 +364,8 @@ function startMockPhone(
   token: string,
   scenario: string,
   toolBehavior = "normal",
+  /** 额外命令行参数（Gate 3 用它把手机替身桥接到一台真实 MCP 服务器）。 */
+  extraArgs: readonly string[] = [],
 ): PhoneProcess {
   const child = spawn(
     process.execPath,
@@ -312,6 +383,7 @@ function startMockPhone(
       scenario,
       "--tool-behavior",
       toolBehavior,
+      ...extraArgs,
       "--duration",
       "120",
       "--heartbeat",
@@ -436,14 +508,41 @@ async function main(): Promise<void> {
     out("④ tools/list");
     const listed = await client.listTools();
     const names = listed.tools.map((t) => t.name);
+    const EXPECTED_TOOLS = [
+      "phone_ping",
+      "battery_get_status",
+      "device_get_network",
+      "device_get_storage",
+      // Gate 3：聚合入口。注意它们是**稳定入口**，名字永远不变；
+      // 第三方工具的名字只出现在 hub_list_tools 的返回值与 hub_call_tool 的参数里。
+      "hub_list_tools",
+      "hub_call_tool",
+    ];
     check(
-      "工具列表恰好是 phone_ping + 三个只读能力（显式白名单，一个不多）",
-      names.length === 4 &&
-        names.includes("phone_ping") &&
-        names.includes("battery_get_status") &&
-        names.includes("device_get_network") &&
-        names.includes("device_get_storage"),
+      "工具列表恰好是四个本机能力 + 两个聚合入口（显式白名单，一个不多）",
+      names.length === EXPECTED_TOOLS.length && EXPECTED_TOOLS.every((n) => names.includes(n)),
       `tools=[${names.join(", ")}]`,
+    );
+
+    // Gate 3：聚合入口对外只允许"服务器标识 + 工具标识 + 参数"，
+    // 绝不允许客户端把 URL / Headers 塞进来 —— 那等于让它绕过已保存的服务器配置。
+    const hubList = listed.tools.find((t) => t.name === "hub_list_tools");
+    const hubCall = listed.tools.find((t) => t.name === "hub_call_tool");
+    const hubCallProps = Object.keys((hubCall?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
+    check("暴露了 hub_list_tools", hubList !== undefined);
+    check(
+      "hub_list_tools 只读标注（readOnlyHint=true）",
+      (hubList?.annotations as Record<string, unknown> | undefined)?.["readOnlyHint"] === true,
+    );
+    check(
+      "hub_call_tool 的参数只有 device_id / timeout_ms / server_id / tool_name / arguments",
+      ["device_id", "timeout_ms", "server_id", "tool_name", "arguments"].every((k) => hubCallProps.includes(k)),
+      `properties=[${hubCallProps.join(", ")}]`,
+    );
+    check(
+      "hub_call_tool 的 schema 里没有任何 URL / Headers 入口",
+      !hubCallProps.some((k) => /url|header|endpoint|token|secret/i.test(k)),
+      `properties=[${hubCallProps.join(", ")}]`,
     );
     out("");
 
@@ -531,7 +630,7 @@ async function main(): Promise<void> {
     // ---- 8. 会话与协议头 -------------------------------------------------
     out("⑧ 会话与协议头");
     const afterClose = await client.listTools();
-    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 4);
+    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 6);
     out("");
 
     // ---- ⑨ 异常手机场景矩阵（A2–A8）--------------------------------------
@@ -912,13 +1011,18 @@ async function main(): Promise<void> {
     }
 
     /** 起一台工具通道的手机（scenario 固定 normal —— 坏法在 toolBehavior 上）。 */
-    async function spawnToolPhone(deviceId: string, toolBehavior: string): Promise<PhoneProcess> {
+    async function spawnToolPhone(
+      deviceId: string,
+      toolBehavior: string,
+      extraArgs: readonly string[] = [],
+    ): Promise<PhoneProcess> {
       const proc = startMockPhone(
         `${server.origin.replace("http", "ws")}/phone/ws`,
         deviceId,
         relToken(deviceId),
         "normal",
         toolBehavior,
+        extraArgs,
       );
       await waitFor(
         `${deviceId} 连上服务端`,
@@ -1106,6 +1210,242 @@ async function main(): Promise<void> {
       "同一台手机上 legacy phone_ping 与新工具通道共存",
       ((controlPing["structuredContent"] as Record<string, unknown> | undefined)?.["ok"] ?? false) === true,
     );
+
+    // -----------------------------------------------------------------------
+    // ⑪ Gate 3：聚合入口 —— 第三方 MCP 服务器 → 手机 → ChatGPT 可见
+    // -----------------------------------------------------------------------
+    //
+    //  这一段要证明的是**闭环**，不是映射表：
+    //    · 一个真实的 MCP SDK 客户端，调两个**名字永远不变**的聚合入口；
+    //    · 请求穿过 Worker → DO → WebSocket，落到手机替身；
+    //    · 手机替身里"已连接着一台第三方 MCP 服务器"，它把真实目录交回来；
+    //    · 目录里那个**未授权**的工具，名字和描述一个字节都不许外传。
+    out("⑪ Gate 3 聚合入口：第三方 MCP 服务器 → 手机 → ChatGPT 可见");
+
+    const catalog = await toolCall(TOOL_CONTROL_DEVICE_ID, 3000, {}, "hub_list_tools");
+    check(
+      "hub_list_tools 走完整链路成功（目录来自手机，不是 Worker 编的）",
+      !catalog.isError && catalog.structured["ok"] === true,
+      `ok=${String(catalog.structured["ok"])} code=${String(
+        (catalog.structured["error"] as Record<string, unknown> | undefined)?.["code"],
+      )}`,
+    );
+    const catalogTools = (catalog.structured["tools"] as Array<Record<string, unknown>> | undefined) ?? [];
+    check(
+      "目录里是第三方工具的真实身份（serverId + toolName 组成的稳定 id）",
+      catalogTools.length === 1 && catalogTools[0]?.["tool_id"] === "mcp:mock_server:echo_text",
+      `tools=${JSON.stringify(catalogTools.map((t) => t["tool_id"]))}`,
+    );
+    check(
+      "未授权的工具只被计数、描述不外传",
+      catalog.structured["other_tools_count"] === 1 &&
+        !JSON.stringify(catalog).includes("write_note") &&
+        !JSON.stringify(catalog).includes("写一条笔记"),
+      `other_tools_count=${String(catalog.structured["other_tools_count"])}`,
+    );
+
+    const hubEcho = await toolCall(
+      TOOL_CONTROL_DEVICE_ID,
+      3000,
+      { server_id: "mock_server", tool_name: "echo_text", arguments: { text: "gate3-e2e" } },
+      "hub_call_tool",
+    );
+    // ⚠ 走的是同一个 SDK 客户端，但取的是**工具结果正文**（content），
+    //   而不是 structuredContent —— 第三方工具的真实文本就在这里。
+    const hubEchoRaw = await client.callTool({
+      name: "hub_call_tool",
+      arguments: {
+        device_id: TOOL_CONTROL_DEVICE_ID,
+        timeout_ms: 3000,
+        server_id: "mock_server",
+        tool_name: "echo_text",
+        arguments: { text: "gate3-e2e" },
+      },
+    });
+    const hubEchoText = ((hubEchoRaw["content"] as Array<{ type: string; text: string }> | undefined) ?? [])
+      .map((c) => c.text)
+      .join("\n");
+    check(
+      "hub_call_tool 把第三方工具的真实结果带回来（端到端，不是回显请求）",
+      hubEchoRaw["isError"] !== true && hubEchoText.includes("mock-mcp echo: gate3-e2e"),
+      `text=${hubEchoText.replace(/\n/g, " / ")}`,
+    );
+    check(
+      "结果里的身份来自信封与请求，第三方结果无法改写它",
+      hubEcho.structured["tool_id"] === "mcp:mock_server:echo_text" &&
+        hubEcho.structured["server_id"] === "mock_server" &&
+        hubEcho.structured["tool_name"] === "echo_text" &&
+        hubEcho.structured["device_id"] === TOOL_CONTROL_DEVICE_ID &&
+        hubEcho.structured["connection_generation"] !== undefined,
+      JSON.stringify({
+        tool_id: hubEcho.structured["tool_id"],
+        device_id: hubEcho.structured["device_id"],
+      }),
+    );
+
+    // 客户端**不能**用聚合入口绕过已保存的服务器配置：没有 URL / Headers 入口，
+    // 身份格式一旦不合法就是**协议错误**，连发都不会发出去。
+    const badIdentity = await toolCall(
+      TOOL_CONTROL_DEVICE_ID,
+      3000,
+      { server_id: "../../etc", tool_name: "echo_text", url: "https://evil.example/mcp" },
+      "hub_call_tool",
+    );
+    check(
+      "非法 server_id / 多余的 url 字段 → 协议错误（拒绝而不是静默忽略）",
+      badIdentity.protocolError !== "" || badIdentity.isError,
+      badIdentity.protocolError !== "" ? "JSON-RPC error" : `code=${String(
+        (badIdentity.structured["error"] as Record<string, unknown> | undefined)?.["code"],
+      )}`,
+    );
+
+    // -----------------------------------------------------------------------
+    // ⑫ Gate 3 真实协议：手机替身真的去连一台第三方 MCP 服务器
+    // -----------------------------------------------------------------------
+    //
+    //  ⑪ 证明的是聚合入口的**形状**，手机那边回的是替身写死的目录。
+    //  这一段把手机换成真协议：手机替身用 `tools/mcp-streamable-http-client.mjs`
+    //  （同一份零依赖参考客户端）对一台真实 MCP Streamable HTTP 服务器做
+    //  initialize → tools/list（分页）→ tools/call，目录与结果都是服务器给的字节。
+    //
+    //  判据挑的是替身**编不出来**的东西：分页取回的 8 个工具、服务器自己算出的算式、
+    //  服务器控制面里记着的会话与请求头。
+    out("⑫ Gate 3 真实协议：手机 → 真实第三方 MCP 服务器（initialize / tools/list / tools/call）");
+
+    const liveServer = await startLiveMcpServer("live-server", 3); // 每页 3 个 → 8 个工具必然分页
+    try {
+      const livePhone = await spawnToolPhone(LIVE_MCP_DEVICE_ID, "normal", [
+        "--mcp-url",
+        liveServer.url,
+        "--mcp-server-id",
+        "live_server",
+      ]);
+      toolPhones.push(livePhone);
+
+      const liveCatalog = await toolCall(LIVE_MCP_DEVICE_ID, 8000, {}, "hub_list_tools");
+      const liveTools = (liveCatalog.structured["tools"] as Array<Record<string, unknown>> | undefined) ?? [];
+      const liveIds = liveTools.map((t) => String(t["tool_id"]));
+      check(
+        "目录来自真实 MCP 服务器的 tools/list（含分页），不是替身写死的表",
+        !liveCatalog.isError &&
+          liveCatalog.structured["ok"] === true &&
+          liveIds.includes("mcp:live_server:echo_text") &&
+          liveIds.includes("mcp:live_server:sum_numbers") &&
+          liveIds.includes("mcp:live_server:no_annotations"),
+        `count=${String(liveCatalog.structured["tools_count"])} ids=${liveIds.slice(0, 3).join(",")}…`,
+      );
+      check(
+        "第三方工具的 input_schema 是服务器上真实的那一份（required/properties 逐字搬回）",
+        (() => {
+          const echo = liveTools.find((t) => t["tool_name"] === "echo_text");
+          const schema = (echo?.["input_schema"] as Record<string, unknown> | undefined) ?? {};
+          const props = (schema["properties"] as Record<string, unknown> | undefined) ?? {};
+          const required = (schema["required"] as string[] | undefined) ?? [];
+          return required.includes("text") && (props["text"] as Record<string, unknown> | undefined)?.["type"] === "string";
+        })(),
+        `schema=${JSON.stringify(liveTools.find((t) => t["tool_name"] === "echo_text")?.["input_schema"] ?? null).slice(0, 120)}`,
+      );
+      check(
+        "声明了 destructiveHint 的工具仍然是「存在但不给你看」：只计数，名字与描述不外传",
+        liveCatalog.structured["other_tools_count"] === 1 &&
+          !JSON.stringify(liveCatalog).includes("destructive_write") &&
+          !JSON.stringify(liveCatalog).includes("有副作用的写"),
+        `other_tools_count=${String(liveCatalog.structured["other_tools_count"])}`,
+      );
+
+      const liveState = await liveServer.state();
+      const sessions = (liveState["sessions"] as unknown[] | undefined) ?? [];
+      const headers = (liveState["requestHeaders"] as Array<Record<string, unknown>> | undefined) ?? [];
+      const sawProtocolHeader = headers.some(
+        (h) => ((h["headers"] as Record<string, string> | undefined) ?? {})["mcp-protocol-version"] !== undefined,
+      );
+      check(
+        "第三方服务器侧确有真实会话与 MCP 协议头（不是替身假装连上）",
+        sessions.length >= 1 && sawProtocolHeader,
+        `sessions=${sessions.length} 请求数=${headers.length} 协议头=${String(sawProtocolHeader)}`,
+      );
+
+      // 真调一次：这个算式的结果只有服务器算得出来。
+      const sumRaw = await client.callTool({
+        name: "hub_call_tool",
+        arguments: {
+          device_id: LIVE_MCP_DEVICE_ID,
+          timeout_ms: 8000,
+          server_id: "live_server",
+          tool_name: "sum_numbers",
+          arguments: { a: 2, b: 40 },
+        },
+      });
+      const sumText = ((sumRaw["content"] as Array<{ text: string }> | undefined) ?? [])
+        .map((c) => c.text)
+        .join("\n");
+      const liveCalls =
+        (((await liveServer.state())["calls"] as Array<Record<string, unknown>> | undefined) ?? []);
+      check(
+        "hub_call_tool 真的调到了第三方工具（第三方服务器自己记下了这次调用与参数）",
+        sumText.includes("2 + 40 = 42") &&
+          liveCalls.some((c) => c["name"] === "sum_numbers" && JSON.stringify(c["arguments"]).includes("40")),
+        `text=${sumText.replace(/\n/g, " / ")} 服务器记录=${liveCalls.length} 次`,
+      );
+
+      // 工具级失败不能被吞掉，也不能被包装成 Hub 层失败。
+      const boomRaw = await client.callTool({
+        name: "hub_call_tool",
+        arguments: {
+          device_id: LIVE_MCP_DEVICE_ID,
+          timeout_ms: 8000,
+          server_id: "live_server",
+          tool_name: "boom",
+          arguments: {},
+        },
+      });
+      const boomText = ((boomRaw["content"] as Array<{ text: string }> | undefined) ?? [])
+        .map((c) => c.text)
+        .join("\n");
+      check(
+        "第三方工具自己报的失败如实回给模型（isError + 原始文本，不吞、不改写）",
+        boomRaw["isError"] === true && boomText.includes("boom: 这是工具自己报的失败"),
+        `isError=${String(boomRaw["isError"])} text=${boomText.replace(/\n/g, " / ").slice(0, 60)}`,
+      );
+
+      // 没授权的工具，模型知道名字也调不动；服务器上不存在的工具同样拒绝。
+      const unauthed = await toolCall(
+        LIVE_MCP_DEVICE_ID,
+        8000,
+        { server_id: "live_server", tool_name: "destructive_write", arguments: { target: "/tmp/x" } },
+        "hub_call_tool",
+      );
+      // 失败结果的形状是 `{isError:true, structuredContent:{ok:false, error_code, error_message}}`。
+      const unauthedCode = unauthed.structured["error_code"];
+      check(
+        "未授权的第三方工具调不动（手机层拒绝，不是「先调了再说」）",
+        unauthed.isError && unauthedCode === "not_permitted",
+        `code=${String(unauthedCode)} tool_id=${String(unauthed.structured["tool_id"])}`,
+      );
+      const unknownTool = await toolCall(
+        LIVE_MCP_DEVICE_ID,
+        8000,
+        { server_id: "live_server", tool_name: "no_such_tool", arguments: {} },
+        "hub_call_tool",
+      );
+      const unknownCode = unknownTool.structured["error_code"];
+      check(
+        "第三方服务器上不存在的工具 → unsupported_tool",
+        unknownTool.isError && unknownCode === "unsupported_tool",
+        `code=${String(unknownCode)}`,
+      );
+      const finalCalls =
+        (((await liveServer.state())["calls"] as Array<Record<string, unknown>> | undefined) ?? []).map((c) =>
+          String(c["name"]),
+        );
+      check(
+        "被拒绝的调用没有真的打到第三方服务器上（destructive_write 的执行次数为 0）",
+        !finalCalls.includes("destructive_write"),
+        `服务器记录的工具调用=${finalCalls.join(",")}`,
+      );
+    } finally {
+      await liveServer.close();
+    }
 
     for (const proc of toolPhones) await proc.stop();
     if (toolControl !== null) await toolControl.stop();

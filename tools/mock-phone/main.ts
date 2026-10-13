@@ -28,6 +28,7 @@ import {
   type PhoneScenario,
   type ToolBehavior,
 } from "./client";
+import { createMcpBridge, parseAuthorizeList } from "./mcp-bridge";
 
 interface CliOptions {
   url: string;
@@ -39,6 +40,14 @@ interface CliOptions {
   durationMs: number;
   heartbeatMs: number;
   delayMs: number;
+  /**
+   * 第三方 MCP 服务器地址（Gate 3 桥接）。给了它就真的去连，
+   * 没给就继续用写死的本地白名单（现有全部 e2e 用例的行为不变）。
+   */
+  mcpUrl: string | null;
+  mcpServerId: string;
+  /** `--mcp-authorize` 的原始值，交给 `parseAuthorizeList` 解释。 */
+  mcpAuthorize: string | undefined;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -66,6 +75,12 @@ function parseArgs(argv: string[]): CliOptions {
     process.exit(2);
   }
 
+  const mcpUrlRaw = get("mcp-url");
+  const mcpServerId = get("mcp-server-id") ?? "live_server";
+  if (mcpUrlRaw !== undefined && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(mcpServerId)) {
+    fail(`--mcp-server-id "${mcpServerId}" 不合法（只能用 a-z0-9_- ，首字符是字母或数字，最长 64）`);
+  }
+
   return {
     url,
     device,
@@ -75,6 +90,9 @@ function parseArgs(argv: string[]): CliOptions {
     durationMs: Number(get("duration") ?? "30") * 1000,
     heartbeatMs: Number(get("heartbeat") ?? "30") * 1000,
     delayMs: Number(get("delay-ms") ?? "500"),
+    mcpUrl: mcpUrlRaw === undefined ? null : mcpUrlRaw,
+    mcpServerId,
+    mcpAuthorize: get("mcp-authorize"),
   };
 }
 
@@ -95,6 +113,11 @@ function printHelp(): void {
   --heartbeat <秒>      默认 30。心跳间隔。
   --delay-ms <毫秒>     仅 late 场景使用，默认 500。
   --tool-behavior <name>  Gate 2：对 tool_request 的行为，默认 normal。可选：${TOOL_BEHAVIORS.join(", ")}
+  --mcp-url <http-url>   Gate 3：把 hub_* 命令真的转发到这台第三方 MCP 服务器
+                         （不给则用写死的本地替身目录）。
+  --mcp-server-id <id>   转发时在目录里使用的服务器 id，默认 live_server。
+  --mcp-authorize <列表> 哪些第三方工具算"用户已授权"：逗号分隔的名字，或 * 表示全部；
+                         缺省规则是"声明了 destructiveHint 的一律未授权"。
   --help                显示本帮助。
 `);
 }
@@ -113,10 +136,30 @@ async function main(): Promise<void> {
     deviceId: opts.device,
     delayMs: opts.delayMs,
     onLog: (line) => console.log(`[phone] ${line}`),
+    ...(opts.mcpUrl === null
+      ? {}
+      : {
+          toolHandler: createMcpBridge({
+            url: opts.mcpUrl,
+            serverId: opts.mcpServerId,
+            ...(parseAuthorizeList(opts.mcpAuthorize) === undefined
+              ? {}
+              : {
+                  isAuthorized: (() => {
+                    const list = parseAuthorizeList(opts.mcpAuthorize);
+                    return (name: string) => (list === null ? true : list?.has(name) === true);
+                  })(),
+                }),
+            log: (line) => console.log(`[phone:mcp] ${line}`),
+          }),
+        }),
   });
 
   console.log(`[phone] 连接 ${opts.url}`);
   console.log(`[phone] device=${opts.device} scenario=${opts.scenario} tool-behavior=${opts.toolBehavior}`);
+  if (opts.mcpUrl !== null) {
+    console.log(`[phone] Gate 3 桥接到真实 MCP 服务器：${opts.mcpUrl}（server_id=${opts.mcpServerId}）`);
+  }
 
   const socket = new WebSocket(opts.url, {
     headers: {

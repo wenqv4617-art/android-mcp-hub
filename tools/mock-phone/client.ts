@@ -83,7 +83,7 @@ export const TOOL_BEHAVIORS: ToolBehavior[] = [
  * 这些数字是编的，而且是刻意编得不像任何真实设备（42% / 未充电 / 省电模式）。
  * 它们的作用只有一个：让"这条结果确实从手机来"这件事在 E2E 里可断言。
  */
-export const MOCK_CAPABILITIES: Record<string, () => Record<string, unknown>> = {
+export const MOCK_CAPABILITIES: Record<string, (args: Record<string, unknown>) => Record<string, unknown>> = {
   battery_get_status: () => ({
     battery_level_percent: 42,
     charging: false,
@@ -109,6 +109,56 @@ export const MOCK_CAPABILITIES: Record<string, () => Record<string, unknown>> = 
     used_bytes: 80_000_000_000,
     usage_percent: 62.5,
   }),
+  // ---------------------------------------------------------------------
+  // Gate 3：模拟"Android 手机 + 一台已连接的第三方 MCP 服务器"。
+  //
+  // 这两个命令名是**聚合保留名**，第三方工具名只出现在 arguments 里 ——
+  // 所以这个替身同样不会把 `battery_get_status` 之类当成 hub 命令。
+  //
+  // 目录里**故意**放一个未授权的工具（`write_note`）：它必须只被计数、
+  // 描述不外传。这样"目录边界"在 E2E 里也是可断言的，而不是只靠单测。
+  // ---------------------------------------------------------------------
+  hub_list_tools: () => ({
+    servers: [{ server_id: "mock_server", server_name: "Mock MCP", availability: "online" }],
+    tools: [
+      {
+        server_id: "mock_server",
+        tool_name: "echo_text",
+        display_name: "Echo text",
+        description: "把传入的 text 原样返回（模拟第三方只读工具）",
+        input_schema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+          additionalProperties: false,
+        },
+        authorization_state: "authorized",
+        availability: "online",
+      },
+      {
+        server_id: "mock_server",
+        tool_name: "write_note",
+        display_name: "Write note",
+        description: "写一条笔记（模拟**未授权**的第三方工具，不该外传）",
+        input_schema: { type: "object", properties: { note: { type: "string" } } },
+        authorization_state: "not_authorized",
+        availability: "online",
+      },
+    ],
+  }),
+  hub_call_tool: (args) => {
+    const toolName = typeof args["tool_name"] === "string" ? args["tool_name"] : "";
+    const inner = args["arguments"];
+    const innerRecord = typeof inner === "object" && inner !== null ? (inner as Record<string, unknown>) : {};
+    const text = typeof innerRecord["text"] === "string" ? innerRecord["text"] : "";
+    return {
+      server_id: typeof args["server_id"] === "string" ? args["server_id"] : "",
+      tool_name: toolName,
+      content: [{ type: "text", text: `mock-mcp echo: ${text}` }],
+      content_types: ["text"],
+      is_error: false,
+    };
+  },
 };
 
 /** 模拟手机对一次 tool_request 的回复记录（测试用来断言"回了几个、什么形状"）。 */
@@ -117,6 +167,36 @@ export interface SentToolResult {
   toolName: string;
   ok: boolean;
   afterFrameIndex: number;
+}
+
+/**
+ * 手机替身对 `tool_request` 的自定义处理（测试脚手架用）。
+ *
+ * 返回 `null` 表示"这个命令名不归我管" → 回落到 [MOCK_CAPABILITIES] 白名单；
+ * 返回对象表示"这就是结果"；抛错表示"转发失败"，替身会回一个 `tool_failed`。
+ *
+ * 允许 `Promise`，因为真实链路（手机 → 第三方 MCP 服务器）本来就是异步的：
+ * 桥接层要真的发 HTTP 请求，不能假装同步。
+ */
+export type MockToolHandler = (
+  toolName: string,
+  args: Record<string, unknown>,
+) => Record<string, unknown> | MockToolRefusal | null | Promise<Record<string, unknown> | MockToolRefusal | null>;
+
+/**
+ * "手机拒绝这次调用" —— 是一个 `ok:false` 的 tool_result（帧层错误码闭集里的一员），
+ * 不是工具自己报的失败。用它来区分两种失败：
+ *   · 未授权 / 不认识这个工具 → 手机层拒绝（[MockToolRefusal]）；
+ *   · 第三方工具执行失败 → `ok:true` + `is_error:true`（正常结果对象）。
+ *
+ * 用类（而不是 `{error:...}` 这种约定）是因为结果对象里本来就可能有一个叫
+ * `error` 的字段，靠键名判断迟早会认错。
+ */
+export class MockToolRefusal {
+  constructor(
+    readonly code: string,
+    readonly message: string,
+  ) {}
 }
 
 /** 只依赖标准 WebSocket 的最小接口，好让测试注入假 socket。 */
@@ -136,6 +216,11 @@ export interface MockPhoneOptions {
   appVersion?: string;
   /** `late` 场景的延迟毫秒数。 */
   delayMs?: number;
+  /**
+   * 自定义 `tool_request` 处理，优先于本地白名单（仅 `toolBehavior === "normal"` 时生效）。
+   * 统一给"手机替身真的去连一台第三方 MCP 服务器"用（见 `mcp-bridge.ts`）。
+   */
+  toolHandler?: MockToolHandler;
   /**
    * 对第 N 个（0 基）phone_ping **故意不回应**，其余的照常回。
    * 用来构造"并发请求里只有一个超时"的场景，验证请求之间不会串。
@@ -245,10 +330,16 @@ export class MockPhone {
       case "tool_request": {
         const requestId = typeof frame["request_id"] === "string" ? frame["request_id"] : "";
         const toolName = typeof frame["tool_name"] === "string" ? frame["tool_name"] : "";
+        const rawArguments = frame["arguments"];
+        const args =
+          typeof rawArguments === "object" && rawArguments !== null && !Array.isArray(rawArguments)
+            ? (rawArguments as Record<string, unknown>)
+            : {};
         const index = this.toolRequestCount;
         this.toolRequestCount += 1;
         this.log(`tool_request #${index} tool=${toolName} request_id=${requestId}`);
-        this.respondToToolRequest(send, requestId, toolName);
+        // 可能要走异步的第三方转发，所以这里不阻塞帧循环。
+        void this.handleToolRequest(send, requestId, toolName, args);
         return;
       }
 
@@ -259,13 +350,62 @@ export class MockPhone {
   }
 
   /**
+   * `tool_request` 的异步外壳：先给自定义 [MockPhoneOptions.toolHandler] 一次机会，
+   * 它说"不归我管"（`null`）才落到下面那个同步的白名单实现。
+   *
+   * 只在 `toolBehavior === "normal"` 时桥接：其它 behavior 是用来构造协议的坏情况的，
+   * 混进真实网络只会让失败原因变模糊。
+   */
+  private async handleToolRequest(
+    send: (data: string | ArrayBuffer) => void,
+    requestId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    const handler = this.opts.toolHandler;
+    if (handler !== undefined && this.toolBehavior === "normal") {
+      let bridged: Record<string, unknown> | MockToolRefusal | null;
+      try {
+        bridged = await handler(toolName, args);
+      } catch (error) {
+        const detail = error instanceof Error ? error.name : "unknown";
+        this.log(`toolHandler 抛错（${detail}），回 tool_failed`);
+        this.sendToolResult(send, requestId, toolName, false, null, {
+          code: "tool_failed",
+          message: "模拟手机的第三方转发失败",
+        });
+        return;
+      }
+      if (bridged instanceof MockToolRefusal) {
+        this.log(`toolHandler 拒绝了 ${toolName}：${bridged.code}`);
+        this.sendToolResult(send, requestId, toolName, false, null, {
+          code: bridged.code,
+          message: bridged.message,
+        });
+        return;
+      }
+      if (bridged !== null) {
+        this.log(`toolHandler 处理了 ${toolName}（异步）`);
+        this.sendToolResult(send, requestId, toolName, true, bridged);
+        return;
+      }
+    }
+    this.respondToToolRequest(send, requestId, toolName, args);
+  }
+
+  /**
    * 对一次 `tool_request` 的回复。
    *
    * 默认路径刻意是**白名单**：不在 [MOCK_CAPABILITIES] 里的工具名一律回
    * `unsupported_tool`。这样"Worker 把没注册的工具名发过来了"在 E2E 里
    * 会变成一条可观测的失败，而不是一个"手机居然也答应了"的假成功。
    */
-  private respondToToolRequest(send: (data: string | ArrayBuffer) => void, requestId: string, toolName: string): void {
+  private respondToToolRequest(
+    send: (data: string | ArrayBuffer) => void,
+    requestId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): void {
     switch (this.toolBehavior) {
       case "no-response":
         this.log("toolBehavior=no-response：故意不回 tool_result");
@@ -276,8 +416,8 @@ export class MockPhone {
         return;
 
       case "duplicate":
-        this.sendToolResult(send, requestId, toolName, true, this.mockResultFor(toolName));
-        this.sendToolResult(send, requestId, toolName, true, this.mockResultFor(toolName));
+        this.sendToolResult(send, requestId, toolName, true, this.mockResultFor(toolName, args));
+        this.sendToolResult(send, requestId, toolName, true, this.mockResultFor(toolName, args));
         return;
 
       case "error":
@@ -297,7 +437,7 @@ export class MockPhone {
       case "reserved-key":
         // 一台被改造过的手机试图用 result 覆盖信封字段。
         this.sendToolResult(send, requestId, toolName, true, {
-          ...this.mockResultFor(toolName),
+          ...(this.mockResultFor(toolName, args) ?? {}),
           ok: false,
           request_id: "hijacked",
           device_id: "another-phone",
@@ -306,11 +446,11 @@ export class MockPhone {
 
       case "malformed":
         // 缺 request_id 的 tool_result —— 服务端必须当成 invalid 拒绝，而不是崩。
-        this.sendToolResult(send, null, toolName, true, this.mockResultFor(toolName));
+        this.sendToolResult(send, null, toolName, true, this.mockResultFor(toolName, args));
         return;
 
       default: {
-        const result = this.mockResultFor(toolName);
+        const result = this.mockResultFor(toolName, args);
         if (result === null) {
           this.log(`toolBehavior=normal：本地白名单里没有 ${toolName}，回 unsupported_tool`);
           this.sendToolResult(send, requestId, toolName, false, null, {
@@ -326,9 +466,9 @@ export class MockPhone {
   }
 
   /** 本地白名单查表；不在表里返回 null（调用方负责回 unsupported_tool）。 */
-  private mockResultFor(toolName: string): Record<string, unknown> | null {
+  private mockResultFor(toolName: string, args: Record<string, unknown>): Record<string, unknown> | null {
     const capability = MOCK_CAPABILITIES[toolName];
-    return capability === undefined ? null : capability();
+    return capability === undefined ? null : capability(args);
   }
 
   private sendToolResult(
