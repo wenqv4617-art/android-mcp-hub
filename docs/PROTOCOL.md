@@ -387,3 +387,85 @@ E2E 断言三处必须同时包含这些键：
 容量为 0 / 不可访问时**明确失败**（`tool_unavailable`「存储卷不可用：系统报告的容量为 0」），
 绝不返回一串 0 假装"手机是空的"。该能力不申请 `MANAGE_EXTERNAL_STORAGE`、
 `READ_MEDIA_*` 或任何传统整盘权限，也不枚举用户文件。
+
+---
+
+## 11. Gate 3：第三方 MCP 工具聚合（复用 `tool_request` / `tool_result`）
+
+Gate 3 让 Android 当**第三方 MCP 客户端**：它连真实 MCP 服务器、列出工具、等用户授权，
+再让模型经聚合入口调用。关键决定：**不为它新增任何帧类型**。
+
+理由：`tool_request` / `tool_result`（§3.5 / §4.4）已经把"服务端要手机做一件事、
+拿回一个结果"这条路走通了 —— request_id 全链透传、Worker 侧唯一 pending 表负责结算、
+代次校验与去重都在老路上。为聚合再发明一对帧，只会把攻击面和回归面各扩大一倍。
+
+于是聚合的两个入口就"长"在既有通道上，作为两个**保留命令名**下发：
+
+| 命令名 | 语义 | `arguments` |
+| --- | --- | --- |
+| `hub_list_tools` | 列出可用的第三方工具目录 | `{ "server_id"?: string }`，省略表示全部服务器 |
+| `hub_call_tool` | 调用某个第三方工具 | `{ "server_id": string, "tool_name": string, "arguments"?: object }` |
+
+**这两个名字由手机侧在能力白名单查找之前抢先识别**（`HubCommandRouter`），
+永远进不了 `BuiltInCapabilities` 的本机能力路径；反过来，本机能力名（`battery_get_status`
+等）也永远不能被当成第三方工具名去路由。两条路互不借道。
+
+`server_id` 形如 `^[a-z0-9][a-z0-9_-]{0,63}$`（本地生成，与 URL 解耦），
+`tool_name` 形如 `^[A-Za-z0-9_-]{1,128}$`。
+
+### 11.1 `hub_list_tools` 的结果（`tool_result.result`）
+
+```json
+{
+  "servers": [{ "server_id": "...", "server_name": "...", "availability": "online" }],
+  "tools": [{
+    "server_id": "...",
+    "tool_name": "...",
+    "display_name": "...",
+    "description": "...",
+    "input_schema": { },
+    "fingerprint": "……32 位十六进制……",
+    "authorization_state": "authorized",
+    "availability": "online"
+  }],
+  "other_tools_count": 3
+}
+```
+
+约定（两侧都有测试钉住）：
+
+* **没被用户授权、服务器离线、以及超出上限的工具，不进 `tools` 数组**，只让
+  `other_tools_count` 变大 —— 模型看不到不存在于它职权范围内的东西，
+  而"被藏起来的数量"仍然如实报出来，不是偷偷摸摸。
+* `authorization_state` 只有 `"authorized"` 才会出现在数组里（其余状态在手机本地可见）；
+  服务端仍会**再判一次**，两端都不信对方。
+* `fingerprint` 是工具定义的哈希（含服务器地址、工具名、标题、描述与**规范化后的**
+  `input_schema`）。定义一变，指纹就变，旧授权失效 —— 这是"授权的是定义，不是名字"。
+* `input_schema` 可能因超过展示上限而缺失；缺了**不代表定义变了**，指纹按服务器原始
+  schema 计算。
+* `tool_id`（`mcp:<server_id>:<tool_name>`）由 **Worker 派生**，手机不回传这个字段：
+  身份只有一个来源，少一处可以不一致的地方。
+
+### 11.2 `hub_call_tool` 的结果（`tool_result.result`）
+
+```json
+{
+  "server_id": "...", "tool_name": "...", "tool_id": "mcp:...:...",
+  "is_error": false,
+  "content": [{ "type": "text", "text": "..." }],
+  "content_types": ["text"],
+  "structured_content": { },
+  "truncated": false
+}
+```
+
+* 第三方工具**自己报的**失败走 `is_error: true`（不是把成功包装成失败，也不是把失败
+  包装成成功）；传输层/授权层的失败用错误码走 `tool_result.error`。
+* 结果里的保留字段（`type`/`ok`/`request_id`/`device_id`/`server_id`/`tool_id` …）
+  不能被第三方内容覆盖：手机侧重建结果对象，冲突键**丢弃**并记一条告警。
+* 非文本内容只上报**类型**，正文不外泄（图片/音频的 base64 不进日志、不进模型上下文）。
+* 错误码闭集（§6 之外新增的映射）：服务器连不上 → `tool_unavailable`；
+  未授权/定义已变 → `not_permitted`；参数不合 schema → `invalid_arguments`；
+  其余（HTTP 错误、协议错误、超时、结果过大、服务器拒绝）→ `tool_failed`。
+  旧版 App 收到这两个保留命令会回 `unsupported_tool`，服务端如实转述成"这台手机
+  还不支持聚合"，不伪造空目录。
