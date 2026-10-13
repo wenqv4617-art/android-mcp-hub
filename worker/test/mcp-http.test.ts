@@ -213,13 +213,46 @@ describe("MCP / tools/list", () => {
     // 一个没被审过的新工具出现在 tools/list 里必须让测试变红。
     expect(tools.map((t) => t["name"])).toEqual(toolNames());
 
+    // 哪些工具是"只读且非破坏性"：本机四个能力 + hub_list_tools。
+    // hub_call_tool 故意**不**在这张表里 —— 它会执行第三方工具，正确性要求它
+    // 标注 readOnlyHint:false，所以下面单独断言。
+    const readOnlyToolNames = [
+      "phone_ping",
+      "battery_get_status",
+      "device_get_network",
+      "device_get_storage",
+      "hub_list_tools",
+    ];
     for (const tool of tools) {
       expect(typeof tool["description"]).toBe("string");
-      // 只读工具：这三个 hint 必须诚实。destructiveHint 不该出现。
       const annotations = tool["annotations"] as Record<string, unknown>;
-      expect(annotations["readOnlyHint"]).toBe(true);
+      // destructiveHint 一律不该出现：连 hub_call_tool 也不自称"破坏性"。
       expect(annotations["destructiveHint"]).toBeUndefined();
+      if (readOnlyToolNames.includes(tool["name"] as string)) {
+        expect(annotations["readOnlyHint"]).toBe(true);
+      } else {
+        expect(annotations["readOnlyHint"]).toBe(false);
+      }
     }
+
+    // 聚合入口必须出现在 tools/list 里（模型得先看得见才能调）。
+    expect(tools.find((t) => t["name"] === "hub_list_tools")).toBeDefined();
+    expect(tools.find((t) => t["name"] === "hub_call_tool")).toBeDefined();
+    const callTool = tools.find((t) => t["name"] === "hub_call_tool")!;
+    const callSchema = callTool["inputSchema"] as Record<string, unknown>;
+    expect(callSchema["additionalProperties"]).toBe(false);
+    expect(callSchema["required"]).toEqual(["server_id", "tool_name"]);
+    expect(Object.keys(callSchema["properties"] as Record<string, unknown>).sort()).toEqual([
+      "arguments",
+      "device_id",
+      "server_id",
+      "timeout_ms",
+      "tool_name",
+    ]);
+    // schema 里**不许**出现任何"服务器地址"字段：ChatGPT 提供不了任意 URL。
+    const serializedSchema = JSON.stringify(callSchema);
+    expect(serializedSchema).not.toContain("\"url\"");
+    expect(serializedSchema).not.toContain("headers");
 
     const pingTool = tools.find((t) => t["name"] === "phone_ping")!;
     const schema = pingTool["inputSchema"] as Record<string, unknown>;

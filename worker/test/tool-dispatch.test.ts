@@ -191,6 +191,8 @@ describe("工具层 / Gate 2 通用分发", () => {
       "battery_get_status",
       "device_get_network",
       "device_get_storage",
+      "hub_list_tools",
+      "hub_call_tool",
     ]);
   });
 
