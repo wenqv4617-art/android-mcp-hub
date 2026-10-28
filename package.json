@@ -13,7 +13,7 @@
     "test": "vitest run --config worker/vitest.config.ts",
     "test:watch": "vitest --config worker/vitest.config.ts",
     "mock:phone": "tsx tools/mock-phone/main.ts",
-    "e2e": "GATE0_VERBOSE=1 tsx e2e/run-local-e2e.ts",
+    "e2e": "GATE0_VERBOSE=1 node --import tsx e2e/run-local-e2e.ts",
     "gate0": "npm run typecheck && npm run test && npm run e2e",
     "check:credential": "tsx tools/check-device-credential.ts",
     "smoke": "node tools/gate1-smoke.mjs",
@@ -22,7 +22,6 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.23.0",
     "@cloudflare/workers-types": "5.20261009.1",
-    "@modelcontextprotocol/sdk": "1.32.1",
     "@types/node": "24.10.1",
     "@types/ws": "^8.18.1",
     "tsx": "4.20.6",
@@ -30,5 +29,10 @@
     "vitest": "4.1.11",
     "wrangler": "4.149.0",
     "ws": "^8.18.3"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "4.1.1",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ipaddr.js": "2.2.0"
   }
 }

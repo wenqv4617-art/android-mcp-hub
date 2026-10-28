@@ -23,6 +23,8 @@
 //  Gate 0.3 的 K4 断言的是"未启用时不带"，那条断言依然成立。
 // ============================================================================
 
+import { gatewayEnabled, gatewayJson, gatewayPrincipal } from "../gateway/http";
+import { boundedText, REQUEST_LIMIT } from "../gateway/security";
 import { loadConfig, type AppConfig } from "../config";
 import { ROUTE_PING, ROUTE_REVOKE, ROUTE_TOOL } from "../phone/phone-session";
 import type { Env, McpSessionNamespace, PhoneSessionNamespace } from "../env";
@@ -217,18 +219,20 @@ export function notifyRevocationInBackground(
 export async function handleMcpRequest(request: Request, env: Env, deps: McpHttpDeps = {}): Promise<Response> {
   const config = loadConfig(env);
   const method = request.method.toUpperCase();
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) return jsonResponse({ error: "origin_denied" }, { status: 403 });
 
   const auth = await verifyMcpAuth(request, env, config);
   if (!auth.ok) return auth.response;
 
   switch (method) {
     case "POST":
-      return handlePost(request, env, config, deps);
+      return handlePost(request, env, config, deps, auth.principal);
     case "GET":
       // 明确不支持服务端主动通知流。见文件头说明。
       return methodNotAllowed("POST, DELETE");
     case "DELETE":
-      return handleDelete(request, env);
+      return handleDelete(request, env, auth.principal);
     default:
       return methodNotAllowed("POST, DELETE");
   }
@@ -256,8 +260,8 @@ async function verifyMcpAuth(
   request: Request,
   env: Env,
   config: AppConfig,
-): Promise<{ ok: true } | { ok: false; response: Response }> {
-  if (!config.hasMcpAccessToken && !config.oauth.enabled) {
+): Promise<{ ok: true; principal: string } | { ok: false; response: Response }> {
+  if (!config.hasMcpAccessToken && !config.oauth.enabled && !gatewayEnabled(env)) {
     // 失败关闭：既没有静态令牌、也没有 OAuth，任何人都不许进。
     return {
       ok: false,
@@ -282,7 +286,7 @@ async function verifyMcpAuth(
   // 路径 1：静态 Bearer。先比它，因为它是常数时间比较、不碰存储。
   if (config.hasMcpAccessToken) {
     const expected = (env.MCP_ACCESS_TOKEN ?? "").trim();
-    if (timingSafeEqual(presented, expected)) return { ok: true };
+    if (timingSafeEqual(presented, expected)) return { ok: true, principal: "legacy:owner" };
   }
 
   // 路径 2：OAuth 访问令牌。令牌只以 SHA-256 摘要存在 OAuthStore 里，
@@ -295,12 +299,14 @@ async function verifyMcpAuth(
   if (config.oauth.enabled && presented.startsWith(OAUTH_ACCESS_TOKEN_PREFIX)) {
     const origin = new URL(request.url).origin;
     const verdict = await verifyAccessToken(env, config, presented, `${origin}/mcp`);
-    if (verdict.ok) return { ok: true };
+    if (verdict.ok) return { ok: true, principal: `oauth:${verdict.clientId}` };
     logEvent("warn", "mcp.auth_failed", { reason: "invalid_oauth_token", path: new URL(request.url).pathname });
   } else {
     logEvent("warn", "mcp.auth_failed", { reason: "invalid_token", path: new URL(request.url).pathname });
   }
 
+  const principal = await gatewayPrincipal(env, presented);
+  if (principal) return { ok: true, principal };
   return { ok: false, response: unauthorized(request, config, "令牌无效") };
 }
 
@@ -338,6 +344,7 @@ async function handlePost(
   env: Env,
   config: AppConfig,
   deps: McpHttpDeps,
+  principal: string,
 ): Promise<Response> {
   const accept = request.headers.get("Accept") ?? "";
   if (!accept.includes("application/json") && !accept.includes("text/event-stream")) {
@@ -358,7 +365,9 @@ async function handlePost(
     );
   }
 
-  const raw = await request.text();
+  let raw: string;
+  try { raw = await boundedText(request.body, REQUEST_LIMIT); }
+  catch { return jsonResponse({ error: "request_too_large" }, { status: 413 }); }
   const parsed = parseMessage(raw);
 
   if (parsed.kind === "error") {
@@ -398,7 +407,7 @@ async function handlePost(
         null,
       );
     }
-    const verdict = await validateSession(env, sessionIdHeader, protocolHeader ?? undefined);
+    const verdict = await validateSession(env, sessionIdHeader, protocolHeader ?? undefined, principal);
     if (!verdict.valid) {
       if (verdict.reason === "protocol_version_mismatch") {
         return rpcResponse(
@@ -427,7 +436,7 @@ async function handlePost(
   }
 
   // ---- 真正的请求分发 -----------------------------------------------------
-  const outcome = await dispatchRpc(rpc.method, rpc.id ?? null, rpc.params, env, config, deps);
+  const outcome = await dispatchRpc(rpc.method, rpc.id ?? null, rpc.params, env, config, deps, principal);
   return rpcResponse(outcome.payload, outcome.status, accept, outcome.sessionId ?? sessionIdHeader);
 }
 
@@ -437,6 +446,11 @@ interface DispatchedRpc {
   sessionId?: string | null;
 }
 
+async function listGatewayTools(env: Env, principal: string): Promise<unknown[]> {
+  try { return (await gatewayJson<{ tools: unknown[] }>(env, "list", { principal })).tools; }
+  catch { logEvent("warn", "gateway.list_failed", { errorCode: "internal_error" }); return []; }
+}
+
 async function dispatchRpc(
   method: string,
   id: JsonRpcId,
@@ -444,10 +458,11 @@ async function dispatchRpc(
   env: Env,
   config: AppConfig,
   deps: McpHttpDeps,
+  principal: string,
 ): Promise<DispatchedRpc> {
   switch (method) {
     case "initialize":
-      return handleInitialize(env, config, id, params);
+      return handleInitialize(env, config, id, params, principal);
 
     case "ping":
       return { payload: success(id, {}), status: 200 };
@@ -455,14 +470,14 @@ async function dispatchRpc(
     case "tools/list":
       return {
         payload: success(id, {
-          tools: TOOL_REGISTRY.map((t) => ({
+          tools: [...(principal.startsWith("client:") ? [] : TOOL_REGISTRY.map((t) => ({
             name: t.name,
             title: t.title,
             description: t.description,
             inputSchema: t.inputSchema,
             ...(t.outputSchema !== undefined ? { outputSchema: t.outputSchema } : {}),
             ...(t.annotations !== undefined ? { annotations: t.annotations } : {}),
-          })),
+          }))), ...(gatewayEnabled(env) ? await listGatewayTools(env, principal) : [])],
         }),
         status: 200,
       };
@@ -476,6 +491,16 @@ async function dispatchRpc(
           status: 200,
         };
       }
+      if (name.startsWith("ext_")) {
+        try {
+          const result = await gatewayJson(env, "call", { principal, name, arguments: p["arguments"], confirmation: (p["_meta"] as Record<string, unknown> | undefined)?.["hub/confirmation"] });
+          return { payload: success(id, result), status: 200 };
+        } catch (e) {
+          const code = e instanceof Error && /^[a-z_]+$/.test(e.message) ? e.message : "gateway_failure";
+          return { payload: success(id, { isError: true, content: [{ type: "text", text: code }] }), status: 200 };
+        }
+      }
+      if (principal.startsWith("client:")) return { payload: failure(id, -32602, "permission_denied"), status: 200 };
       const callPhonePing = deps.callPhonePing ?? callPhonePingViaDurableObject;
       const callPhoneTool = deps.callPhoneTool ?? callPhoneToolViaDurableObject;
       const dispatched = await dispatchToolCall(
@@ -522,6 +547,7 @@ async function handleInitialize(
   config: AppConfig,
   id: JsonRpcId,
   params: unknown,
+  principal: string,
 ): Promise<DispatchedRpc> {
   const p = (params ?? {}) as Record<string, unknown>;
   const requested = typeof p["protocolVersion"] === "string" ? p["protocolVersion"] : "";
@@ -532,7 +558,7 @@ async function handleInitialize(
   const sessionId = newSessionId();
 
   try {
-    await createSession(env, sessionId, negotiated, clientInfo);
+    await createSession(env, sessionId, negotiated, clientInfo, principal);
   } catch {
     // 审计 R2：日志记固定类别；回给客户端的 message 也用固定文案。
     // `String(err)` 会顺着 JSON-RPC 错误回到客户端 —— 那是把内部细节
@@ -572,7 +598,7 @@ async function handleInitialize(
 //  DELETE /mcp
 // ---------------------------------------------------------------------------
 
-async function handleDelete(request: Request, env: Env): Promise<Response> {
+async function handleDelete(request: Request, env: Env, principal: string): Promise<Response> {
   const sessionId = readSessionHeader(request);
   if (sessionId === null) {
     return jsonResponse(
@@ -581,6 +607,8 @@ async function handleDelete(request: Request, env: Env): Promise<Response> {
     );
   }
 
+  const verdict = await validateSession(env, sessionId, undefined, principal);
+  if (!verdict.valid) return jsonResponse({ error: "not_found" }, { status: 404 });
   const ns = env.MCP_SESSION as unknown as McpSessionNamespace;
   const stub = ns.get(ns.idFromName(sessionId));
   const res = await stub.fetch(
@@ -608,12 +636,13 @@ async function createSession(
   sessionId: string,
   protocolVersion: string,
   clientInfo: unknown,
+  principal: string,
 ): Promise<void> {
   const res = await sessionStub(env, sessionId).fetch(
     new Request(`https://mcp-session.internal${MCP_SESSION_ROUTES.create}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, protocolVersion, clientInfo }),
+      body: JSON.stringify({ sessionId, protocolVersion, clientInfo, principal }),
     }),
   );
   if (!res.ok) throw new Error(`session create failed: HTTP ${res.status}`);
@@ -623,12 +652,12 @@ type SessionVerdict =
   | { valid: true }
   | { valid: false; reason: "unknown_session" | "expired" | "protocol_version_mismatch"; expected?: string };
 
-async function validateSession(env: Env, sessionId: string, protocolVersion?: string): Promise<SessionVerdict> {
+async function validateSession(env: Env, sessionId: string, protocolVersion?: string, principal?: string): Promise<SessionVerdict> {
   const res = await sessionStub(env, sessionId).fetch(
     new Request(`https://mcp-session.internal${MCP_SESSION_ROUTES.validate}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(protocolVersion === undefined ? {} : { protocolVersion }),
+      body: JSON.stringify({ protocolVersion, principal }),
     }),
   );
   const body = (await res.json()) as SessionVerdict;

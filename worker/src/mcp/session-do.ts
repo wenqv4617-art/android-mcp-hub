@@ -17,6 +17,7 @@ import { logEvent } from "../util/log";
 
 export interface McpSessionRecord {
   sessionId: string;
+  principal?: string;
   protocolVersion: string;
   createdAt: number;
   lastSeenAt: number;
@@ -55,7 +56,7 @@ export class McpSession implements DurableObject {
   }
 
   private async handleCreate(request: Request): Promise<Response> {
-    let body: { sessionId?: unknown; protocolVersion?: unknown; clientInfo?: unknown };
+    let body: { sessionId?: unknown; protocolVersion?: unknown; clientInfo?: unknown; principal?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -91,6 +92,7 @@ export class McpSession implements DurableObject {
     }
     const record: McpSessionRecord = {
       sessionId,
+      principal: existing?.principal ?? (typeof body.principal === "string" ? body.principal : undefined),
       protocolVersion: existing?.protocolVersion ?? protocolVersion,
       createdAt: existing?.createdAt ?? now,
       lastSeenAt: now,
@@ -105,7 +107,7 @@ export class McpSession implements DurableObject {
   }
 
   private async handleValidate(request: Request): Promise<Response> {
-    let body: { protocolVersion?: unknown } = {};
+    let body: { protocolVersion?: unknown; principal?: unknown } = {};
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -117,6 +119,7 @@ export class McpSession implements DurableObject {
       return json({ valid: false, reason: "unknown_session" }, 200);
     }
 
+    if (record.principal && body.principal !== record.principal) return json({ valid: false, reason: "unknown_session" });
     const now = Date.now();
     if (now - record.lastSeenAt > MCP_SESSION_TTL_MS) {
       await this.ctx.storage.deleteAll();

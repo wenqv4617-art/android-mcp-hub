@@ -41,6 +41,8 @@
   // 非敏感运行参数。敏感值（MCP_ACCESS_TOKEN / DEVICE_TOKENS / OAUTH_OWNER_SECRET）
   // **不在这里**，由 `wrangler secret put` 注入 —— 见 SECURITY.md 第 3 节。
   "vars": {
+    "GATEWAY_ENABLED": "false",
+    "GATEWAY_ALLOWED_URLS": "",
     "PHONE_PING_TIMEOUT_MS": "10000",
     "HEARTBEAT_INTERVAL_MS": "30000",
     "MAX_PENDING_REQUESTS": "16",
@@ -65,7 +67,8 @@
       { "name": "MCP_SESSION", "class_name": "McpSession" },
       // OAuth 状态**只有一个实例**：idFromName("oauth-global") → OAuthStore。
       // 单实例是刻意的 —— 授权码"只能用一次"需要原子的读—判—写。
-      { "name": "OAUTH_STORE", "class_name": "OAuthStore" }
+      { "name": "OAUTH_STORE", "class_name": "OAuthStore" },
+      { "name": "GATEWAY_STORE", "class_name": "GatewayStore" }
     ]
   },
 
@@ -83,6 +86,7 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["OAuthStore"]
-    }
+    },
+    { "tag": "v3-gateway", "new_sqlite_classes": ["GatewayStore"] }
   ]
 }

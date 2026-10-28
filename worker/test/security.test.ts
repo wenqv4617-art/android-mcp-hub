@@ -176,14 +176,14 @@ describe("安全 / 与既有生产项目完全隔离", () => {
     }
   });
 
-  it("Env 类型只有三个 Durable Object 绑定，且没有任何 D1 / KV / R2 / Queue", () => {
+  it("Env 类型显式列出四个 Durable Object 绑定，且没有任何 D1 / KV / R2 / Queue", () => {
     const text = stripComments(readFileSync(join(REPO_ROOT, "worker", "src", "env.ts"), "utf8"));
 
     // ★ 精确断言：`Env` 里**声明为 *Namespace 类型**的字段只能有这三个。
     //   这条断言的价值在于"新增一个绑定会立刻变红"—— 加绑定时必须显式改这里，
     //   于是"我们又多加了一块持久化"这件事不可能悄悄发生。
     const doBindings = [...text.matchAll(/^\s+([A-Z][A-Z0-9_]*)\??:\s*[A-Za-z]*Namespace\b/gm)].map((m) => m[1]!);
-    expect(doBindings.sort()).toEqual(["MCP_SESSION", "OAUTH_STORE", "PHONE_SESSION"]);
+    expect(doBindings.sort()).toEqual(["GATEWAY_STORE", "MCP_SESSION", "OAUTH_STORE", "PHONE_SESSION"]);
 
     // 仍然没有任何数据库 / 存储 / 队列绑定（任务书：不使用 D1）。
     expect(text).not.toMatch(/\b(D1Database|KVNamespace|R2Bucket|Queue|Hyperdrive)\b/);

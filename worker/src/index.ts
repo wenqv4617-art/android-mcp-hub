@@ -48,7 +48,9 @@ import { jsonResponse, notFound, textResponse } from "./util/http";
 import { logEvent } from "./util/log";
 import { sha256Hex, timingSafeEqual } from "./util/crypto";
 
-export { PhoneSession, McpSession, OAuthStore };
+import { GatewayStore } from "./gateway/store-do";
+import { handleGatewayAdmin } from "./gateway/http";
+export { PhoneSession, McpSession, OAuthStore, GatewayStore };
 
 /** 健康契约里的 schema 版本。改动持久化结构时同步 +1。 */
 const SCHEMA_VERSION = "gate0-do-v1";
@@ -61,6 +63,7 @@ export default {
     try {
       if (url.pathname === "/healthz") return handleHealthz(env, config);
       if (url.pathname === "/" ) return handleRoot();
+      if (url.pathname === "/gateway/admin") return await handleGatewayAdmin(request, env);
       if (url.pathname === "/mcp") return await handleMcpRequest(request, env);
       if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config, ctx);
       // OAuth 面。`isOAuthPath` 只认精确路径集合，不做前缀匹配 ——

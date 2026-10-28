@@ -20,6 +20,13 @@ export type McpSessionNamespace = DurableObjectNamespace;
 export type OAuthStoreNamespace = DurableObjectNamespace;
 
 export interface Env {
+  /** Universal gateway is opt-in; existing phone routes never depend on it. */
+  GATEWAY_STORE?: DurableObjectNamespace;
+  GATEWAY_ENABLED?: string;
+  GATEWAY_ADMIN_TOKEN?: string;
+  GATEWAY_ALLOWED_URLS?: string;
+  /** Secret JSON: {"ownerId/secretRef":"Bearer ..."}; never returned by management. */
+  GATEWAY_UPSTREAM_SECRETS?: string;
   // ---- Durable Object 绑定（本阶段唯一的持久化）----------------------------
   /** 类名 PhoneSession（见 worker/src/phone/phone-session.ts）。每台手机一个对象。 */
   PHONE_SESSION: PhoneSessionNamespace;
