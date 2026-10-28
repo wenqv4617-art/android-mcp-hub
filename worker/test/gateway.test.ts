@@ -144,7 +144,7 @@ describe("universal gateway: real HTTP + official SDK through Worker", () => {
   });
   it("rejects redirects, disconnects and oversized upstream results", async () => {
     const name = await gatewayName("alpha", "status");
-    for (const behavior of ["redirect", "disconnect", "large"] as const) {
+    for (const behavior of ["redirect", "disconnect", "large", "credential"] as const) {
       a.setBehavior(behavior);
       expect((await client.callTool({ name, arguments: {} })).isError).toBe(true);
     }
@@ -165,6 +165,71 @@ describe("universal gateway: real HTTP + official SDK through Worker", () => {
       expect((await owner.callTool({ name, arguments: { device_id: TEST_DEVICE_ID } })).isError).not.toBe(true);
     }
     phone.socket.close();
+  });
+  it("uses paginated discovery on both management and live invocation", async () => {
+    a.setPagination(true);
+    try {
+      expect((await admin({ action: "test", id: "alpha" })).body.tools).toHaveLength(6);
+      await grant("alpha", "write", "read");
+      expect((await client.callTool({ name: await gatewayName("alpha", "write"), arguments: {} })).isError).not.toBe(true);
+    } finally { a.setPagination(false); }
+  });
+  it("rejects cross-client session reuse and termination", async () => {
+    const init = await fetch(`${hub.url}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${token}`, Accept: "application/json, text/event-stream", "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "session-test", version: "1" } } }) });
+    const session = init.headers.get("Mcp-Session-Id")!; expect(session).toBeTruthy(); await init.text();
+    const headers = { Authorization: `Bearer ${TEST_MCP_TOKEN}`, Accept: "application/json, text/event-stream", "Content-Type": "application/json", "Mcp-Session-Id": session };
+    expect((await fetch(`${hub.url}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) })).status).toBe(404);
+    expect((await fetch(`${hub.url}/mcp`, { method: "DELETE", headers })).status).toBe(404);
+    expect((await fetch(`${hub.url}/mcp`, { method: "DELETE", headers: { ...headers, Authorization: `Bearer ${token}` } })).status).toBe(204);
+  });
+  it("enforces request limits and browser Origin checks", async () => {
+    const headers = { Authorization: `Bearer ${token}`, Accept: "application/json, text/event-stream", "Content-Type": "application/json" };
+    expect((await fetch(`${hub.url}/mcp`, { method: "POST", headers, body: "x".repeat(65537) })).status).toBe(413);
+    expect((await fetch(`${hub.url}/mcp`, { method: "POST", headers: { ...headers, Origin: "https://evil.example" }, body: "{}" })).status).toBe(403);
+    expect((await fetch(`${hub.url}/gateway/admin`, { method: "POST", headers: { ...headers, Authorization: `Bearer ${adminToken}`, Origin: "https://evil.example" }, body: "{}" })).status).toBe(403);
+    expect((await admin({ action: "put-service", id: "ssrf", name: "ssrf", ownerId: "alice", transport: "streamable-http", url: "http://169.254.169.254/latest/meta-data" })).status).toBe(400);
+  });
+  it("enforces per-client concurrency before issuing a third call", async () => {
+    await service("concurrent"); await grant("concurrent", "slow");
+    const name = await gatewayName("concurrent", "slow"), count = a.calls.filter(c => c.name === "slow").length;
+    const pending = [client.callTool({ name, arguments: {} }), client.callTool({ name, arguments: {} })];
+    for (let i = 0; i < 100 && a.calls.filter(c => c.name === "slow").length < count + 2; i++) await new Promise(r => setTimeout(r, 5));
+    const rejected = await client.callTool({ name, arguments: {} });
+    expect(rejected.isError).toBe(true); expect(JSON.stringify(rejected)).toContain("concurrency_limit");
+    await Promise.all(pending); expect(a.calls.filter(c => c.name === "slow").length - count).toBe(2);
+  });
+  it("times out during initialize as well as tool execution", async () => {
+    a.setBehavior("hang");
+    try { const start = Date.now(); const r = await admin({ action: "test", id: "slow" }); expect(r.status).toBe(504); expect(r.body.error).toBe("upstream_timeout"); expect(Date.now() - start).toBeLessThan(1000); }
+    finally { a.setBehavior("normal"); }
+  });
+  it("protects management UI with strict CSP and never embeds credentials", async () => {
+    const response = await fetch(`${hub.url}/gateway`); const html = await response.text();
+    expect(response.status).toBe(200); expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    expect(html).not.toContain(adminToken); expect(html).not.toContain("fixture-upstream-secret");
+    const js = await (await fetch(`${hub.url}/gateway/ui.js`)).text();
+    expect(js).not.toContain("innerHTML"); expect(js).not.toContain("localStorage");
+  });
+  it("rotates generated tokens and revokes the old bearer immediately", async () => {
+    const issued = await admin({ action: "issue-client-token", clientId: "client:other-char" });
+    expect(issued.body.token).toMatch(/^hub_client_[a-f0-9]{64}$/);
+    await expect(sdk("hub_client_otherchar")).rejects.toThrow();
+    const c = await sdk(issued.body.token); expect((await c.listTools()).tools).toEqual([]);
+  });
+  it("preserves Android discovery when the optional gateway store fails", async () => {
+    const owner = await sdk(TEST_MCP_TOKEN), previous = rig.env.GATEWAY_STORE;
+    rig.env.GATEWAY_STORE = { idFromName() { throw new Error("fixture storage failure"); } } as never;
+    try { expect((await owner.listTools()).tools.map(t => t.name)).toContain("phone_ping"); }
+    finally { rig.env.GATEWAY_STORE = previous; }
+  });
+  it("feature kill switch closes management and forwarding while retaining native tools", async () => {
+    rig.env.GATEWAY_ENABLED = "false";
+    try {
+      expect((await fetch(`${hub.url}/gateway`)).status).toBe(404);
+      expect((await admin({ action: "list" })).status).toBe(404);
+      const owner = await sdk(TEST_MCP_TOKEN); expect((await owner.listTools()).tools).toHaveLength(6);
+      expect((await owner.callTool({ name: await gatewayName("alpha", "status"), arguments: {} })).isError).toBe(true);
+    } finally { rig.env.GATEWAY_ENABLED = "true"; }
   });
   it("supports independent client revocation without reinitializing MCP", async () => {
     await admin({ action: "put-client", id: "client:glimmer", userId: "alice", charId: "char-one", enabled: false });

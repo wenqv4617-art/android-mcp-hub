@@ -65,7 +65,7 @@ export class GatewayStore {
   private async admin(p: Record<string, any>): Promise<unknown> {
     if (p.action === "list") {
       const s = await this.read();
-      return { services: s.services, clients: s.clients.map(({ tokenSha256, ...c }) => c), audit: s.audit };
+      return { services: await Promise.all(s.services.map(async service => ({ ...service, toolMap: await Promise.all(service.tools.map(async tool => ({ original: tool.name, name: await gatewayName(service.id, tool.name), fingerprint: await fingerprint(tool) }))) }))), clients: s.clients.map(({ tokenSha256, ...c }) => c), audit: s.audit };
     }
     if (p.action === "put-service") {
       if (!validId(p.id) || !validId(p.ownerId) || typeof p.name !== "string" || p.name.length > 80 || typeof p.url !== "string" ||
@@ -107,6 +107,17 @@ export class GatewayStore {
           enabled: p.enabled === true, tokenSha256: p.tokenSha256 ?? old?.tokenSha256, grants: old?.grants ?? [] }];
       });
       return { ok: true };
+    }
+    if (p.action === "issue-client-token") {
+      const bytes = new Uint8Array(32); crypto.getRandomValues(bytes);
+      const token = "hub_client_" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+      const digest = await sha256Hex(token);
+      await this.update(s => {
+        const c = s.clients.find(c => c.id === p.clientId && c.id.startsWith("client:"));
+        if (!c) throw new GatewayError("not_found", 404);
+        c.tokenSha256 = digest;
+      });
+      return { token };
     }
     if (p.action === "grant" || p.action === "revoke") {
       await this.update(async s => {

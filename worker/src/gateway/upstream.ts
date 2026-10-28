@@ -86,7 +86,7 @@ export function assertNoCredentials(value: unknown, env: Env): void {
   const encoded = JSON.stringify(value);
   const secrets = Object.values(JSON.parse(env.GATEWAY_UPSTREAM_SECRETS ?? "{}") as Record<string, string>);
   if (secrets.some(secret => typeof secret === "string" && secret.length > 0 &&
-    (encoded.includes(secret) || (secret.startsWith("Bearer ") && encoded.includes(secret.slice(7)))))) throw new GatewayError("credential_in_result", 502);
+    (encoded.includes(JSON.stringify(secret).slice(1, -1)) || (secret.startsWith("Bearer ") && encoded.includes(JSON.stringify(secret.slice(7)).slice(1, -1)))))) throw new GatewayError("credential_in_result", 502);
 }
 
 export async function discoverOnClient(client: Client, signal: AbortSignal, timeoutMs: number): Promise<DiscoveredTool[]> {

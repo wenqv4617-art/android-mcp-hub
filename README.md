@@ -1,3 +1,5 @@
+> **通用网关 V1（本分支）**：新增 Worker 端远程 MCP 中转，默认关闭；支持 Streamable HTTP / 旧版 SSE、DO 持久化、逐工具授权和管理面板。见 [开发、权限与接入说明](docs/GATEWAY_V1.md)。以下 Gate 历史说明保留作基线，不代表本分支新功能状态。
+
 # Android MCP Hub
 
 让 **ChatGPT 官方客户端**通过 MCP 直接指挥一台 **Android 手机**。

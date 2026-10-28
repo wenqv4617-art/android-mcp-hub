@@ -1,3 +1,4 @@
+// V1 gateway appends a fourth DO (v3-gateway), disabled by default. Prior migration tags are immutable.
 // ============================================================================
 //  Android MCP Hub — Wrangler 配置（**仅供人工审核，本阶段不部署**）
 // ============================================================================

@@ -35,6 +35,7 @@
 //  连接器把它当成基础设施故障而**永久失败**，回 404 才允许客户端走别的路。
 // ============================================================================
 
+import { boundedText, checkDns, validateTarget } from "../gateway/security";
 import type { AppConfig } from "../config";
 import type { Env } from "../env";
 import { logEvent } from "../util/log";
@@ -730,16 +731,23 @@ async function resolveClientIdMetadataDocument(
   }
   if (url.protocol !== "https:") return null;
   if (url.username !== "" || url.password !== "") return null;
+  // CIMD is another server-side fetch surface: only approved OAuth hosts may
+  // supply client metadata. DCR clients and the Android auth path are unchanged.
+  if (!config.oauth.allowedRedirectHosts.includes(url.hostname.toLowerCase())) return null;
 
   let document: Record<string, unknown>;
   try {
-    const response = await fetch(clientId, {
+    const policy = { ...env, ENVIRONMENT: undefined, GATEWAY_ALLOWED_URLS: clientId };
+    const target = validateTarget(clientId, policy);
+    const signal = AbortSignal.timeout(3000);
+    await checkDns(target, policy, signal);
+    const response = await fetch(target.href, {
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(3000),
+      signal,
       redirect: "error",
     });
     if (!response.ok) return null;
-    const parsed = (await response.json()) as unknown;
+    const parsed = JSON.parse(await boundedText(response.body, 65536)) as unknown;
     if (typeof parsed !== "object" || parsed === null) return null;
     document = parsed as Record<string, unknown>;
   } catch {

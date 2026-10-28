@@ -91,6 +91,11 @@ jobs:
           mkdir -p test-reports
           npm run e2e 2>&1 | tee test-reports/e2e.log
 
+      - name: 通用网关真实 workerd 与 DO 集成测试（不部署）
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npm run test:gateway:workerd
+
       # 失败时把话说清楚：是哪一步红的、去哪个 artifact 看完整日志。
       # 不吞错、不改退出码 —— 这一步跑完，整个 job 依然是失败状态。
       - name: 失败时打印定位信息

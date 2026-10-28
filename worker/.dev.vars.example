@@ -22,3 +22,12 @@ MCP_ACCESS_TOKEN="REPLACE-WITH-A-LOCAL-TEST-TOKEN"
 # 手机设备凭据表（JSON 数组）。tokenSha256 是设备明文令牌的 SHA-256 十六进制小写。
 # 轮换方式：新增一条 deviceId 相同的记录，并把旧记录的 revokedAt 填上。
 DEVICE_TOKENS=[{"deviceId":"test-phone-1","tokenSha256":"0000000000000000000000000000000000000000000000000000000000000000","label":"local mock phone","createdAt":"2026-01-01T00:00:00Z","revokedAt":null}]
+
+# Universal gateway: opt in explicitly. Keep disabled until approved targets,
+# per-user credentials and exact tool grants have been provisioned.
+GATEWAY_ENABLED="false"
+GATEWAY_ALLOWED_URLS=""
+# Independent management secret; production values go through wrangler secret put.
+# GATEWAY_ADMIN_TOKEN="REPLACE-WITH-A-RANDOM-MANAGEMENT-TOKEN"
+# Secret JSON, keyed by ownerId/secretRef; never use downstream tokens here.
+# GATEWAY_UPSTREAM_SECRETS={"owner/service-auth":"Bearer REPLACE-WITH-UPSTREAM-CREDENTIAL"}

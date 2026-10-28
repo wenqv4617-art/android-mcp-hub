@@ -24,7 +24,7 @@
 // ============================================================================
 
 import { gatewayEnabled, gatewayJson, gatewayPrincipal } from "../gateway/http";
-import { boundedText, REQUEST_LIMIT } from "../gateway/security";
+import { boundedText, GatewayError, REQUEST_LIMIT } from "../gateway/security";
 import { loadConfig, type AppConfig } from "../config";
 import { ROUTE_PING, ROUTE_REVOKE, ROUTE_TOOL } from "../phone/phone-session";
 import type { Env, McpSessionNamespace, PhoneSessionNamespace } from "../env";
@@ -289,6 +289,9 @@ async function verifyMcpAuth(
     if (timingSafeEqual(presented, expected)) return { ok: true, principal: "legacy:owner" };
   }
 
+  const principal = await gatewayPrincipal(env, presented);
+  if (principal) return { ok: true, principal };
+
   // 路径 2：OAuth 访问令牌。令牌只以 SHA-256 摘要存在 OAuthStore 里，
   // 所以这里必须真的去问一次存储 —— 这是刻意的：没有"本地自校验 JWT"，
   // 也就没有"撤销了但还能用到过期"的窗口。
@@ -305,8 +308,6 @@ async function verifyMcpAuth(
     logEvent("warn", "mcp.auth_failed", { reason: "invalid_token", path: new URL(request.url).pathname });
   }
 
-  const principal = await gatewayPrincipal(env, presented);
-  if (principal) return { ok: true, principal };
   return { ok: false, response: unauthorized(request, config, "令牌无效") };
 }
 
@@ -496,7 +497,7 @@ async function dispatchRpc(
           const result = await gatewayJson(env, "call", { principal, name, arguments: p["arguments"], confirmation: (p["_meta"] as Record<string, unknown> | undefined)?.["hub/confirmation"] });
           return { payload: success(id, result), status: 200 };
         } catch (e) {
-          const code = e instanceof Error && /^[a-z_]+$/.test(e.message) ? e.message : "gateway_failure";
+          const code = e instanceof GatewayError ? e.code : "gateway_failure";
           return { payload: success(id, { isError: true, content: [{ type: "text", text: code }] }), status: 200 };
         }
       }

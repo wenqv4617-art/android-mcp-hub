@@ -17,7 +17,8 @@
     "gate0": "npm run typecheck && npm run test && npm run e2e",
     "check:credential": "tsx tools/check-device-credential.ts",
     "smoke": "node tools/gate1-smoke.mjs",
-    "smoke:selftest": "node tools/gate1-smoke-selftest.mjs"
+    "smoke:selftest": "node tools/gate1-smoke-selftest.mjs",
+    "test:gateway:workerd": "node --import tsx e2e/gateway-workerd.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.23.0",

@@ -35,7 +35,8 @@ export async function createUpstream(label = "alpha") {
   const calls: { name: string; arguments: unknown; authorization?: string }[] = [];
   const headers: (string | undefined)[] = [];
   let description = "Stable tool definition";
-  let behavior: "normal" | "redirect" | "disconnect" | "large" = "normal";
+  let behavior: "normal" | "redirect" | "disconnect" | "large" | "credential" | "hang" = "normal";
+  let paginated = false;
   const legacy = new Map<string, SSEServerTransport>();
   const sessions = new Set<Server>();
   const tools = (): Tool[] => [
@@ -46,19 +47,20 @@ export async function createUpstream(label = "alpha") {
   const sdk = (auth?: string) => {
     const s = new Server({ name: `test-${label}`, version: "1" }, { capabilities: { tools: {} } });
     sessions.add(s);
-    s.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools() }));
+    s.setRequestHandler(ListToolsRequestSchema, async request => paginated ? (request.params?.cursor === "rest" ? { tools: tools().slice(3) } : { tools: tools().slice(0, 3), nextCursor: "rest" }) : { tools: tools() });
     s.setRequestHandler(CallToolRequestSchema, async request => {
       calls.push({ name: request.params.name, arguments: request.params.arguments, authorization: auth });
       if (request.params.name === "slow") await new Promise(r => setTimeout(r, 600));
       if (request.params.name === "failure") return { isError: true, content: [{ type: "text", text: "Bearer fixture-upstream-secret hidden internal error" }] };
       const args = request.params.arguments ?? {};
-      return { content: [{ type: "text", text: behavior === "large" ? "x".repeat(1100000) : request.params.name === "sum" ? String(Number(args.a) + Number(args.b)) : label }] };
+      return { content: [{ type: "text", text: behavior === "credential" ? "fixture-upstream-secret" : behavior === "large" ? "x".repeat(1100000) : request.params.name === "sum" ? String(Number(args.a) + Number(args.b)) : label }] };
     });
     return s;
   };
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     headers.push(req.headers.authorization);
     if (behavior === "redirect") { res.writeHead(307, { Location: "http://169.254.169.254/latest/meta-data" }); res.end(); return; }
+    if (behavior === "hang") return;
     if (behavior === "disconnect") { req.socket.destroy(); return; }
     try {
       if (req.url === "/sse") {
@@ -86,6 +88,6 @@ export async function createUpstream(label = "alpha") {
     } catch { if (!res.headersSent) res.writeHead(500); res.end(); }
   });
   const url = await listen(server);
-  return { url, calls, headers, tools, setDescription: (s: string) => { description = s; }, setBehavior: (s: typeof behavior) => { behavior = s; },
+  return { url, calls, headers, tools, setPagination: (v: boolean) => { paginated = v; }, setDescription: (s: string) => { description = s; }, setBehavior: (s: typeof behavior) => { behavior = s; },
     async stop() { for (const s of sessions) await s.close(); await close(server); } };
 }

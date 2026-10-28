@@ -28,7 +28,7 @@
 // ============================================================================
 
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { handleMcpRequest, MCP_SESSION_HEADER } from "../src/mcp/http";
 import { sha256Hex } from "../src/util/crypto";
@@ -1012,3 +1012,18 @@ describe("OAuth / 与手机链路并联", () => {
 
 // 这一行只是为了让 `Env` 这个类型 import 不被 lint 判成未使用。
 export type _OAuthTestEnv = Env;
+
+
+describe("OAuth client metadata SSRF hardening", () => {
+  it("rejects unapproved, local and IP metadata hosts before outbound fetch", async () => {
+    const rig = await enabledRig();
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("outbound must not run"); });
+    try {
+      for (const id of ["https://169.254.169.254/client.json", "https://127.0.0.1/client.json", "https://evil.example/client.json"]) {
+        const response = await get(rig, authorizeUrl(id, CALLBACK, pkce().challenge));
+        expect(response.status).toBe(400);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+});

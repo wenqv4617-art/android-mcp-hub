@@ -1,3 +1,4 @@
+// V1 gateway: optional /gateway management and ext_* relay share this Worker; Android paths are unchanged.
 // ============================================================================
 //  Android MCP Hub — Worker 入口
 // ============================================================================
@@ -49,7 +50,8 @@ import { logEvent } from "./util/log";
 import { sha256Hex, timingSafeEqual } from "./util/crypto";
 
 import { GatewayStore } from "./gateway/store-do";
-import { handleGatewayAdmin } from "./gateway/http";
+import { gatewayUi } from "./gateway/ui";
+import { gatewayEnabled, handleGatewayAdmin } from "./gateway/http";
 export { PhoneSession, McpSession, OAuthStore, GatewayStore };
 
 /** 健康契约里的 schema 版本。改动持久化结构时同步 +1。 */
@@ -63,6 +65,7 @@ export default {
     try {
       if (url.pathname === "/healthz") return handleHealthz(env, config);
       if (url.pathname === "/" ) return handleRoot();
+      if (request.method === "GET" && gatewayEnabled(env)) { const page = gatewayUi(url.pathname); if (page) return page; }
       if (url.pathname === "/gateway/admin") return await handleGatewayAdmin(request, env);
       if (url.pathname === "/mcp") return await handleMcpRequest(request, env);
       if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config, ctx);
@@ -107,7 +110,7 @@ function handleHealthz(env: Env, config: AppConfig): Response {
     schema_version: SCHEMA_VERSION,
 
     // 本阶段允许的持久化只有 Durable Object 自带存储。
-    durable_object_bindings: ["PHONE_SESSION", "MCP_SESSION", "OAUTH_STORE"],
+    durable_object_bindings: ["PHONE_SESSION", "MCP_SESSION", "OAUTH_STORE", ...(env.GATEWAY_STORE ? ["GATEWAY_STORE"] : [])],
 
     config_problems: config.problems,
     capabilities: {
@@ -139,7 +142,7 @@ function handleRoot(): Response {
       "",
       "Gate 1：Cloudflare Worker + Durable Object + Android 手机长连接。",
       `内置只读工具（共 ${toolNames().length} 个）：${toolNames().join("、")}。`,
-      "不接入任何第三方 MCP 应用，也不使用 D1。",
+      "可选通用 MCP 中转由 GATEWAY_ENABLED 启用；不使用 D1。",
       "",
       "端点：",
       "  GET  /healthz    健康检查",
