@@ -9,6 +9,8 @@ import { checkDns, GatewayError, RESPONSE_LIMIT, validateTarget } from "./securi
 export interface Service {
   id: string; name: string; ownerId: string; url: string;
   transport: "streamable-http" | "sse"; enabled: boolean;
+  /** 可选的人类说明；不参与连接，只用于管理界面。 */
+  description?: string;
   secretRef?: string; timeoutMs: number;
 }
 export type DiscoveredTool = Tool;

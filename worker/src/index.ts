@@ -51,7 +51,7 @@ import { sha256Hex, timingSafeEqual } from "./util/crypto";
 
 import { GatewayStore } from "./gateway/store-do";
 import { gatewayUi } from "./gateway/ui";
-import { gatewayEnabled, handleGatewayAdmin } from "./gateway/http";
+import { gatewayEnabled, handleGatewayAdmin, handleGatewayAndroid, handleGatewayPair } from "./gateway/http";
 export { PhoneSession, McpSession, OAuthStore, GatewayStore };
 
 /** 健康契约里的 schema 版本。改动持久化结构时同步 +1。 */
@@ -67,6 +67,8 @@ export default {
       if (url.pathname === "/" ) return handleRoot();
       if (request.method === "GET" && gatewayEnabled(env)) { const page = gatewayUi(url.pathname); if (page) return page; }
       if (url.pathname === "/gateway/admin") return await handleGatewayAdmin(request, env);
+      if (url.pathname === "/gateway/pair") return await handleGatewayPair(request, env);
+      if (url.pathname === "/gateway/android") return await handleGatewayAndroid(request, env);
       if (url.pathname === "/mcp") return await handleMcpRequest(request, env);
       if (url.pathname === "/phone/ws") return await handlePhoneUpgrade(request, env, config, ctx);
       // OAuth 面。`isOAuthPath` 只认精确路径集合，不做前缀匹配 ——
@@ -121,6 +123,9 @@ function handleHealthz(env: Env, config: AppConfig): Response {
       server_initiated_notifications: false,
       oauth_authorization_server: config.oauth.enabled,
       oauth_metadata_endpoint: config.oauth.enabled ? "/.well-known/oauth-authorization-server" : null,
+      // 只暴露"开没开"，不暴露任何口令/令牌值。
+      gateway_enabled: gatewayEnabled(env),
+      gateway_android_pairing_configured: gatewayEnabled(env) && !!env.GATEWAY_ANDROID_PAIRING_CODE,
     },
     auth: {
       mcp_bearer_configured: config.hasMcpAccessToken,

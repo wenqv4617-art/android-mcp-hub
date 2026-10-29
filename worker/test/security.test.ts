@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { ERROR_CATEGORIES, sanitizeLogFields, UNCLASSIFIED_ERROR, WITHHELD } from "../src/util/log";
 import { loadConfig } from "../src/config";
 import {
@@ -68,7 +68,8 @@ const SKIP_FILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock"])
 
 function textFiles(): string[] {
   return walk(REPO_ROOT).filter(
-    (f) => !/\.(apk|aab|jar|so|png|jpg|jpeg|webp|keystore|jks)$/.test(f) && !SKIP_FILES.has(f.split("/").pop()!),
+    // basename 而不是 split("/")：Windows 上的路径分隔符是反斜杠。
+    (f) => !/\.(apk|aab|jar|so|png|jpg|jpeg|webp|keystore|jks)$/.test(f) && !SKIP_FILES.has(basename(f)),
   );
 }
 
@@ -166,7 +167,7 @@ describe("安全 / 与既有生产项目完全隔离", () => {
   });
 
   it("源代码里没有 D1 / KV / R2 的用法", () => {
-    const srcFiles = textFiles().filter((f) => /worker\/src\/.*\.ts$/.test(rel(f)));
+    const srcFiles = textFiles().filter((f) => /^worker[\\/]src[\\/].*\.ts$/.test(rel(f)));
     expect(srcFiles.length).toBeGreaterThan(10);
     for (const f of srcFiles) {
       const text = stripComments(readFileSync(f, "utf8"));
@@ -567,7 +568,7 @@ describe("安全 / 不开启任何自动部署", () => {
     // 与"DO 绑定必须恰好三个"同一种模式：受安全约束的东西要显式列出来，
     // 免得以后有人顺手加一个工作流，而没人回头看一眼它能不能部署。
     const names = workflowFiles()
-      .map((f) => f.split("/").pop() ?? "")
+      .map((f) => basename(f))
       .sort();
 
     expect(workflowListViolations(names)).toEqual([]);

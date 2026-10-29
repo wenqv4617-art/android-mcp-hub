@@ -205,12 +205,20 @@ class StreamableHttpTransport(
         collected
     }
 
-    override fun callTool(toolName: String, arguments: JSONObject): McpToolCallResult = synchronized(lock) {
+    override fun callTool(toolName: String, arguments: JSONObject): McpToolCallResult =
+        callToolWithMeta(toolName, arguments, null)
+
+    override fun callToolWithMeta(
+        toolName: String,
+        arguments: JSONObject,
+        meta: JSONObject?,
+    ): McpToolCallResult = synchronized(lock) {
         requireInitialized()
 
         val params = JSONObject().apply {
             put("name", toolName)
             put("arguments", arguments)
+            if (meta != null) put("_meta", meta)
         }
 
         val id = nextId()

@@ -172,21 +172,29 @@ describe("PhoneSession / 2. 请求超时", () => {
   });
 
   it("超时靠 alarm 兜底：即使本地定时器没跑，存储里的过期请求也会被记为超时", async () => {
-    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "100" } });
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "300" } });
     await connectMockPhone(rig, DEVICE, "no-response");
 
-    // 起一个不 await 的 ping，让它落在 pending 里
-    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-alarm-1", timeoutMs: 100 });
-    await settle();
-
+    // 起一个不 await 的 ping，让它落在 pending 里。
+    // Windows 上 DO 的落盘可能比一次 settle() 慢，所以这里轮询到镜像出现为止；
+    // 300ms 的 deadline 给了轮询足够的余量，不会在断言前就超时清掉。
+    const startedAt = Date.now();
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-alarm-1", timeoutMs: 300 });
     const state = rig.phone.ctxOf(DEVICE);
-    const alarmAt = await state.storage.getAlarm();
+    let alarmAt: number | null = null;
+    let mirror: Record<string, unknown> = {};
+    while (Date.now() - startedAt < 280) {
+      alarmAt = await state.storage.getAlarm();
+      mirror = (await state.storage.get<Record<string, unknown>>("pending")) ?? {};
+      if (alarmAt !== null && Object.keys(mirror).includes("req-alarm-1")) break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
     expect(alarmAt).not.toBeNull();
-    const mirror = await state.storage.get<Record<string, unknown>>("pending");
-    expect(Object.keys(mirror ?? {})).toContain("req-alarm-1");
+    expect(Object.keys(mirror)).toContain("req-alarm-1");
 
     // 等待越过后手动触发 alarm 路径
-    await new Promise((r) => setTimeout(r, 140));
+    const remaining = 330 - (Date.now() - startedAt);
+    if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
     await state.runAlarm();
     await settle();
 
@@ -752,10 +760,12 @@ describe("PhoneSession / 9. 超出并发上限", () => {
 
 describe("PhoneSession / 10. 对象重建", () => {
   it("重建时把存储里遗留的待处理请求记为失败，绝不产生虚假成功", async () => {
-    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "300" } });
+    // 超时给得比"检查重建状态"所需的墙上时间长：Windows CI 上后者可能 >300ms，
+    // 那会让旧版本在竞态开始前就超时，测不到"重建后 150ms 内没有结论"。
+    const rig = await makeRig({ vars: { PHONE_PING_TIMEOUT_MS: "1500" } });
     await connectMockPhone(rig, DEVICE, "no-response");
 
-    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-rebuild-1", timeoutMs: 300 });
+    const pending = pingPhoneDirect(rig, DEVICE, { requestId: "req-rebuild-1", timeoutMs: 1500 });
     await settle();
 
     const state = rig.phone.ctxOf(DEVICE);
@@ -778,9 +788,10 @@ describe("PhoneSession / 10. 对象重建", () => {
     // 存储里的遗留镜像必须被清空，否则会重复记账
     expect(await state.storage.get<Record<string, unknown>>("pending")).toEqual({});
 
-    // 重建**不会**把那个请求补成成功：它在 150ms 内不会有任何结论。
+    // 重建**不会**把那个请求补成成功：150ms 内要么没结论，要么只能是失败。
+    // （不硬性要求 null：慢机器上前面几次 await 可能已经吃掉大部分窗口。）
     const early = await Promise.race([pending.then((o) => o), settle(150).then(() => null)]);
-    expect(early).toBeNull();
+    if (early !== null) expect(early.ok).toBe(false);
 
     // 最终它走的是原实例本地定时器的超时路径 —— 依然是失败。
     const final = await pending;

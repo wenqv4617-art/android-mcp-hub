@@ -28,6 +28,17 @@ export interface Env {
   GATEWAY_ALLOWED_URLS?: string;
   /** Secret JSON: {"ownerId/secretRef":"Bearer ..."}; never returned by management. */
   GATEWAY_UPSTREAM_SECRETS?: string;
+  /**
+   * Android 配对口令（secret）。设置后 `/gateway/pair` 才可用；未设置时该路由 404。
+   *
+   * 它不是全局管理令牌：配对成功只换回一个**受限于该设备 owner 与服务**的
+   * `hub_admin_*` 令牌和该客户端自己的 `hub_client_*` 令牌。全局
+   * `GATEWAY_ADMIN_TOKEN` 永远不下发给客户端。
+   *
+   * 口令可重复使用直到轮换（`wrangler secret put` 覆盖即可）；每次配对都会轮换
+   * 该 deviceId 对应的两个令牌并撤销旧值。失败尝试在 DO 内限速。
+   */
+  GATEWAY_ANDROID_PAIRING_CODE?: string;
   // ---- Durable Object 绑定（本阶段唯一的持久化）----------------------------
   /** 类名 PhoneSession（见 worker/src/phone/phone-session.ts）。每台手机一个对象。 */
   PHONE_SESSION: PhoneSessionNamespace;

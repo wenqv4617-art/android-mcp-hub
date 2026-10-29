@@ -1,6 +1,6 @@
 // V1 gateway appends a fourth DO (v3-gateway), disabled by default. Prior migration tags are immutable.
 // ============================================================================
-//  Android MCP Hub — Wrangler 配置（**仅供人工审核，本阶段不部署**）
+//  Android MCP Hub — Wrangler 配置（部署目标：唯一 Worker `android-mcp-hub`）
 // ============================================================================
 //
 //  Gate 0 约束（逐条对应任务书「二、最高优先级：生产环境隔离」）：
@@ -11,8 +11,8 @@
 //    · 没有 [env.*] —— 不存在「生产环境」这个目标，从配置层面杜绝误部署；
 //    · 没有 secrets 明文 —— 全部通过 `wrangler secret put` 注入，见 .dev.vars.example。
 //
-//  ⚠ 本文件的存在不代表已部署。Gate 0 不执行 `wrangler deploy`。
-//     本地验证一律用 `wrangler dev --local`（不产生任何云端资源）。
+//  Gate 1 / V1.5 起由 `.github/workflows/deploy-worker.yml` 在人工确认后部署。
+//  本地开发仍然用 `wrangler dev --local`，不产生云端资源。
 //
 //  Gate 1 追加：OAuth 授权服务器所需的第三个 Durable Object（OAuthStore）。
 //    · 仍然**没有** D1 —— 任务书明令不用 D1，这里也没有任何 d1_databases；
@@ -42,8 +42,12 @@
   // 非敏感运行参数。敏感值（MCP_ACCESS_TOKEN / DEVICE_TOKENS / OAUTH_OWNER_SECRET）
   // **不在这里**，由 `wrangler secret put` 注入 —— 见 SECURITY.md 第 3 节。
   "vars": {
-    "GATEWAY_ENABLED": "false",
-    "GATEWAY_ALLOWED_URLS": "",
+    // V1.5：网关启用。允许清单是**精确 URL**（含路径），不是域名后缀匹配；
+    // 只列公开、无凭据的文档类 MCP 端点，便于真机验收。新增上游必须同时改这里
+    // 并走一次人工确认的部署，不能由客户端在运行时扩展。
+    // 全局管理员令牌与 Android 配对口令都**不在**这里，由 Secret 注入。
+    "GATEWAY_ENABLED": "true",
+    "GATEWAY_ALLOWED_URLS": "https://docs.mcp.cloudflare.com/mcp,https://mcp.deepwiki.com/mcp,https://learn.microsoft.com/api/mcp",
     "PHONE_PING_TIMEOUT_MS": "10000",
     "HEARTBEAT_INTERVAL_MS": "30000",
     "MAX_PENDING_REQUESTS": "16",

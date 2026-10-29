@@ -52,6 +52,15 @@ object Routes {
     /** 一台服务器的工具与授权：`services/mcp/tools/{serverId}`。 */
     const val MCP_SERVER_TOOLS = "services/mcp/tools/{serverId}"
 
+    /** 云端网关：添加服务。 */
+    const val GATEWAY_SERVER_NEW = "services/gateway/new"
+
+    /** 云端网关：编辑服务。 */
+    const val GATEWAY_SERVER_EDIT = "services/gateway/edit/{serverId}"
+
+    /** 云端网关：服务详情、工具授权与调用。 */
+    const val GATEWAY_SERVER_DETAIL = "services/gateway/detail/{serverId}"
+
     /**
      * 服务器编号的参数名。
      *
@@ -66,4 +75,8 @@ object Routes {
     fun mcpServerEdit(serverId: String): String = "services/mcp/edit/${Uri.encode(serverId)}"
 
     fun mcpServerTools(serverId: String): String = "services/mcp/tools/${Uri.encode(serverId)}"
+
+    fun gatewayServerEdit(serverId: String): String = "services/gateway/edit/${Uri.encode(serverId)}"
+
+    fun gatewayServerDetail(serverId: String): String = "services/gateway/detail/${Uri.encode(serverId)}"
 }

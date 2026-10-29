@@ -21,6 +21,58 @@ export async function gatewayPrincipal(env: Env, token: string): Promise<string 
   if (!gatewayEnabled(env) || !token.startsWith("hub_client_")) return null;
   return (await gatewayJson<{ principal: string | null }>(env, "auth", { digest: await sha256Hex(token) })).principal;
 }
+/**
+ * Android 配对入口。
+ *
+ * 只有同时满足「网关开启」和「配置了配对口令」时才存在；否则一律 404，
+ * 不给探测者一个"这里有个配对接口"的信号。
+ */
+export async function handleGatewayPair(request: Request, env: Env): Promise<Response> {
+  if (!gatewayEnabled(env) || !env.GATEWAY_ANDROID_PAIRING_CODE) return jsonResponse({ error: "not_found" }, { status: 404 });
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) return jsonResponse({ error: "origin_denied" }, { status: 403 });
+  if (request.method !== "POST") return jsonResponse({ error: "method_not_allowed" }, { status: 405, headers: { Allow: "POST" } });
+  try {
+    if (!request.headers.get("Content-Type")?.startsWith("application/json")) throw new GatewayError("content_type", 415);
+    const body = JSON.parse(await boundedText(request.body, REQUEST_LIMIT));
+    return withNoStore(await gatewayRequest(env, "pair", body));
+  } catch (e) {
+    const err = e instanceof GatewayError ? e : new GatewayError("invalid_request");
+    return jsonResponse({ error: err.code }, { status: err.status });
+  }
+}
+
+/**
+ * 受限 Android 管理面。
+ *
+ * Bearer 是配对换来的 `hub_admin_*`，不是全局 `GATEWAY_ADMIN_TOKEN`。
+ * Worker 只把 SHA-256 摘要转给 DO，DO 再按 ownerId/clientId 做服务端授权。
+ */
+export async function handleGatewayAndroid(request: Request, env: Env): Promise<Response> {
+  if (!gatewayEnabled(env)) return jsonResponse({ error: "not_found" }, { status: 404 });
+  const token = /^Bearer\s+(.+)$/i.exec(request.headers.get("Authorization") ?? "")?.[1] ?? "";
+  if (!token.startsWith("hub_admin_")) return jsonResponse({ error: "unauthorized" }, { status: 401 });
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) return jsonResponse({ error: "origin_denied" }, { status: 403 });
+  if (request.method !== "POST") return jsonResponse({ error: "method_not_allowed" }, { status: 405, headers: { Allow: "POST" } });
+  try {
+    if (!request.headers.get("Content-Type")?.startsWith("application/json")) throw new GatewayError("content_type", 415);
+    const inner = JSON.parse(await boundedText(request.body, REQUEST_LIMIT));
+    if (typeof inner !== "object" || inner === null || Array.isArray(inner)) throw new GatewayError("invalid_request");
+    const response = await gatewayRequest(env, "android", { digest: await sha256Hex(token), request: inner });
+    return withNoStore(response);
+  } catch (e) {
+    const err = e instanceof GatewayError ? e : new GatewayError("invalid_request");
+    return jsonResponse({ error: err.code }, { status: err.status });
+  }
+}
+
+function withNoStore(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(response.body, { status: response.status, headers });
+}
+
 /** Operator API only. No credential/config APIs are reachable with MCP tokens. */
 export async function handleGatewayAdmin(request: Request, env: Env): Promise<Response> {
   if (!gatewayEnabled(env) || !env.GATEWAY_ADMIN_TOKEN) return jsonResponse({ error: "not_found" }, { status: 404 });

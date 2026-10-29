@@ -21,6 +21,16 @@ interface McpTransport {
 
     fun callTool(toolName: String, arguments: JSONObject): McpToolCallResult
 
+    /**
+     * 带 `_meta` 的工具调用。
+     *
+     * 默认实现直接忽略 `_meta`：普通 MCP 服务器不需要它，只有网关用它携带
+     * 一次性确认票据（`hub/confirmation`）。单独开一个方法而不是改 [callTool] 的签名，
+     * 是为了不让现有实现与测试被迫跟着改。
+     */
+    fun callToolWithMeta(toolName: String, arguments: JSONObject, meta: JSONObject?): McpToolCallResult =
+        callTool(toolName, arguments)
+
     /** 关闭并清理会话。重复调用无副作用，不抛异常。 */
     fun close()
 }

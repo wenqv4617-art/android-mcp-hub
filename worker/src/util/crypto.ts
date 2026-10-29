@@ -11,6 +11,11 @@
 //    比较过程恒为固定次数，因此不泄漏前缀信息。
 // ============================================================================
 
+/** 密码学随机字节的十六进制表示（用于一次性令牌；不要用 Math.random）。 */
+export function randomHex(bytes: number): string {
+  return toHex(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+
 /** 十六进制小写 SHA-256。 */
 export async function sha256Hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);

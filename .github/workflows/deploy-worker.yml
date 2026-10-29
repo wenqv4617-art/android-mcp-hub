@@ -9,6 +9,13 @@ name: Worker manual deployment
 # 再校验 Cloudflare 账号与两个 Secret，最后才真正 deploy。
 # 没有任何 push / pull_request 触发器 —— 普通推送永远不会部署。
 #
+# V1.5 追加（仍只在人工确认后执行）：
+#   · 从仓库 Secret 注入 `GATEWAY_ANDROID_PAIRING_CODE`（只覆盖这一枚，不动别的 Secret）；
+#   · 部署后立即用真实公网地址跑 `tools/gateway-online-smoke.ts`：
+#     配对 → 服务管理 → 工具发现 → 未授权拒绝 → 授权 → /mcp 真实调用 →
+#     需确认票据 → 停用拒绝 → 坏地址拒绝 → 清理。
+#   这一步失败会让整次部署运行变红；它不能用 dry-run / 本地 workerd 代替。
+#
 # ⚠ feat/gate2-core 与 feat/gate2-5-native-tools 这两条路都是**临时**的：真机验证
 #   通过、并入 gate0 之后，应当把下面 if 条件里对应的子句、这段说明，以及
 #   worker/test/security.test.ts 里对应的那几条约束与反向用例一起删掉
@@ -77,9 +84,11 @@ jobs:
             if (new RegExp('"' + key + '"\\s*:').test(cfg)) throw new Error('Forbidden Wrangler config key: ' + key);
           }
           if (!/"name"\s*:\s*"android-mcp-hub"/.test(cfg)) throw new Error('Unexpected Worker name');
-          for (const cls of ['PhoneSession', 'McpSession', 'OAuthStore']) {
+          for (const cls of ['PhoneSession', 'McpSession', 'OAuthStore', 'GatewayStore']) {
             if (!cfg.includes('"' + cls + '"')) throw new Error('Missing Durable Object class: ' + cls);
           }
+          if (!/"GATEWAY_ENABLED"\s*:\s*"true"/.test(cfg)) throw new Error('GATEWAY_ENABLED must be true for this deployment');
+          if (!/"GATEWAY_ALLOWED_URLS"\s*:\s*"https:\/\//.test(cfg)) throw new Error('GATEWAY_ALLOWED_URLS must contain an exact https endpoint');
           NODE
 
       - name: Install locked dependencies
@@ -109,3 +118,22 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy --config worker/wrangler.jsonc
+
+      # 只新增/轮换这一枚配对 Secret；其余 Secret（设备令牌、OAuth、上游密钥）
+      # 由 Cloudflare 保留，wrangler deploy 不会动它们。
+      - name: Configure Android pairing secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PAIRING_CODE: ${{ secrets.GATEWAY_ANDROID_PAIRING_CODE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$PAIRING_CODE" || { echo '::error::Missing GATEWAY_ANDROID_PAIRING_CODE repository secret'; exit 1; }
+          printf '%s' "$PAIRING_CODE" | npx wrangler secret put GATEWAY_ANDROID_PAIRING_CODE --config worker/wrangler.jsonc
+
+      - name: Online gateway acceptance (real deployment)
+        env:
+          GATEWAY_BASE_URL: https://android-mcp-hub.causticrry.workers.dev
+          GATEWAY_ANDROID_PAIRING_CODE: ${{ secrets.GATEWAY_ANDROID_PAIRING_CODE }}
+        run: node --import tsx tools/gateway-online-smoke.ts

@@ -38,9 +38,12 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.androidmcphub.app.ui.HubViewModel
+import com.androidmcphub.app.ui.gateway.GatewayViewModel
 import com.androidmcphub.app.ui.home.ConnectionDetailScreen
 import com.androidmcphub.app.ui.home.HomeScreen
 import com.androidmcphub.app.ui.mcp.McpViewModel
+import com.androidmcphub.app.ui.services.GatewayServiceDetailScreen
+import com.androidmcphub.app.ui.services.GatewayServiceEditScreen
 import com.androidmcphub.app.ui.services.McpServerEditScreen
 import com.androidmcphub.app.ui.services.McpServerToolsScreen
 import com.androidmcphub.app.ui.services.ServicesScreen
@@ -77,6 +80,10 @@ fun HubApp(viewModel: HubViewModel) {
     val mcpViewModel: McpViewModel = viewModel()
     val mcpMessage by mcpViewModel.message.collectAsStateWithLifecycle()
 
+    // 云端网关是第三套来源：与本机直连的配置/授权互不相干，因此单独一个 ViewModel。
+    val gatewayViewModel: GatewayViewModel = viewModel()
+    val gatewayUi by gatewayViewModel.ui.collectAsStateWithLifecycle()
+
     val snackbarHostState = remember { SnackbarHostState() }
 
     // 一次性提示（保存成功 / 校验失败 / 令牌读不出来）：显示完立刻消费掉，
@@ -92,6 +99,14 @@ fun HubApp(viewModel: HubViewModel) {
         val text = mcpMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(text)
         mcpViewModel.dismissMessage()
+    }
+
+    // 云端网关的一次性提示（配对成功 / 保存结果 / 测试失败）。错误留在页面内展示，
+    // 因为它通常需要用户读完后决定下一步（重试、改配置、重新配对）。
+    LaunchedEffect(gatewayUi.notice) {
+        val text = gatewayUi.notice ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(text)
+        gatewayViewModel.clearNotice()
     }
 
     Scaffold(
@@ -161,11 +176,14 @@ fun HubApp(viewModel: HubViewModel) {
             composable(HubTab.Services.route) {
                 ServicesScreen(
                     viewModel = mcpViewModel,
+                    gatewayViewModel = gatewayViewModel,
                     capabilitiesEnabled = capabilitiesEnabled,
                     onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
                     onOpenConnectionSettings = { navController.navigate(Routes.CONNECTION_SETTINGS) },
                     onAddServer = { navController.navigate(Routes.MCP_SERVER_NEW) },
                     onOpenServer = { serverId -> navController.navigate(Routes.mcpServerTools(serverId)) },
+                    onAddGatewayServer = { navController.navigate(Routes.GATEWAY_SERVER_NEW) },
+                    onOpenGatewayServer = { serverId -> navController.navigate(Routes.gatewayServerDetail(serverId)) },
                 )
             }
 
@@ -198,6 +216,41 @@ fun HubApp(viewModel: HubViewModel) {
                     viewModel = mcpViewModel,
                     serverId = entry.arguments?.getString(Routes.ARG_SERVER_ID).orEmpty(),
                     onBack = { navController.popBackStack() },
+                    onDeleted = { navController.popBackStack() },
+                )
+            }
+
+            composable(Routes.GATEWAY_SERVER_NEW) {
+                GatewayServiceEditScreen(
+                    viewModel = gatewayViewModel,
+                    service = null,
+                    onBack = { navController.popBackStack() },
+                    onSaved = { navController.popBackStack() },
+                )
+            }
+
+            composable(
+                route = Routes.GATEWAY_SERVER_EDIT,
+                arguments = listOf(navArgument(Routes.ARG_SERVER_ID) { type = NavType.StringType }),
+            ) { entry ->
+                val id = entry.arguments?.getString(Routes.ARG_SERVER_ID).orEmpty()
+                GatewayServiceEditScreen(
+                    viewModel = gatewayViewModel,
+                    service = gatewayUi.services.firstOrNull { it.id == id },
+                    onBack = { navController.popBackStack() },
+                    onSaved = { navController.popBackStack() },
+                )
+            }
+
+            composable(
+                route = Routes.GATEWAY_SERVER_DETAIL,
+                arguments = listOf(navArgument(Routes.ARG_SERVER_ID) { type = NavType.StringType }),
+            ) { entry ->
+                GatewayServiceDetailScreen(
+                    viewModel = gatewayViewModel,
+                    serviceId = entry.arguments?.getString(Routes.ARG_SERVER_ID).orEmpty(),
+                    onBack = { navController.popBackStack() },
+                    onEdit = { id -> navController.navigate(Routes.gatewayServerEdit(id)) },
                     onDeleted = { navController.popBackStack() },
                 )
             }
