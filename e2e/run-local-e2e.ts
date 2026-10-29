@@ -1380,6 +1380,28 @@ async function main(): Promise<void> {
         `returned=${page3Tools.length} has_more=${String(page3.structured["has_more"])}`,
       );
 
+      // 按服务器查询：server_id 过滤在这一层生效，未知服务器是明确的失败而不是空目录。
+      const perServer = await toolCall(LIVE_MCP_DEVICE_ID, 8000, { server_id: "live_server" }, "hub_list_tools");
+      const perServerTools = (perServer.structured["tools"] as Array<Record<string, unknown>> | undefined) ?? [];
+      check(
+        "可以按服务器查询工具：server_id 过滤后目录只含这台服务器的工具",
+        perServer.isError === false &&
+          perServerTools.length === 7 &&
+          perServerTools.every((t) => t["server_id"] === "live_server"),
+        `returned=${perServerTools.length}`,
+      );
+      const unknownServer = await toolCall(
+        LIVE_MCP_DEVICE_ID,
+        8000,
+        { server_id: "not_configured" },
+        "hub_list_tools",
+      );
+      check(
+        "按服务器查询：本机没有的 server_id → 明确失败（不伪造空目录）",
+        unknownServer.isError === true && unknownServer.structured["error_code"] === "unsupported_tool",
+        `code=${String(unknownServer.structured["error_code"])}`,
+      );
+
       // servers_only：服务器优先查询 —— 只回答"哪台在线"，不枚举工具。
       const serversOnly = await toolCall(LIVE_MCP_DEVICE_ID, 8000, { servers_only: true }, "hub_list_tools");
       const onlyServers = (serversOnly.structured["servers"] as Array<Record<string, unknown>> | undefined) ?? [];
