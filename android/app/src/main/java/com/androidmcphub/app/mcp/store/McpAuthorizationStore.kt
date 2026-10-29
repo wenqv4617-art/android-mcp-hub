@@ -73,6 +73,29 @@ class McpAuthorizationStore(
 
     fun list(): List<McpGrant> = loadGrants()
 
+    /**
+     * 一次读盘得到的**只读**授权快照。
+     *
+     * 为什么需要它：`state()` 每次调用都会把整份授权 JSON 重新解析一遍。目录里有
+     * 几百个工具时，那就是几百次重复解析同一份数据 —— 在一次"要求很快"的目录查询里
+     * 纯属浪费，而且会让分阶段耗时里出现一段说不清来源的开销。快照把读盘收敛成一次，
+     * 之后的判定都是内存里的哈希查表。
+     *
+     * 快照是**某一刻**的视图：拿到它之后用户撤销了授权，它不会自己变。所以它的有效期
+     * 只限一次请求之内 —— 调用方不允许把它缓存起来跨请求使用（那会造出一个
+     * "撤销了还能调"的特权窗口）。
+     */
+    fun snapshot(): McpAuthorizationSnapshot {
+        val byKey = HashMap<String, McpGrant>()
+        for (grant in loadGrants()) {
+            // 与 [state] 的 firstOrNull 语义保持一致：同名重复记录以**先出现的**为准。
+            byKey.putIfAbsent(snapshotKey(grant.serverId, grant.toolName), grant)
+        }
+        return McpAuthorizationSnapshot(byKey)
+    }
+
+    private fun snapshotKey(serverId: String, toolName: String): String = "$serverId\u0000$toolName"
+
     /** [state] 的便捷布尔形式。注意 `Stale` **不算**已授权。 */
     fun isAuthorized(serverId: String, toolName: String, fingerprint: String): Boolean =
         state(serverId, toolName, fingerprint) == McpAuthorizationState.Granted
@@ -125,5 +148,24 @@ class McpAuthorizationStore(
         const val KEY_GRANTS = "grants_v1"
 
         const val CURRENT_VERSION = 1
+    }
+}
+
+/**
+ * 某一刻的授权快照（见 [McpAuthorizationStore.snapshot]）。
+ *
+ * 判定规则与 [McpAuthorizationStore.state] **逐字一致**：
+ * 没记录 → NotGranted；记录在但指纹不同 → Stale（不是 NotGranted —— 界面上这两句
+ * 话不一样，一个是"你没同意过"，一个是"定义变了，要不要再看一眼"）。
+ */
+class McpAuthorizationSnapshot internal constructor(private val byKey: Map<String, McpGrant>) {
+
+    fun state(serverId: String, toolName: String, fingerprint: String): McpAuthorizationState {
+        val grant = byKey["$serverId\u0000$toolName"] ?: return McpAuthorizationState.NotGranted
+        return if (grant.fingerprint == fingerprint) {
+            McpAuthorizationState.Granted
+        } else {
+            McpAuthorizationState.Stale
+        }
     }
 }

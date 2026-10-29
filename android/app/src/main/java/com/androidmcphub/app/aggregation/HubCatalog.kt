@@ -17,6 +17,28 @@ object HubStates {
     const val AVAILABILITY_ONLINE = "online"
     const val AVAILABILITY_OFFLINE = "offline"
 
+    /**
+     * 从未探测过这台服务器（装完应用还没列过工具）。
+     *
+     * 为什么**不**直接说 offline：`availability` 现在的语义是"上次已知的状态"，
+     * 把"没量过"说成"离线"会让用户拿到一个我们并没有证据的结论。服务端
+     * （`worker/src/mcp/hub.ts`）只按字符串透传这个值，多一个取值不会破坏协议。
+     */
+    const val AVAILABILITY_UNKNOWN = "unknown"
+
+    /**
+     * `availability_source` 的三个取值：这个状态是怎么来的。
+     *
+     * 它是 [AVAILABILITY_UNKNOWN] 之外的第二重保证 —— 即使状态是 online，
+     * 调用方也能看出那是"刚刚连上"还是"上次列目录时的结果"。
+     */
+    const val SOURCE_LIVE = "live"
+    const val SOURCE_CACHE = "cache"
+    const val SOURCE_UNKNOWN = "unknown"
+
+    /** 超出本次处理的服务器数上限：没有探测，也不算"离线"。 */
+    const val SOURCE_SKIPPED = "skipped"
+
     const val AUTHORIZATION_AUTHORIZED = "authorized"
     const val AUTHORIZATION_NOT_AUTHORIZED = "not_authorized"
     const val AUTHORIZATION_STALE = "stale"
@@ -32,18 +54,28 @@ object HubStates {
 /**
  * 目录里的一台服务器。
  *
- * [availability] 是"这次刷新时它能不能用"，不是"它一直能不能用" —— 目录是快照，
- * 不维护任何后台轮询状态。这样"手机上显示在线"永远对应着"刚刚真的连上过"。
+ * [availability] 是"**上次已知**的可用性"，不是"一直可用"，也不是"这一刻刚刚确认" ——
+ * 两者由 [availabilitySource] 区分（[HubStates.SOURCE_LIVE] = 本次请求刚确认，
+ * [HubStates.SOURCE_CACHE] = 缓存里的上次结果，[HubStates.SOURCE_UNKNOWN] = 从未探测）。
+ * [checkedAtMs] 是那次确认的时刻，调用方据此判断"这条状态有多旧"。
+ *
+ * 为什么必须是这个语义：目录查询的目标是"快"。`servers_only` 一旦要求实时确认，
+ * 就必然要等最慢（通常是离线的）那台服务器 —— 实测里 13.6 秒的耗时几乎全部来自它。
  */
 data class HubCatalogServer(
     val serverId: String,
     val serverName: String,
     val availability: String,
+    val availabilitySource: String = HubStates.SOURCE_LIVE,
+    /** 上次确认这个状态的时刻（毫秒）；null = 从未确认过。 */
+    val checkedAtMs: Long? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("server_id", serverId)
         put("server_name", serverName)
         put("availability", availability)
+        put("availability_source", availabilitySource)
+        if (checkedAtMs != null) put("checked_at_ms", checkedAtMs)
     }
 }
 
@@ -115,6 +147,20 @@ data class HubCatalog(
     val truncatedByBudget: Boolean = false,
     /** 本次只查询服务器（`servers_only`），没有枚举工具。 */
     val serversOnly: Boolean = false,
+    /**
+     * 这份目录里的工具数据是怎么来的：`refresh`（本次请求真的连过服务器）、
+     * `cache`（全部来自本地缓存）、`mixed`（一部分是缓存、一部分刚刷新）。
+     *
+     * 它是"这次很快"与"这次很快是因为用了旧数据"之间的区别，不告诉调用方
+     * 就等于让缓存变成一个不可观测的黑箱。
+     */
+    val catalogSource: String = SOURCE_REFRESH,
+    /** 所用工具数据里**最旧**的那份缓存年龄（毫秒）；没有任何工具数据时为 null。 */
+    val catalogAgeMs: Long? = null,
+    /** 是否在后台发起了刷新（本次结果可能在几秒后更新）。 */
+    val refreshPending: Boolean = false,
+    /** 本次请求在手机上花掉的毫秒数（单调时钟，仅诊断用，不参与任何判定）。 */
+    val elapsedMs: Long? = null,
 ) {
     fun toJson(
         descriptionLimit: Int = Int.MAX_VALUE,
@@ -131,6 +177,16 @@ data class HubCatalog(
         put("other_tools_count", otherToolsCount)
         put("schemas_dropped", schemasDropped)
         if (serversOnly) put("servers_only", true)
+        put("catalog_source", catalogSource)
+        if (catalogAgeMs != null) put("catalog_age_ms", catalogAgeMs)
+        put("refresh_pending", refreshPending)
+        if (elapsedMs != null) put("elapsed_ms", elapsedMs)
         put("truncated", hasMore || truncatedByBudget || schemasDropped > 0)
+    }
+
+    companion object {
+        const val SOURCE_REFRESH = "refresh"
+        const val SOURCE_CACHE = "cache"
+        const val SOURCE_MIXED = "mixed"
     }
 }

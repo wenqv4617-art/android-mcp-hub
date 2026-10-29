@@ -18,6 +18,14 @@ import com.androidmcphub.app.mcp.transport.McpTransportFactory
 import com.androidmcphub.app.protocol.ToolResultErrorCode
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 聚合入口的真正实现：服务端要的"第三方工具目录"和"第三方工具调用"都从这里走。
@@ -60,34 +68,105 @@ class McpHubRouter(
     private val hubLimits: HubLimits = HubLimits(),
     private val enabled: () -> Boolean = { true },
     private val clock: () -> Long = System::currentTimeMillis,
+    /** 单调时钟：分阶段耗时用它，不受用户/系统改时间影响。 */
+    private val monotonic: () -> Long = { System.nanoTime() / 1_000_000 },
+    /**
+     * 目录刷新的执行器。
+     *
+     * 默认自建一个**有界**线程池（见 [ownedExecutor]）；测试注入直接执行的实现，
+     * 就能把"并发刷新"变成确定性的顺序执行。
+     */
+    refreshExecutor: Executor? = null,
+    /** 分阶段诊断日志的落地函数；默认丢弃。只接收本文件拼出来的结构化行。 */
+    private val log: (String) -> Unit = {},
 ) : HubCommandRouter {
+
+    /** 目录与可用性的本地缓存（5.1/5.2）。 */
+    private val cache = HubCatalogCache(clock)
+
+    /** 自建的线程池；外部注入执行器时为 null（生命周期归调用方）。 */
+    private val ownedExecutor: ThreadPoolExecutor? = if (refreshExecutor == null) {
+        // 注意 core 必须等于 max：`ThreadPoolExecutor` 配**无界队列**时并发度就是 core，
+        // core=0 会让整个池永远只有一个线程，"并发刷新"变成一句空话。
+        val threads = hubLimits.refreshConcurrency.coerceAtLeast(1)
+        ThreadPoolExecutor(
+            threads,
+            threads,
+            30L,
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(),
+            daemonThreads("hub-refresh"),
+        ).apply { allowCoreThreadTimeOut(true) }
+    } else {
+        null
+    }
+
+    private val executor: Executor = refreshExecutor ?: ownedExecutor!!
+
+    /** 正在飞的刷新任务（单飞：同一台服务器同一时刻只有一个刷新在跑）。 */
+    private val refreshes = HashMap<String, CompletableFuture<Boolean>>()
+
+    private val refreshLock = Any()
+
+    @Volatile
+    private var closed = false
 
     override fun handles(toolName: String): Boolean = HubCommands.isHubCommand(toolName)
 
-    override fun route(toolName: String, arguments: JSONObject): CapabilityResult = try {
-        when (toolName) {
-            HubCommands.LIST_TOOLS -> listTools(arguments)
-            HubCommands.GET_TOOL_SCHEMA -> getToolSchema(arguments)
-            HubCommands.CALL_TOOL -> callTool(arguments)
-            else -> CapabilityResult.Failure(
-                ToolResultErrorCode.UNSUPPORTED_TOOL,
-                "未知的聚合命令",
-            )
+    override fun route(toolName: String, arguments: JSONObject): CapabilityResult =
+        routeWithId(NO_REQUEST_ID, toolName, arguments)
+
+    /**
+     * 带 request_id 的入口：分阶段耗时靠它把手机侧的时间线与服务端看到的 RTT 对上。
+     *
+     * 直接调 [route]（单测、诊断脚本）时没有 id，用常量占位 —— 绝不新造一个
+     * "看起来像真的"的 id，那样日志里会多出一批对不上服务端的记录。
+     */
+    override fun routeWithId(requestId: String, toolName: String, arguments: JSONObject): CapabilityResult {
+        val trace = HubTrace(requestId, monotonic, log)
+        trace.stage("entry")
+        val result = try {
+            when (toolName) {
+                HubCommands.LIST_TOOLS -> listTools(arguments, trace)
+                HubCommands.GET_TOOL_SCHEMA -> getToolSchema(arguments, trace)
+                HubCommands.CALL_TOOL -> callTool(arguments, trace)
+                else -> CapabilityResult.Failure(
+                    ToolResultErrorCode.UNSUPPORTED_TOOL,
+                    "未知的聚合命令",
+                )
+            }
+        } catch (invalid: InvalidArguments) {
+            failure(ToolResultErrorCode.INVALID_ARGUMENTS, invalid.message ?: "参数不合法")
+        } catch (error: McpClientException) {
+            failure(codeFor(error.kind), describe(error))
+        } catch (error: Exception) {
+            // 兜底：任何没预料到的异常都必须变成一条有错误码的失败，而不是消失。
+            failure(ToolResultErrorCode.TOOL_FAILED, "聚合执行失败（${error.javaClass.simpleName}）")
         }
-    } catch (invalid: InvalidArguments) {
-        failure(ToolResultErrorCode.INVALID_ARGUMENTS, invalid.message ?: "参数不合法")
-    } catch (error: McpClientException) {
-        failure(codeFor(error.kind), describe(error))
-    } catch (error: Exception) {
-        // 兜底：任何没预料到的异常都必须变成一条有错误码的失败，而不是消失。
-        failure(ToolResultErrorCode.TOOL_FAILED, "聚合执行失败（${error.javaClass.simpleName}）")
+        trace.finish(
+            outcome = if (result is CapabilityResult.Success) "ok" else "failed",
+            extra = (result as? CapabilityResult.Failure)?.let { "error_code=${it.code}" },
+        )
+        return result
+    }
+
+    /**
+     * 释放自建线程池（前台服务销毁时调用）。
+     *
+     * 幂等：重复调用无副作用。已有的刷新任务会跑完自己那次有界超时后退出，
+     * 不会留下永久挂着的线程。
+     */
+    override fun close() {
+        closed = true
+        ownedExecutor?.shutdown()
+        cache.clear()
     }
 
     // ------------------------------------------------------------------
     // 目录
     // ------------------------------------------------------------------
 
-    private fun listTools(arguments: JSONObject): CapabilityResult {
+    private fun listTools(arguments: JSONObject, trace: HubTrace): CapabilityResult {
         rejectUnknownKeys(arguments, ALLOWED_CATALOG_KEYS)
         val filter = readOptionalServerId(arguments)
         val offset = readInt(arguments, "offset", 0, 0, MAX_OFFSET)
@@ -96,6 +175,9 @@ class McpHubRouter(
         val serversOnly = readBoolean(arguments, "servers_only", false)
 
         val configured = serverStore.list().filter { it.enabled }.sortedBy { it.id }
+        trace.stage("config_read", detail = "servers=${configured.size}")
+        // 用户删掉的服务器不该在内存里留一份目录。
+        cache.retainOnly(configured.mapTo(HashSet()) { it.id })
         val selected = when (filter) {
             null -> configured
             else -> configured.filter { it.id == filter }.ifEmpty {
@@ -103,61 +185,22 @@ class McpHubRouter(
             }
         }
 
-        val startedAt = clock()
-        val servers = mutableListOf<HubCatalogServer>()
-        val authorized = mutableListOf<HubCatalogTool>()
-        var others = 0
-
-        for (config in selected) {
-            // 服务器数量上限：超出的整台不刷新。它们仍然会出现在目录里（availability=offline），
-            // 因为"没刷新"和"连不上"对调用方是同一件事：这份目录里没有它的工具。
-            if (servers.size >= hubLimits.maxServers) {
-                servers += HubCatalogServer(config.id, serverName(config), HubStates.AVAILABILITY_OFFLINE)
-                continue
-            }
-            if (clock() - startedAt > hubLimits.totalBudgetMs) {
-                servers += HubCatalogServer(config.id, serverName(config), HubStates.AVAILABILITY_OFFLINE)
-                continue
-            }
-
-            val transport = try {
-                openTransport(config)
-            } catch (error: Exception) {
-                servers += HubCatalogServer(config.id, serverName(config), HubStates.AVAILABILITY_OFFLINE)
-                continue
-            }
-
-            try {
-                transport.connect()
-                // 只为列服务器时**不**枚举工具：一台 35 个工具的服务器，`tools/list`
-                // 才是慢的那一步。连接成功已经足以回答"它现在可不可用"。
-                val remoteTools = if (serversOnly) emptyList() else transport.listTools()
-                servers += HubCatalogServer(config.id, serverName(config), HubStates.AVAILABILITY_ONLINE)
-                for (tool in remoteTools) {
-                    val fingerprint = fingerprintOf(config, tool)
-                    val state = authorizationStore.state(config.id, tool.name, fingerprint)
-                    if (state != McpAuthorizationState.Granted) {
-                        others++
-                        continue
-                    }
-                    // 收集上限只防内存失控；它**不再**是一页能返回多少。
-                    if (authorized.size >= hubLimits.maxTools) {
-                        others++
-                        continue
-                    }
-                    authorized += catalogTool(config, tool, state, fingerprint)
-                }
-            } catch (error: Exception) {
-                // 单台服务器失败不影响其它服务器，也**不**伪造它的工具列表。
-                servers += HubCatalogServer(config.id, serverName(config), HubStates.AVAILABILITY_OFFLINE)
-            } finally {
-                runCatching { transport.close() }
-            }
+        // 两条路彻底分开：
+        //  · `servers_only` 只读本地缓存 + 注册表，一个网络包都不发（5.1）；
+        //  · 完整目录走"缓存优先 + 有界并发刷新"（5.2/5.3）。
+        // 它们共用同一份缓存，所以"先查服务器、再列工具"不会让第二次请求重新连一遍。
+        val collected = if (serversOnly) {
+            collectAvailability(selected, trace)
+        } else {
+            collectCatalog(selected, trace)
         }
+        val servers = collected.servers
+        val tools = collected.tools
+        val others = collected.others
 
-        val total = authorized.size
+        val total = tools.size
         val safeOffset = offset.coerceAtMost(total)
-        val page = authorized.drop(safeOffset).take(limit)
+        val page = tools.drop(safeOffset).take(limit)
 
         // 分页之后再套一层字符预算：极端情况下 100 个长描述仍然可能把 16 KiB 帧撑爆。
         // 预算只截断**这一页的尾部**，不会让已列出的工具消失；被截掉的用 next_offset 告知。
@@ -199,6 +242,7 @@ class McpHubRouter(
         val returned = pageTools.size
         val hasMore = safeOffset + returned < total
         val schemasDropped = if (!includeSchema) 0 else pageTools.count { it.inputSchema != null && !schemas.containsKey(it) }
+        trace.stage("page", detail = "returned=$returned total=$total")
         val catalog = HubCatalog(
             servers = servers,
             tools = pageTools,
@@ -211,8 +255,306 @@ class McpHubRouter(
             schemasDropped = schemasDropped,
             truncatedByBudget = budgetTruncated,
             serversOnly = serversOnly,
+            catalogSource = collected.catalogSource,
+            catalogAgeMs = collected.catalogAgeMs,
+            refreshPending = collected.refreshPending,
+            elapsedMs = trace.elapsedMs(),
         )
-        return CapabilityResult.Success(catalog.toJson(hubLimits.maxListDescription) { schemas[it] })
+        val json = catalog.toJson(hubLimits.maxListDescription) { schemas[it] }
+        trace.stage("serialize", detail = "bytes=${utf8Bytes(json)}")
+        return CapabilityResult.Success(json)
+    }
+
+    /** 一次目录请求收集到的原始材料（分页/预算/序列化对两条路径一视同仁）。 */
+    private class Collected(
+        val servers: List<HubCatalogServer>,
+        val tools: List<HubCatalogTool>,
+        val others: Int,
+        val catalogSource: String,
+        val catalogAgeMs: Long?,
+        val refreshPending: Boolean,
+    )
+
+    /**
+     * `servers_only`：**只用本地数据**回答"有哪些服务器、上次看到的可用性是什么"。
+     *
+     * 这条路径不建立任何连接、不枚举任何工具、不等待任何超时（5.1）。它做两件事：
+     *  1. 从服务器注册表（本地配置）取名字与 id —— 这部分本来就是本地的；
+     *  2. 从缓存取**上次已知**的可用性，并带上 `checked_at_ms` 与 `source=cache`，
+     *     让调用方自己判断这条状态有多旧。
+     *
+     * 缓存过期（或从未探测）时会**发起**一次后台探测，但**不等**它：探测结果只对
+     * 下一次请求可见。这样"某台服务器慢/离线"在结构上就不可能拖慢这次响应 ——
+     * 实测里那 13.6 秒的绝大部分正是串行等待一台离线服务器。
+     */
+    private fun collectAvailability(selected: List<McpServerConfig>, trace: HubTrace): Collected {
+        val now = clock()
+        // 顺序是刻意的：**先取状态，再发起探测**。
+        // 这样这份响应只反映"请求开始时已知的状态"，探测结果只对下一次请求可见 ——
+        // 响应内容与探测快慢、执行器是同步还是异步都无关（单测可以据此断言）。
+        val servers = ArrayList<HubCatalogServer>(selected.size)
+        for ((index, config) in selected.withIndex()) {
+            if (index >= hubLimits.maxServers) {
+                // 超出的服务器如实说"这次没处理"，而不是猜一个 offline。
+                servers += HubCatalogServer(
+                    serverId = config.id,
+                    serverName = serverName(config),
+                    availability = HubStates.AVAILABILITY_UNKNOWN,
+                    availabilitySource = HubStates.SOURCE_SKIPPED,
+                )
+                continue
+            }
+            servers += serverState(config, now)
+        }
+        var pending = false
+        for (config in selected.take(hubLimits.maxServers)) {
+            if (cache.isAvailabilityFresh(config, hubLimits.availabilityTtlMs)) continue
+            // 单飞 + 失败退避都在 [startRefresh] 里：重复请求不会变成重连风暴。
+            if (startRefresh(config, enumerate = false, trace = null) != null) pending = true
+        }
+        trace.stage("servers_only", detail = "pending=$pending")
+        return Collected(
+            servers = servers,
+            tools = emptyList(),
+            others = 0,
+            catalogSource = HubCatalog.SOURCE_CACHE,
+            catalogAgeMs = null,
+            refreshPending = pending,
+        )
+    }
+
+    /**
+     * 完整目录：**缓存优先 + 有界并发刷新 + 硬截止时间**（5.2/5.3）。
+     *
+     * 顺序是刻意的：
+     *  1. 只对"缓存里没有或不新鲜"的服务器发起刷新，且所有刷新**同时**开始
+     *     （旧实现是串行 `connect()`，一台离线服务器就把后面所有服务器挡住）；
+     *  2. 最多等 [HubLimits.catalogDeadlineMs]，到点就用已经拿到的结果返回；
+     *  3. 没等到的服务器用**上次已知**状态，而不是编一个 offline。
+     *
+     * 失败退避（[HubLimits.serverFailureBackoffMs]）保证一台挂掉的服务器不会在
+     * 每次请求里都被重连一次；单飞（[refreshes]）保证并发请求共用同一次刷新。
+     */
+    private fun collectCatalog(selected: List<McpServerConfig>, trace: HubTrace): Collected {
+        val now = clock()
+        val deadlineAt = monotonic() + hubLimits.catalogDeadlineMs
+        val triggered = LinkedHashMap<String, CompletableFuture<Boolean>>()
+        for (config in selected.take(hubLimits.maxServers)) {
+            if (cache.isFresh(config, hubLimits.catalogTtlMs)) continue
+            val future = startRefresh(config, enumerate = true, trace = trace) ?: continue
+            triggered[config.id] = future
+        }
+        trace.stage("refresh_start", detail = "servers=${triggered.size}")
+
+        // 所有刷新已经在各自线程上跑了；这里只是**等**，不是发起。
+        for ((serverId, future) in triggered) {
+            awaitAtMost(future, deadlineAt)
+            trace.stage("refresh_wait", serverId = serverId, detail = "ok=${future.getNow(false)}")
+        }
+
+        val refreshed: Set<String> = triggered.filterValues { it.getNow(false) == true }.keys
+        val pending = triggered.values.any { !it.isDone }
+
+        // 授权表只读一次：几百个工具时这是几百次重复解析的区别。
+        val grants = authorizationStore.snapshot()
+        trace.stage("auth_snapshot")
+
+        val servers = ArrayList<HubCatalogServer>(selected.size)
+        val authorized = mutableListOf<HubCatalogTool>()
+        var others = 0
+        var oldestAge: Long? = null
+        var usedLive = 0
+        var usedCached = 0
+
+        for ((index, config) in selected.withIndex()) {
+            if (index >= hubLimits.maxServers) {
+                servers += HubCatalogServer(
+                    serverId = config.id,
+                    serverName = serverName(config),
+                    availability = HubStates.AVAILABILITY_UNKNOWN,
+                    availabilitySource = HubStates.SOURCE_SKIPPED,
+                )
+                continue
+            }
+            val snapshot = cache.snapshotFor(config)
+            if (snapshot == null) {
+                servers += HubCatalogServer(
+                    serverId = config.id,
+                    serverName = serverName(config),
+                    availability = HubStates.AVAILABILITY_UNKNOWN,
+                    availabilitySource = HubStates.SOURCE_UNKNOWN,
+                )
+                continue
+            }
+            val live = config.id in refreshed
+            servers += HubCatalogServer(
+                serverId = config.id,
+                serverName = serverName(config),
+                availability = snapshot.availability,
+                availabilitySource = if (live) HubStates.SOURCE_LIVE else HubStates.SOURCE_CACHE,
+                checkedAtMs = snapshot.checkedAtMs,
+            )
+            // 离线服务器上的工具不下发：模型看到也调不通，而"不可用"已经由服务器状态说清楚了。
+            if (snapshot.availability != HubStates.AVAILABILITY_ONLINE) continue
+            val cachedTools = snapshot.tools ?: continue
+            val age = (now - snapshot.fetchedAtMs).coerceAtLeast(0L)
+            oldestAge = maxOf(oldestAge ?: age, age)
+            if (live) usedLive++ else usedCached++
+
+            for (entry in cachedTools) {
+                // **授权是每次请求重判的**：用户撤销之后，缓存里的这一条下一次请求就消失，
+                // 不需要重新联网，也绝不因为"缓存里还在"就继续外泄。
+                val state = grants.state(config.id, entry.tool.name, entry.fingerprint)
+                if (state != McpAuthorizationState.Granted) {
+                    others++
+                    continue
+                }
+                // 收集上限只防内存失控；它**不再**是一页能返回多少。
+                if (authorized.size >= hubLimits.maxTools) {
+                    others++
+                    continue
+                }
+                authorized += catalogTool(config, entry.tool, state, entry.fingerprint)
+            }
+        }
+
+        val source = when {
+            refreshed.isEmpty() -> HubCatalog.SOURCE_CACHE
+            usedCached == 0 && usedLive > 0 -> HubCatalog.SOURCE_REFRESH
+            usedLive > 0 -> HubCatalog.SOURCE_MIXED
+            else -> HubCatalog.SOURCE_CACHE
+        }
+        trace.stage("collect", detail = "tools=${authorized.size} others=$others source=$source")
+        return Collected(
+            servers = servers,
+            tools = authorized,
+            others = others,
+            catalogSource = source,
+            catalogAgeMs = oldestAge,
+            refreshPending = pending,
+        )
+    }
+
+    /** 一台服务器此刻该报告的可用性：只来自缓存，绝不现编。 */
+    private fun serverState(config: McpServerConfig, now: Long): HubCatalogServer {
+        val snapshot = cache.snapshotFor(config)
+            ?: return HubCatalogServer(
+                serverId = config.id,
+                serverName = serverName(config),
+                availability = HubStates.AVAILABILITY_UNKNOWN,
+                availabilitySource = HubStates.SOURCE_UNKNOWN,
+            )
+        return HubCatalogServer(
+            serverId = config.id,
+            serverName = serverName(config),
+            availability = snapshot.availability,
+            availabilitySource = HubStates.SOURCE_CACHE,
+            checkedAtMs = snapshot.checkedAtMs,
+        )
+    }
+
+    /**
+     * 发起（或复用一个正在飞的）刷新任务。
+     *
+     * 返回 null 表示"这次不该连"：
+     *  * 路由器已关闭；
+     *  * 同一台服务器已有刷新在跑（调用方直接等那个 future）；
+     *  * 这台服务器刚失败过，还在 [HubLimits.serverFailureBackoffMs] 冷却期里。
+     *
+     * 三条都是"不制造重连风暴"的必要条件 —— 没有它们，一次目录请求的失败会变成
+     * 每个后续请求都去撞一遍同一堵墙。
+     */
+    private fun startRefresh(
+        config: McpServerConfig,
+        enumerate: Boolean,
+        trace: HubTrace?,
+    ): CompletableFuture<Boolean>? {
+        if (closed) return null
+        // 只在锁内读 [refreshes]：它是普通 HashMap，锁外读会与另一个线程的写入竞争
+        // （读到一半的 rehash 是典型的"偶发丢刷新 / 死循环"来源）。
+        synchronized(refreshLock) {
+            refreshes[config.id]?.let { return it }
+            val failedAgo = cache.failedAgoMs(config)
+            if (failedAgo != null && failedAgo in 0..hubLimits.serverFailureBackoffMs) return null
+
+            val future = CompletableFuture<Boolean>()
+            refreshes[config.id] = future
+            val task = Runnable {
+                val startedAt = monotonic()
+                val ok = try {
+                    refreshServer(config, enumerate)
+                } catch (error: Throwable) {
+                    // 远端的一切都不可信；刷新线程绝不能把异常带出去。
+                    false
+                }
+                trace?.stage(
+                    "refresh_task",
+                    serverId = config.id,
+                    detail = "ok=$ok enumerate=$enumerate task_ms=${monotonic() - startedAt}",
+                )
+                future.complete(ok)
+            }
+            try {
+                executor.execute(task)
+            } catch (rejected: RejectedExecutionException) {
+                refreshes.remove(config.id)
+                future.complete(false)
+                return null
+            }
+            future.whenComplete { _, _ ->
+                synchronized(refreshLock) { if (refreshes[config.id] === future) refreshes.remove(config.id) }
+            }
+            return future
+        }
+    }
+
+    /** 最多等到 [deadlineAtMs]（单调时钟）。超时/异常都不影响返回：用缓存里已有的结果。 */
+    private fun awaitAtMost(future: CompletableFuture<Boolean>, deadlineAtMs: Long) {
+        val remaining = deadlineAtMs - monotonic()
+        if (remaining <= 0) return
+        try {
+            future.get(remaining, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } catch (_: Exception) {
+            // ExecutionException / TimeoutException：都按"这次没拿到"处理。
+        }
+    }
+
+    /**
+     * 真的连一次服务器。
+     *
+     * [enumerate] 为 false 时只做握手（`servers_only` 的后台探测）：连接成功已经足以
+     * 回答"它现在可不可用"，而 `tools/list` 才是一台 35 工具服务器上最慢的那一步。
+     *
+     * 任何失败都只影响这一台服务器：状态记成离线、失败时刻记下来（用于退避），
+     * 工具目录保留但不会下发。绝不向调用方抛异常。
+     */
+    private fun refreshServer(config: McpServerConfig, enumerate: Boolean): Boolean {
+        val transport = try {
+            openTransport(config)
+        } catch (error: Exception) {
+            cache.recordFailure(config)
+            return false
+        }
+        return try {
+            transport.connect()
+            if (enumerate) {
+                val remoteTools = transport.listTools()
+                cache.recordOnline(
+                    config,
+                    remoteTools.map { HubCachedTool(it, fingerprintOf(config, it)) },
+                )
+            } else {
+                cache.recordOnline(config, tools = null)
+            }
+            true
+        } catch (error: Exception) {
+            cache.recordFailure(config)
+            false
+        } finally {
+            runCatching { transport.close() }
+        }
     }
 
     /**
@@ -222,7 +564,7 @@ class McpHubRouter(
      * 仍然需要它。所以拆成单独一次按工具读取：只有真正要调的那个才付这份体积。
      * 未授权/定义已变化的工具在这里同样被拒绝 —— 否则它就成了一条绕过授权的信息出口。
      */
-    private fun getToolSchema(arguments: JSONObject): CapabilityResult {
+    private fun getToolSchema(arguments: JSONObject, trace: HubTrace): CapabilityResult {
         rejectUnknownKeys(arguments, ALLOWED_SCHEMA_KEYS)
         val serverId = requireString(arguments, "server_id")
         if (!HubIdentity.isValidServerId(serverId)) {
@@ -236,11 +578,18 @@ class McpHubRouter(
         val config = serverStore.list().firstOrNull { it.id == serverId && it.enabled }
             ?: return failure(ToolResultErrorCode.UNSUPPORTED_TOOL, "本机没有启用这台 MCP 服务器")
 
+        trace.stage("connect", serverId = serverId)
         val transport = openTransport(config)
         try {
             transport.connect()
             // 与调用一样，用**这次**拿到的定义算指纹；旧授权不算数。
-            val tool = transport.listTools().firstOrNull { it.name == toolName }
+            val remoteTools = transport.listTools()
+            trace.stage("list_tools", serverId = serverId, detail = "tools=${remoteTools.size}")
+            // 顺带把这次拿到的目录写回缓存：它比缓存里的更新，而且是这次请求已经付过
+            // 成本的网络结果。只写成功路径 —— 这里的失败（工具不存在/未授权）与服务器
+            // 可用性无关，不能拿去把服务器标成离线。
+            cache.recordOnline(config, remoteTools.map { HubCachedTool(it, fingerprintOf(config, it)) })
+            val tool = remoteTools.firstOrNull { it.name == toolName }
                 ?: return failure(ToolResultErrorCode.UNSUPPORTED_TOOL, "这台服务器上没有这个工具")
             val fingerprint = fingerprintOf(config, tool)
             when (authorizationStore.state(serverId, toolName, fingerprint)) {
@@ -313,7 +662,7 @@ class McpHubRouter(
     // 调用
     // ------------------------------------------------------------------
 
-    private fun callTool(arguments: JSONObject): CapabilityResult {
+    private fun callTool(arguments: JSONObject, trace: HubTrace): CapabilityResult {
         if (!enabled()) {
             return failure(
                 ToolResultErrorCode.NOT_PERMITTED,
@@ -344,11 +693,17 @@ class McpHubRouter(
         val config = serverStore.list().firstOrNull { it.id == serverId && it.enabled }
             ?: return failure(ToolResultErrorCode.UNSUPPORTED_TOOL, "本机没有启用这台 MCP 服务器")
 
+        trace.stage("connect", serverId = serverId)
         val transport = openTransport(config)
         try {
             transport.connect()
             // 每次调用都重新拉一次工具定义：授权判定必须基于"现在这个定义"。
-            val tool = transport.listTools().firstOrNull { it.name == toolName }
+            val remoteTools = transport.listTools()
+            trace.stage("list_tools", serverId = serverId, detail = "tools=${remoteTools.size}")
+            // 同 getToolSchema：这次拿到的目录是更新的，写回缓存；但不因本工具的
+            // 未授权/不存在而改服务器的可用性。
+            cache.recordOnline(config, remoteTools.map { HubCachedTool(it, fingerprintOf(config, it)) })
+            val tool = remoteTools.firstOrNull { it.name == toolName }
                 ?: return failure(ToolResultErrorCode.UNSUPPORTED_TOOL, "这台服务器上没有这个工具")
 
             val fingerprint = fingerprintOf(config, tool)
@@ -375,6 +730,7 @@ class McpHubRouter(
             }
 
             val result = transport.callTool(toolName, callArguments)
+            trace.stage("execute", serverId = serverId)
             return CapabilityResult.Success(callPayload(config, toolName, result))
         } finally {
             runCatching { transport.close() }
@@ -591,6 +947,21 @@ class McpHubRouter(
     private class InvalidArguments(message: String) : Exception(message)
 
     private companion object {
+        /**
+         * 没有 request_id 时的占位（直接调 [route] 的单测/诊断场景）。
+         *
+         * 刻意不是一个 UUID：日志里要能一眼看出"这条不是服务端发来的请求"，
+         * 而不是多出一批在服务端日志里永远对不上的 id。
+         */
+        const val NO_REQUEST_ID = "local"
+
+        /** 后台刷新线程：daemon + 可读的名字，进程退出时不会吊住 JVM。 */
+        fun daemonThreads(prefix: String): ThreadFactory = ThreadFactory { runnable ->
+            Thread(runnable, "$prefix-${THREAD_IDS.getAndIncrement()}").apply { isDaemon = true }
+        }
+
+        val THREAD_IDS = AtomicInteger()
+
         val ALLOWED_CATALOG_KEYS = setOf("server_id", "offset", "limit", "include_schema", "servers_only")
         val ALLOWED_SCHEMA_KEYS = setOf("server_id", "tool_name")
         val ALLOWED_CALL_KEYS = setOf("server_id", "tool_name", "arguments")

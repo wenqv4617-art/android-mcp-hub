@@ -18,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.Executor
 
 /**
  * [McpHubRouter] 的测试。
@@ -77,11 +78,16 @@ class McpHubRouterTest {
             setOf(
                 "servers", "tools", "total_tools", "returned", "offset", "limit",
                 "has_more", "other_tools_count", "schemas_dropped", "truncated",
+                // V1 性能专项：目录必须能说清"这份数据是刚拉的还是缓存里的"。
+                "catalog_source", "refresh_pending", "elapsed_ms", "catalog_age_ms",
             ),
             payload.keys().asSequence().toSet(),
         )
         val server = payload.getJSONArray("servers").getJSONObject(0)
-        assertEquals(setOf("server_id", "server_name", "availability"), server.keys().asSequence().toSet())
+        assertEquals(
+            setOf("server_id", "server_name", "availability", "availability_source", "checked_at_ms"),
+            server.keys().asSequence().toSet(),
+        )
         val entry = payload.getJSONArray("tools").getJSONObject(0)
         assertEquals(
             setOf(
@@ -287,10 +293,26 @@ class McpHubRouterTest {
         val payload = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("servers_only", true)))
 
         assertEquals(1, payload.getJSONArray("servers").length())
-        assertEquals("srv_alpha", payload.getJSONArray("servers").getJSONObject(0).getString("server_id"))
-        assertEquals(HubStates.AVAILABILITY_ONLINE, payload.getJSONArray("servers").getJSONObject(0).getString("availability"))
+        val server = payload.getJSONArray("servers").getJSONObject(0)
+        assertEquals("srv_alpha", server.getString("server_id"))
+        // 从未探测过 → 如实说 "unknown"，而不是编一个 offline/online。
+        assertEquals(HubStates.AVAILABILITY_UNKNOWN, server.getString("availability"))
+        assertEquals(HubStates.SOURCE_UNKNOWN, server.getString("availability_source"))
+        assertFalse(server.has("checked_at_ms"))
         assertEquals(0, payload.getJSONArray("tools").length())
         assertTrue(payload.getBoolean("servers_only"))
+        // 这次探测是**探活**，不是枚举：`tools/list` 一次都不该被调用。
+        assertEquals(0, transport.listToolsCalls)
+
+        // 第二次请求能看到上一次探测的结果 —— 但来源必须标明是缓存。
+        val second = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("servers_only", true)))
+        val probed = second.getJSONArray("servers").getJSONObject(0)
+        assertEquals(HubStates.AVAILABILITY_ONLINE, probed.getString("availability"))
+        assertEquals(HubStates.SOURCE_CACHE, probed.getString("availability_source"))
+        assertTrue(probed.has("checked_at_ms"))
+        // 仍然没有工具：探活不会顺手把 35 个工具拉下来。
+        assertEquals(0, second.getJSONArray("tools").length())
+        assertEquals(0, transport.listToolsCalls)
     }
 
     @Test
@@ -1015,9 +1037,16 @@ class McpHubRouterTest {
         val calls = mutableListOf<String>()
         var closed = false
 
+        /** `tools/list` 被调用的次数：用来证明"探活不是枚举"。 */
+        var listToolsCalls = 0
+            private set
+
         override fun connect(): McpServerHandshake = McpServerHandshake("2025-06-18", "fake", "1.0", null)
 
-        override fun listTools(): List<McpRemoteTool> = tools
+        override fun listTools(): List<McpRemoteTool> {
+            listToolsCalls += 1
+            return tools
+        }
 
         override fun callTool(toolName: String, arguments: JSONObject): McpToolCallResult {
             calls += toolName
@@ -1047,6 +1076,12 @@ class McpHubRouterTest {
         enabled: Boolean = true,
         hubLimits: HubLimits = HubLimits(),
         keyValueStore: InMemoryKeyValueStore = InMemoryKeyValueStore(),
+        /**
+         * 刷新执行器。默认**就地执行**，让"并发刷新"在单测里变成确定性的顺序执行：
+         * 提交任务时就把这次连接做完，`awaitAtMost` 随后看到的是一个已完成的 future。
+         * 需要观察"请求到底有没有等刷新"的测试会换成真线程池（见性能用例）。
+         */
+        refreshExecutor: Executor = Executor { it.run() },
     ) {
         /** 共享同一份内存存储，就能造出"授权记录还在、但服务器换了定义"的场景。 */
         val kv = keyValueStore
@@ -1064,6 +1099,8 @@ class McpHubRouterTest {
             hubLimits = hubLimits,
             enabled = { enabled },
             clock = { now },
+            monotonic = { now },
+            refreshExecutor = refreshExecutor,
         )
 
         init {
@@ -1087,5 +1124,6 @@ class McpHubRouterTest {
         transports: Map<String, McpTransport> = emptyMap(),
         enabled: Boolean = true,
         hubLimits: HubLimits = HubLimits(),
-    ) = Harness(servers, transports, enabled, hubLimits)
+        refreshExecutor: Executor = Executor { it.run() },
+    ) = Harness(servers, transports, enabled, hubLimits, refreshExecutor = refreshExecutor)
 }
