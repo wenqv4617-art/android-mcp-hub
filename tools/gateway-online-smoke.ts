@@ -175,6 +175,34 @@ function textOf(result: any): string {
     .join("\n");
 }
 
+/**
+ * 应当被拒绝的调用。MCP 服务器有两种合法的拒绝方式：JSON-RPC 错误（SDK 抛错），
+ * 或工具结果 `isError: true`（网关就是这样回错误码的）。两种都算拒绝，但必须带错误码。
+ */
+async function rejected(
+  client: Client,
+  name: string,
+  args: Record<string, unknown>,
+  expected: RegExp,
+  ticket?: string,
+): Promise<string> {
+  let code: string;
+  try {
+    const result: any = await client.callTool({
+      name,
+      arguments: args,
+      ...(ticket ? { _meta: { "hub/confirmation": ticket } } : {}),
+    } as any);
+    need(result?.isError === true, "调用没有被拒绝：返回了正常结果");
+    code = textOf(result);
+  } catch (error) {
+    code = error instanceof Error ? error.message : String(error);
+  }
+  need(code.length > 0, "拒绝结果没有错误码");
+  need(expected.test(code), `拒绝原因不符：期望 ${expected}，实际 ${code.slice(0, 120)}`);
+  return code;
+}
+
 async function withClient<T>(token: string, fn: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ name: "android-mcp-hub-online-smoke", version: "1.0.0" }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
@@ -268,13 +296,7 @@ async function main(): Promise<void> {
   await withClient(pairing.clientToken, async (client) => {
     const before = await client.listTools();
     need(before.tools.length === 0, "未授权时 /mcp 不应暴露任何工具");
-    let rejected = false;
-    try {
-      await client.callTool({ name: chosen.gatewayName, arguments: args });
-    } catch {
-      rejected = true;
-    }
-    need(rejected, "未授权调用没有被拒绝");
+    await rejected(client, chosen.gatewayName, args, /permission_denied/);
   });
   log("未授权：工具列表为空，调用被拒绝");
 
@@ -314,13 +336,7 @@ async function main(): Promise<void> {
   });
   let ticket = "";
   await withClient(pairing.clientToken, async (client) => {
-    let rejected = false;
-    try {
-      await client.callTool({ name: chosen.gatewayName, arguments: args });
-    } catch {
-      rejected = true;
-    }
-    need(rejected, "需确认工具在无票据时仍被调用");
+    await rejected(client, chosen.gatewayName, args, /confirmation_required/);
   });
   const confirmed = await admin(pairing.managementToken, {
     action: "confirm",
@@ -338,17 +354,7 @@ async function main(): Promise<void> {
     need(result.isError !== true, "带票据的确认调用失败");
   });
   await withClient(pairing.clientToken, async (client) => {
-    let replayRejected = false;
-    try {
-      await client.callTool({
-        name: chosen.gatewayName,
-        arguments: args,
-        _meta: { "hub/confirmation": ticket },
-      } as any);
-    } catch {
-      replayRejected = true;
-    }
-    need(replayRejected, "一次性确认票据被重复使用");
+    await rejected(client, chosen.gatewayName, args, /confirmation_required/, ticket);
   });
   log("需确认：无票据拒绝、有票据成功、票据不可重放");
 
@@ -357,13 +363,7 @@ async function main(): Promise<void> {
   await withClient(pairing.clientToken, async (client) => {
     const hidden = await client.listTools();
     need(hidden.tools.length === 0, "停用后仍能看到工具");
-    let rejected = false;
-    try {
-      await client.callTool({ name: chosen.gatewayName, arguments: args });
-    } catch {
-      rejected = true;
-    }
-    need(rejected, "停用后调用没有被拒绝");
+    await rejected(client, chosen.gatewayName, args, /permission_denied/);
   });
   await admin(pairing.managementToken, { action: "set-enabled", id: SERVICE_ID, enabled: true });
   log("停用：工具隐藏，调用被拒绝");
