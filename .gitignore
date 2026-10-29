@@ -14,13 +14,15 @@ worker/.wrangler/
 *.dev.vars
 
 # 构建产物
-dist/*          # 但交付用的那个 APK 例外，见文件末尾
+# （注释必须单独一行：gitignore 不支持行尾注释，写了会把整行当成模式，规则等于失效。）
+dist/*
 build/
 coverage/
 
 # Android / Gradle
 android/.gradle/
-android/.kotlin/    # Kotlin 编译器的本地缓存（不含源码，Gate 2.5 起忽略）
+# Kotlin 编译器的本地缓存（不含源码，Gate 2.5 起忽略）
+android/.kotlin/
 android/build/
 android/app/build/
 android/local.properties
