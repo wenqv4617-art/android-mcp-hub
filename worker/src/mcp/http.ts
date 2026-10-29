@@ -118,11 +118,17 @@ export async function callPhoneToolViaDurableObject(
 ): Promise<import("../phone/phone-session").ToolOutcome> {
   const ns = env.PHONE_SESSION as unknown as PhoneSessionNamespace;
   const stub = ns.get(ns.idFromName(deviceId));
+  // requestId 只在这里生成一次，两条日志都用它 —— 目的就是让 "Worker 看到多久、
+  // 手机那一侧到底花了多久" 能用同一个 id 对上（手机侧的分阶段日志见 Android 的
+  // `HubTrace`，它的 request_id 就是这个值）。
+  const requestId = crypto.randomUUID();
+  const startedAt = Date.now();
+  logEvent("info", "hub.forward_started", { requestId, deviceId, method: toolName });
   const request = new Request(`https://phone-session.internal${ROUTE_TOOL}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      requestId: crypto.randomUUID(),
+      requestId,
       deviceId,
       toolName,
       arguments: args,
@@ -131,6 +137,16 @@ export async function callPhoneToolViaDurableObject(
   });
   const response = await stub.fetch(request);
   const payload = (await response.json()) as import("../phone/phone-session").ToolOutcome;
+  logEvent(payload.ok ? "info" : "warn", "hub.forward_settled", {
+    requestId,
+    deviceId,
+    method: toolName,
+    elapsedMs: Date.now() - startedAt,
+    outcome: payload.ok ? "ok" : "failed",
+    // 错误码取自协议闭集（TOOL_RESULT_ERROR_CODES），不是自由文本；
+    // 它决定了"超时"与"未授权"在排障时能不能区分开。
+    ...(payload.ok ? {} : { reason: payload.error.code }),
+  });
   return payload;
 }
 

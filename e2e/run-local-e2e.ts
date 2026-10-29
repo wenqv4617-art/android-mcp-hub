@@ -989,7 +989,14 @@ async function main(): Promise<void> {
       timeoutMs: number,
       extraArgs: Record<string, unknown> = {},
       toolName: string = "battery_get_status",
-    ): Promise<{ isError: boolean; structured: Record<string, unknown>; elapsed: number; protocolError: string }> {
+    ): Promise<{
+      isError: boolean;
+      structured: Record<string, unknown>;
+      /** 所有 text content 拼起来：工具结果的**人类可读**一面（模型看到的就是它）。 */
+      text: string;
+      elapsed: number;
+      protocolError: string;
+    }> {
       const started = Date.now();
       try {
         const res = await client.callTool({
@@ -997,9 +1004,14 @@ async function main(): Promise<void> {
           arguments: { device_id: deviceId, timeout_ms: timeoutMs, ...extraArgs },
         });
         const elapsed = Date.now() - started;
+        const contents = Array.isArray(res["content"]) ? (res["content"] as Array<Record<string, unknown>>) : [];
         return {
           isError: res["isError"] === true,
           structured: (res["structuredContent"] as Record<string, unknown> | undefined) ?? {},
+          text: contents
+            .filter((c) => c["type"] === "text" && typeof c["text"] === "string")
+            .map((c) => String(c["text"]))
+            .join("\n"),
           elapsed,
           protocolError: "",
         };
@@ -1007,7 +1019,7 @@ async function main(): Promise<void> {
         // 参数校验失败 / 工具不存在这类是 **JSON-RPC 协议错误**：
         //   SDK 在传输层就把它抛出来，压根不会变成一个 isError 的 tool result。
         //   这个区别很重要 —— 它意味着"协议层拒绝"和"能力执行失败"是两件事。
-        return { isError: true, structured: {}, elapsed: Date.now() - started, protocolError: String(err) };
+        return { isError: true, structured: {}, text: "", elapsed: Date.now() - started, protocolError: String(err) };
       }
     }
 
@@ -1412,6 +1424,32 @@ async function main(): Promise<void> {
           onlyServers[0]?.["server_id"] === "live_server" &&
           ((serversOnly.structured["tools"] as unknown[] | undefined) ?? []).length === 0,
         `servers=${JSON.stringify(onlyServers)}`,
+      );
+      // V1 目录提速的关键语义：`servers_only` 答的是**上次已知**的可用性。
+      // 服务端必须把"这是缓存里的状态"原样透传，并在文本里说出来 ——
+      // 否则模型会把一条缓存里的 online 当成"刚刚确认过"。
+      check(
+        "servers_only 的可用性标注了来源与确认时刻，并说明不是实时确认",
+        onlyServers[0]?.["availability_source"] === "cache" &&
+          typeof onlyServers[0]?.["checked_at_ms"] === "number" &&
+          serversOnly.structured["catalog_source"] === "cache" &&
+          serversOnly.text.includes("上次已知"),
+        JSON.stringify({
+          source: onlyServers[0]?.["availability_source"],
+          catalog_source: serversOnly.structured["catalog_source"],
+        }),
+      );
+      check(
+        "完整目录标注数据来源为本次刷新（refresh），并给出 refresh_pending",
+        liveCatalog.structured["catalog_source"] === "refresh" &&
+          liveCatalog.structured["refresh_pending"] === false &&
+          ((liveCatalog.structured["servers"] as Array<Record<string, unknown>> | undefined) ?? []).every(
+            (s) => s["availability_source"] === "live",
+          ),
+        JSON.stringify({
+          catalog_source: liveCatalog.structured["catalog_source"],
+          refresh_pending: liveCatalog.structured["refresh_pending"],
+        }),
       );
 
       // 详情层：只取一个工具的 schema，且内容是服务器上真实的那一份。

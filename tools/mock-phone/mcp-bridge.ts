@@ -131,11 +131,17 @@ export function createMcpBridge(options: McpBridgeOptions): MockToolHandler {
     const serversOnly = args["servers_only"] === true;
 
     const live = await ensureConnected();
+    // 与 Android 一致：`servers_only` 回答的是**上次已知**的可用性（来源标成 cache），
+    // 完整目录才是这次真的连上确认的（live）。替身也要如实，否则 Worker 侧的
+    // "状态是缓存还是实时"这一层就永远测不到。
+    const checkedAtMs = Date.now();
     const servers = [
       {
         server_id: options.serverId,
         server_name: options.serverName ?? reportedName ?? options.serverId,
         availability: "online",
+        availability_source: serversOnly ? "cache" : "live",
+        checked_at_ms: checkedAtMs,
       },
     ];
     if (serversOnly) {
@@ -152,6 +158,8 @@ export function createMcpBridge(options: McpBridgeOptions): MockToolHandler {
         other_tools_count: 0,
         schemas_dropped: 0,
         servers_only: true,
+        catalog_source: "cache",
+        refresh_pending: false,
       };
     }
 
@@ -210,6 +218,8 @@ export function createMcpBridge(options: McpBridgeOptions): MockToolHandler {
       ...(hasMore ? { next_offset: offset + page.length } : {}),
       other_tools_count: otherToolsCount,
       schemas_dropped: schemasDropped,
+      catalog_source: "refresh",
+      refresh_pending: false,
     };
   }
 

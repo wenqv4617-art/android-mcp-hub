@@ -582,3 +582,70 @@ describe("Gate 3 / 目录映射：不可信数据边界", () => {
     expect(structured["tools"]).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// V1 目录性能专项：可用性来源与目录来源**必须原样透传**，不对的就收敛
+// ---------------------------------------------------------------------------
+
+describe("V1 目录性能：availability_source / catalog_source 透传", () => {
+  it("服务器条目带上 availability_source 与 checked_at_ms", () => {
+    const result = hubCatalogOutcomeToResult(
+      phoneSuccess(HUB_PHONE_LIST_COMMAND, {
+        servers: [
+          { server_id: "srv_alpha", server_name: "Alpha", availability: "online",
+            availability_source: "cache", checked_at_ms: 1_700_000_000_000 },
+          { server_id: "srv_beta", server_name: "Beta", availability: "unknown",
+            availability_source: "unknown" },
+        ],
+        tools: [],
+      }),
+    );
+    const structured = result.structuredContent as Record<string, unknown>;
+    const servers = structured["servers"] as Array<Record<string, unknown>>;
+    expect(servers[0]?.["availability_source"]).toBe("cache");
+    expect(servers[0]?.["checked_at_ms"]).toBe(1_700_000_000_000);
+    expect(servers[1]?.["availability_source"]).toBe("unknown");
+    // 从未确认过就**不能**出现确认时刻（不能拿 0 冒充"刚刚确认"）。
+    expect(servers[1]?.["checked_at_ms"]).toBeUndefined();
+    // 状态是缓存时必须在文本里说清楚，否则模型会把缓存里的 online 当成实时确认。
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("上次已知");
+  });
+
+  it("认不出的来源一律收敛成 unknown / 缺省，而不是把自由字符串透传出去", () => {
+    const result = hubCatalogOutcomeToResult(
+      phoneSuccess(HUB_PHONE_LIST_COMMAND, {
+        servers: [{ server_id: "srv_alpha", server_name: "Alpha", availability: "online",
+          availability_source: "trust-me-bro", checked_at_ms: -1 }],
+        tools: [],
+        catalog_source: "whatever",
+        catalog_age_ms: -5,
+        refresh_pending: "yes",
+      }),
+    );
+    const structured = result.structuredContent as Record<string, unknown>;
+    const servers = structured["servers"] as Array<Record<string, unknown>>;
+    expect(servers[0]?.["availability_source"]).toBe("unknown");
+    expect(servers[0]?.["checked_at_ms"]).toBeUndefined();
+    expect(structured["catalog_source"]).toBeUndefined();
+    expect(structured["catalog_age_ms"]).toBeUndefined();
+    expect(structured["refresh_pending"]).toBe(false);
+    expect(JSON.stringify(structured)).not.toContain("trust-me-bro");
+  });
+
+  it("catalog_source / catalog_age_ms / refresh_pending 按闭集透传", () => {
+    const result = hubCatalogOutcomeToResult(
+      phoneSuccess(HUB_PHONE_LIST_COMMAND, {
+        servers: [],
+        tools: [],
+        catalog_source: "mixed",
+        catalog_age_ms: 12_345,
+        refresh_pending: true,
+      }),
+    );
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured["catalog_source"]).toBe("mixed");
+    expect(structured["catalog_age_ms"]).toBe(12_345);
+    expect(structured["refresh_pending"]).toBe(true);
+  });
+});
