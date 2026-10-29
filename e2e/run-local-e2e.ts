@@ -516,10 +516,11 @@ async function main(): Promise<void> {
       // Gate 3：聚合入口。注意它们是**稳定入口**，名字永远不变；
       // 第三方工具的名字只出现在 hub_list_tools 的返回值与 hub_call_tool 的参数里。
       "hub_list_tools",
+      "hub_get_tool_schema",
       "hub_call_tool",
     ];
     check(
-      "工具列表恰好是四个本机能力 + 两个聚合入口（显式白名单，一个不多）",
+      "工具列表恰好是四个本机能力 + 三个聚合入口（显式白名单，一个不多）",
       names.length === EXPECTED_TOOLS.length && EXPECTED_TOOLS.every((n) => names.includes(n)),
       `tools=[${names.join(", ")}]`,
     );
@@ -630,7 +631,7 @@ async function main(): Promise<void> {
     // ---- 8. 会话与协议头 -------------------------------------------------
     out("⑧ 会话与协议头");
     const afterClose = await client.listTools();
-    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 6);
+    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 7);
     out("");
 
     // ---- ⑨ 异常手机场景矩阵（A2–A8）--------------------------------------
@@ -1334,16 +1335,112 @@ async function main(): Promise<void> {
           liveIds.includes("mcp:live_server:no_annotations"),
         `count=${String(liveCatalog.structured["tools_count"])} ids=${liveIds.slice(0, 3).join(",")}…`,
       );
+      // 目录层默认**不带** schema：这是"35 个工具撑爆 16 KiB 帧"的正面修复。
       check(
-        "第三方工具的 input_schema 是服务器上真实的那一份（required/properties 逐字搬回）",
-        (() => {
-          const echo = liveTools.find((t) => t["tool_name"] === "echo_text");
-          const schema = (echo?.["input_schema"] as Record<string, unknown> | undefined) ?? {};
-          const props = (schema["properties"] as Record<string, unknown> | undefined) ?? {};
-          const required = (schema["required"] as string[] | undefined) ?? [];
-          return required.includes("text") && (props["text"] as Record<string, unknown> | undefined)?.["type"] === "string";
-        })(),
-        `schema=${JSON.stringify(liveTools.find((t) => t["tool_name"] === "echo_text")?.["input_schema"] ?? null).slice(0, 120)}`,
+        "目录层默认不带 input_schema（体积不再随工具数 × schema 增长）",
+        liveTools.length > 0 && liveTools.every((t) => t["input_schema"] === undefined),
+        `returned=${String(liveCatalog.structured["returned"])} 带 schema 的条数=${
+          liveTools.filter((t) => t["input_schema"] !== undefined).length
+        }`,
+      );
+      check(
+        "目录层给出真实的总数/偏移/每页条数与 has_more",
+        liveCatalog.structured["total_tools"] === 7 &&
+          liveCatalog.structured["returned"] === 7 &&
+          liveCatalog.structured["offset"] === 0 &&
+          liveCatalog.structured["has_more"] === false,
+        JSON.stringify({
+          total: liveCatalog.structured["total_tools"],
+          returned: liveCatalog.structured["returned"],
+          offset: liveCatalog.structured["offset"],
+          has_more: liveCatalog.structured["has_more"],
+        }),
+      );
+
+      // 分页：limit=3 只是"这一页 3 条"，总数仍然是 7 —— 分页绝不会让工具消失。
+      const page1 = await toolCall(LIVE_MCP_DEVICE_ID, 8000, { limit: 3 }, "hub_list_tools");
+      const page1Tools = (page1.structured["tools"] as Array<Record<string, unknown>> | undefined) ?? [];
+      check(
+        "分页：limit=3 返回 3 条且 has_more=true、next_offset=3，总数不变",
+        page1Tools.length === 3 &&
+          page1.structured["total_tools"] === 7 &&
+          page1.structured["has_more"] === true &&
+          page1.structured["next_offset"] === 3,
+        JSON.stringify({
+          returned: page1Tools.length,
+          total: page1.structured["total_tools"],
+          next: page1.structured["next_offset"],
+        }),
+      );
+      const page3 = await toolCall(LIVE_MCP_DEVICE_ID, 8000, { offset: 6, limit: 3 }, "hub_list_tools");
+      const page3Tools = (page3.structured["tools"] as Array<Record<string, unknown>> | undefined) ?? [];
+      check(
+        "分页：offset=6 取到最后一页（1 条），has_more=false",
+        page3Tools.length === 1 && page3.structured["has_more"] === false,
+        `returned=${page3Tools.length} has_more=${String(page3.structured["has_more"])}`,
+      );
+
+      // servers_only：服务器优先查询 —— 只回答"哪台在线"，不枚举工具。
+      const serversOnly = await toolCall(LIVE_MCP_DEVICE_ID, 8000, { servers_only: true }, "hub_list_tools");
+      const onlyServers = (serversOnly.structured["servers"] as Array<Record<string, unknown>> | undefined) ?? [];
+      check(
+        "servers_only 只返回服务器清单（先查服务器，再按服务器查工具）",
+        serversOnly.isError === false &&
+          onlyServers.length === 1 &&
+          onlyServers[0]?.["server_id"] === "live_server" &&
+          ((serversOnly.structured["tools"] as unknown[] | undefined) ?? []).length === 0,
+        `servers=${JSON.stringify(onlyServers)}`,
+      );
+
+      // 详情层：只取一个工具的 schema，且内容是服务器上真实的那一份。
+      const guide = await toolCall(
+        LIVE_MCP_DEVICE_ID,
+        8000,
+        { server_id: "live_server", tool_name: "echo_text" },
+        "hub_get_tool_schema",
+      );
+      const echoSchema = (guide.structured["input_schema"] as Record<string, unknown> | undefined) ?? {};
+      const echoProps = (echoSchema["properties"] as Record<string, unknown> | undefined) ?? {};
+      const echoRequired = (echoSchema["required"] as string[] | undefined) ?? [];
+      check(
+        "详情层：hub_get_tool_schema 返回该工具真实的 input_schema（required/properties 逐字搬回）",
+        guide.isError === false &&
+          guide.structured["ok"] === true &&
+          guide.structured["tool_name"] === "echo_text" &&
+          echoRequired.includes("text") &&
+          (echoProps["text"] as Record<string, unknown> | undefined)?.["type"] === "string",
+        `schema=${JSON.stringify(echoSchema).slice(0, 120)}`,
+      );
+      check(
+        "详情层是只读的：读 schema 没有触发任何第三方工具调用",
+        (((await liveServer.state())["calls"] as unknown[] | undefined) ?? []).length === 0,
+        `服务器记录的工具调用=${
+          (((await liveServer.state())["calls"] as Array<Record<string, unknown>> | undefined) ?? [])
+            .map((c) => String(c["name"]))
+            .join(",") || "（无）"
+        }`,
+      );
+      const guideDenied = await toolCall(
+        LIVE_MCP_DEVICE_ID,
+        8000,
+        { server_id: "live_server", tool_name: "destructive_write" },
+        "hub_get_tool_schema",
+      );
+      check(
+        "详情层同样受逐工具授权约束：未授权工具的 schema 也不给",
+        guideDenied.isError === true && guideDenied.structured["error_code"] === "not_permitted",
+        `code=${String(guideDenied.structured["error_code"])}`,
+      );
+      const guideUnknown = await toolCall(
+        LIVE_MCP_DEVICE_ID,
+        8000,
+        { server_id: "live_server", tool_name: "no_such_tool" },
+        "hub_get_tool_schema",
+      );
+      check(
+        "详情层：服务器上不存在的工具 → unsupported_tool",
+        guideUnknown.isError === true && guideUnknown.structured["error_code"] === "unsupported_tool",
+        `code=${String(guideUnknown.structured["error_code"])}`,
       );
       check(
         "声明了 destructiveHint 的工具仍然是「存在但不给你看」：只计数，名字与描述不外传",
