@@ -176,14 +176,14 @@ jobs:
           arch: x86_64
           disable-animations: true
           emulator-options: -no-window -no-audio -no-snapshot -gpu swiftshader_indirect
+          # 路径直接写字面量：action 会把脚本按行交给各自的 shell，「上一行定义的变量」
+          # 在下一行不保证可见 —— 第一次跑就是因此把空字符串当成了 APK 路径。
           script: |
-            set -euo pipefail
-            FIRST="${{ runner.temp }}/apks/build1.apk"
-            SECOND="${{ runner.temp }}/apks/build2.apk"
-            adb install -r "$FIRST"
+            echo "--- 第一次安装 build1 ---"
+            adb install -r "${{ runner.temp }}/apks/build1.apk"
             adb shell dumpsys package com.androidmcphub.app | grep -E 'versionName|versionCode' | head -4
-            echo "--- 覆盖安装第二次 ---"
-            adb install -r "$SECOND"
+            echo "--- 覆盖安装 build2（签名不同会在这里失败） ---"
+            adb install -r "${{ runner.temp }}/apks/build2.apk"
             adb shell dumpsys package com.androidmcphub.app | grep -E 'versionName|versionCode' | head -4
-            adb shell pm list packages | grep com.androidmcphub.app
-            echo "覆盖安装成功：同一个 applicationId 被第二个 APK 替换，数据未清除"
+            adb shell pm list packages com.androidmcphub.app
+            echo "覆盖安装成功：同一个 applicationId 被第二个 APK 替换，数据不清除"
