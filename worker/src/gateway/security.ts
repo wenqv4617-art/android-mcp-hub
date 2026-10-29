@@ -62,11 +62,25 @@ export function publicAddress(value: string): boolean {
 export async function checkDns(url: URL, env: Env, signal: AbortSignal, network: typeof fetch = fetch): Promise<void> {
   if (env.ENVIRONMENT === "gateway-local-test" && url.hostname === "127.0.0.1") return;
   const answers = await Promise.all(["A", "AAAA"].map(async type => {
-    const response = await network(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(url.hostname)}&type=${type}`, {
-      headers: { Accept: "application/dns-json" }, redirect: "error", signal,
-    });
+    let response: Response;
+    try {
+      response = await network(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(url.hostname)}&type=${type}`, {
+        headers: { Accept: "application/dns-json" }, redirect: "error", signal,
+      });
+    } catch (error) {
+      // DoH 本身不可达与「域名解析到私网地址」是两件事：分开报，便于线上排障，
+      // 但都不回显上游返回内容。
+      if (error instanceof GatewayError) throw error;
+      throw new GatewayError("dns_unavailable", 503);
+    }
     if (!response.ok) throw new GatewayError("dns_denied");
-    const data = JSON.parse(await boundedText(response.body, 16384)) as { Status?: number; Answer?: { type: number; data: string }[] };
+    let data: { Status?: number; Answer?: { type: number; data: string }[] };
+    try {
+      data = JSON.parse(await boundedText(response.body, 16384)) as typeof data;
+    } catch (error) {
+      if (error instanceof GatewayError) throw error;
+      throw new GatewayError("dns_denied");
+    }
     if (data.Status !== 0) throw new GatewayError("dns_denied");
     return (data.Answer ?? []).filter(a => a.type === 1 || a.type === 28).map(a => a.data);
   }));

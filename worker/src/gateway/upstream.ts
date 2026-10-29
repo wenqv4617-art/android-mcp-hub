@@ -76,7 +76,14 @@ export async function upstream<T>(service: Service, env: Env, operation: (client
     return await Promise.race([run(), deadline]);
   } catch (e) {
     if (e instanceof GatewayError) throw e;
-    throw new GatewayError(timedOut ? "upstream_timeout" : "upstream_failure", timedOut ? 504 : 502);
+    // SDK/运行时可能把内部错误重新包一层；先看 cause，别把真实原因降级成笼统的失败。
+    const cause = (e as { cause?: unknown } | null)?.cause;
+    if (cause instanceof GatewayError) throw cause;
+    if (timedOut) throw new GatewayError("upstream_timeout", 504);
+    // fetch 失败在 Workers/Node 里都是 TypeError（"Network connection lost." / ECONNRESET）。
+    // 只暴露类别，不暴露 message —— 它可能带上游地址或响应体。
+    if (e instanceof TypeError || cause instanceof TypeError) throw new GatewayError("upstream_network", 502);
+    throw new GatewayError("upstream_failure", 502);
   } finally {
     clearTimeout(timer!);
     controller.abort();
