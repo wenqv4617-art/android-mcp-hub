@@ -331,6 +331,31 @@ def add_service() -> None:
     log("发现完成：服务列表显示工具数")
 
 
+def wait_call_outcome(timeout: int = 120) -> str:
+    """等一次真实调用的结论。
+
+    「调用成功」标签在结果正文上方；正文很长时，持续上滑会把标签滚出可视区
+    （第三次设备验收就卡在这里，尽管上游结果已经显示出来了）。所以同时认
+    上游真实结果（文档类 MCP 返回 <result> 开头）作为成功信号，并且只在
+    长时间没看到任何结果时才滚动一次。
+    """
+    deadline = time.time() + timeout
+    attempt = 0
+    while time.time() < deadline:
+        items = nodes(ui_root())
+        label = find(items, "调用成功") or find(items, "调用失败")
+        if label is not None:
+            return label.text
+        upstream = next((item for item in items if item.text.startswith("<result>")), None)
+        if upstream is not None:
+            return "调用成功"
+        attempt += 1
+        if attempt % 6 == 0:
+            swipe_up()
+        time.sleep(1.5)
+    return ""
+
+
 def grant_and_call() -> None:
     log("打开服务详情并授权第一个工具")
     tap_text("查看工具与授权", scroll=True)
@@ -342,18 +367,13 @@ def grant_and_call() -> None:
     wait_for_text("参数 JSON", timeout=30, scroll=True)
     log("空参数试调用（部分工具不需要参数）")
     tap_text("通过网关调用", scroll=True)
-    first = wait_for(
-        lambda items: find(items, "调用成功") or find(items, "调用失败"),
-        "第一次调用结果",
-        timeout=120,
-        scroll=True,
-    )
-    if first.text == "调用成功":
+    first = wait_call_outcome()
+    if first == "调用成功":
         shot("called")
         log("真实调用成功（空参数）")
         return
 
-    log("空参数失败，填入查询参数后重试")
+    log(f"空参数调用未成功（{first or '没有任何结果'}），填入查询参数后重试")
     items = nodes(ui_root())
     fields = edit_fields(items)
     if not fields:
@@ -363,7 +383,9 @@ def grant_and_call() -> None:
     type_text('{"query":"Durable Objects"}')
     hide_keyboard()
     tap_text("通过网关调用", scroll=True)
-    wait_for(lambda items: find(items, "调用成功"), "重试后的真实调用", timeout=120, scroll=True)
+    if wait_call_outcome() != "调用成功":
+        shot("call-failed")
+        raise FlowError("重试后的真实调用仍未成功")
     shot("called")
     log("真实调用成功（带查询参数）")
 
