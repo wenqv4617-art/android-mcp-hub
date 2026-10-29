@@ -100,9 +100,12 @@ class GatewayOnlineAcceptanceTest {
                     ?.tools?.firstOrNull { t -> t.name == tool.name }?.grant == GatewayGrantMode.Read
             }
             assertNull("授权失败：${granted.error}", granted.error)
+            // grant 之后要重新取工具对象：它带着服务端回显的授权模式。
+            val grantedTool = granted.services.first { it.id == serviceId }.tools.first { it.name == tool.name }
+            assertEquals("授权未生效", GatewayGrantMode.Read, grantedTool.grant)
 
             // 4. 通过 /mcp 真实调用，拿到上游的真实结果。
-            state.call(serviceId, tool, arguments.toString())
+            state.call(serviceId, grantedTool, arguments.toString())
             val called = await(state, "真实调用") { it.busyServiceId == null && it.lastCall != null }
             val call = called.lastCall!!
             assertEquals("调用工具不符", tool.name, call.toolName)
