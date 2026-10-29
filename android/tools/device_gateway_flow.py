@@ -190,6 +190,19 @@ def swipe_up() -> None:
     time.sleep(0.6)
 
 
+def scroll_to_top(times: int = 5) -> None:
+    width, height = screen_size()
+    x = width // 2
+    for _ in range(times):
+        adb(
+            "shell", "input", "swipe",
+            str(x), str(int(height * 0.30)),
+            str(x), str(int(height * 0.85)),
+            "200",
+        )
+        time.sleep(0.4)
+
+
 def wait_for(check, description: str, timeout: int = 60, scroll: bool = False):
     deadline = time.time() + timeout
     attempt = 0
@@ -302,12 +315,15 @@ def pair() -> None:
 def add_service() -> None:
     log(f"添加服务 {SERVICE_NAME} → {SERVICE_URL}")
     tap_text("添加 MCP 服务器", timeout=30)
-    wait_for_text("保存并连接测试", scroll=True)
-    items = nodes(ui_root())
-    fill_field(items, 0, SERVICE_NAME)
+    # 先等编辑页顶部的标题，再回到列表顶部：如果先去等底部的「保存并连接测试」，
+    # LazyColumn 会滚到底，顶部的输入框就不可见了（uiautomator 只报可见节点）。
+    wait_for_text("添加云端 MCP 服务器", timeout=60)
+    scroll_to_top()
+    wait_for(lambda items: edit_fields(items) if len(edit_fields(items)) >= 2 else None, "编辑表单的输入框", timeout=60)
+    fill_field(nodes(ui_root()), 0, SERVICE_NAME)
     fill_field(nodes(ui_root()), 1, SERVICE_URL)
     hide_keyboard()
-    tap_text("保存并连接测试", scroll=True)
+    tap_text("保存并连接测试", scroll=True, timeout=60)
     # 保存后返回列表；服务端连接上游并发现工具需要几秒。
     wait_for(lambda items: find(items, "个工具 · 已授权", exact=False), "服务端发现工具", timeout=180, scroll=True)
     wait_for_text("查看工具与授权", timeout=60, scroll=True)
@@ -320,12 +336,12 @@ def grant_and_call() -> None:
     tap_text("查看工具与授权", scroll=True)
     wait_for_text("授权为只读", timeout=60, scroll=True)
     shot("tools")
-    tap_text("授权为只读")
+    tap_text("授权为只读", scroll=True)
     wait_for_text("已授权 · 只读", timeout=60, scroll=True)
-    tap_text("真实调用测试")
+    tap_text("真实调用测试", scroll=True)
     wait_for_text("参数 JSON", timeout=30, scroll=True)
     log("空参数试调用（部分工具不需要参数）")
-    tap_text("通过网关调用")
+    tap_text("通过网关调用", scroll=True)
     first = wait_for(
         lambda items: find(items, "调用成功") or find(items, "调用失败"),
         "第一次调用结果",
@@ -346,7 +362,7 @@ def grant_and_call() -> None:
     clear_field()
     type_text('{"query":"Durable Objects"}')
     hide_keyboard()
-    tap_text("通过网关调用")
+    tap_text("通过网关调用", scroll=True)
     wait_for(lambda items: find(items, "调用成功"), "重试后的真实调用", timeout=120, scroll=True)
     shot("called")
     log("真实调用成功（带查询参数）")
@@ -359,14 +375,23 @@ def cleanup() -> None:
         adb("shell", "input", "keyevent", "4")  # 详情 → 列表
         time.sleep(1.5)
         if find(nodes(ui_root()), "删除服务", exact=False) is None:
-            tap_text("查看工具与授权", scroll=True)
-            wait_for_text("删除服务", timeout=30, scroll=True)
-        tap_text("删除服务", timeout=30, scroll=True)
-        tap_text("确认删除（不可撤销）", timeout=30, scroll=True)
-        wait_for(lambda items: find(items, "添加 MCP 服务器"), "删除后回到列表", timeout=60, scroll=True)
-        tap_text("解除配对", timeout=30, scroll=True)
-        wait_for_text("连接云端网关", timeout=60)
-        log("清理完成：服务已删除，配对已解除")
+            entry = find(nodes(ui_root()), "查看工具与授权", exact=False)
+            if entry is not None:
+                tap(entry)
+                wait_for_text("删除服务", timeout=30, scroll=True)
+        if find(nodes(ui_root()), "删除服务", exact=False) is not None:
+            tap_text("删除服务", timeout=30, scroll=True)
+            tap_text("确认删除（不可撤销）", timeout=30, scroll=True)
+            wait_for(lambda items: find(items, "添加 MCP 服务器"), "删除后回到列表", timeout=60, scroll=True)
+            log("服务已删除")
+        else:
+            log("没有可清理的服务")
+        if find(nodes(ui_root()), "解除配对", exact=False) is not None:
+            tap_text("解除配对", timeout=30, scroll=True)
+            wait_for_text("连接云端网关", timeout=60)
+            log("清理完成：配对已解除")
+        else:
+            log("当前未配对，无需解除")
     except Exception as error:
         log(f"清理失败（不影响验收结论，但请手工处理）：{error}")
 
