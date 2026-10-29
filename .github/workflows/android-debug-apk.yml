@@ -32,6 +32,15 @@ jobs:
 
       - name: 安装 Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 默认的 `tools platform-tools` 里 `tools` 已从当前 SDK 仓库移除，
+          # 会让 action 在 sdkmanager 阶段直接失败。只装 platform-tools，
+          # 编译所需平台/构建工具在下一步显式安装。
+          packages: 'platform-tools'
+
+      - name: 安装 Android 35 平台与构建工具
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;34.0.0" "build-tools;35.0.0"
 
       # gradle.properties 里那行 aapt2 覆盖是给 arm64 主机用的 qemu 包装脚本，
       # runner 是真 x86_64，必须关掉，否则会去执行一个绝对路径下不存在的脚本。
