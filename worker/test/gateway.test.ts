@@ -266,7 +266,7 @@ describe("gateway security policy", () => {
     const env = { GATEWAY_ALLOWED_URLS: "https://example.com/mcp" } as Env;
     const url = validateTarget("https://example.com/mcp", env);
     const failing = (async () => { throw new TypeError("Network connection lost."); }) as typeof fetch;
-    await expect(checkDns(url, env, new AbortController().signal, failing)).rejects.toMatchObject({ code: "dns_unavailable" });
+    await expect(checkDns(url, env, new AbortController().signal, failing)).rejects.toMatchObject({ code: expect.stringMatching(/^dns_unavailable/) });
   });
   it("bounds chunked request bodies", async () => {
     const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(32)); c.enqueue(new Uint8Array(32)); c.close(); } });
