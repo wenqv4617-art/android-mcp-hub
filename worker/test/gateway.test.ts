@@ -227,7 +227,7 @@ describe("universal gateway: real HTTP + official SDK through Worker", () => {
     try {
       expect((await fetch(`${hub.url}/gateway`)).status).toBe(404);
       expect((await admin({ action: "list" })).status).toBe(404);
-      const owner = await sdk(TEST_MCP_TOKEN); expect((await owner.listTools()).tools).toHaveLength(6);
+      const owner = await sdk(TEST_MCP_TOKEN); expect((await owner.listTools()).tools).toHaveLength(7);
       expect((await owner.callTool({ name: await gatewayName("alpha", "status"), arguments: {} })).isError).toBe(true);
     } finally { rig.env.GATEWAY_ENABLED = "true"; }
   });

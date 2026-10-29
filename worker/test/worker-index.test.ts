@@ -64,6 +64,7 @@ describe("Worker / 路由", () => {
       "device_get_storage",
       "hub_list_tools",
       "hub_call_tool",
+      "hub_get_tool_schema",
     ]);
     expect(capabilities["server_initiated_notifications"]).toBe(false);
     // 默认 rig 不配置 OAUTH_OWNER_SECRET ⇒ OAuth 面整体不可用（回 404）。

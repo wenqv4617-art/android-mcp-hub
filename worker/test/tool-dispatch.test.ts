@@ -193,6 +193,7 @@ describe("工具层 / Gate 2 通用分发", () => {
       "device_get_storage",
       "hub_list_tools",
       "hub_call_tool",
+      "hub_get_tool_schema",
     ]);
   });
 

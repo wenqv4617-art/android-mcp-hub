@@ -15,6 +15,7 @@ import {
   DEVICE_GET_STORAGE_TOOL,
   dispatchToolCall,
   HUB_CALL_TOOL_TOOL,
+  HUB_GET_TOOL_SCHEMA_TOOL,
   HUB_LIST_TOOLS_TOOL,
   parsePhonePingArgs,
   PHONE_PING_TOOL,
@@ -45,7 +46,7 @@ const failOutcome: PingOutcome = {
 };
 
 describe("工具层 / 注册表", () => {
-  it("注册表是显式白名单：Gate 3 之后是本机四工具 + 两个聚合入口，一个不多", () => {
+  it("注册表是显式白名单：Gate 3.1 之后是本机四工具 + 三个聚合入口，一个不多", () => {
     // 这条断言刻意用 `toEqual` 整表比对而不是 `toContain`：
     // "多了一个没人审过的工具"必须让测试变红，而不是悄悄通过。
     // Gate 1 时期这里是 `["phone_ping"]`；Gate 2 加了 battery_get_status；
@@ -58,6 +59,8 @@ describe("工具层 / 注册表", () => {
       "device_get_storage",
       "hub_list_tools",
       "hub_call_tool",
+      // Gate 3.1：按需取单个工具的 input_schema（同样放末尾）。
+      "hub_get_tool_schema",
     ]);
     expect(PHONE_PING_TOOL.name).toBe("phone_ping");
     expect(BATTERY_GET_STATUS_TOOL.name).toBe("battery_get_status");
@@ -65,6 +68,7 @@ describe("工具层 / 注册表", () => {
     expect(DEVICE_GET_STORAGE_TOOL.name).toBe("device_get_storage");
     expect(HUB_LIST_TOOLS_TOOL.name).toBe("hub_list_tools");
     expect(HUB_CALL_TOOL_TOOL.name).toBe("hub_call_tool");
+    expect(HUB_GET_TOOL_SCHEMA_TOOL.name).toBe("hub_get_tool_schema");
   });
 
   it("两个新工具走 tool 通道、零能力参数、只读幂等", () => {
@@ -82,7 +86,7 @@ describe("工具层 / 注册表", () => {
     }
   });
 
-  it("每个工具都声明了自己的通道，且通道只有 ping / tool / hub_catalog / hub_tool 四种", () => {
+  it("每个工具都声明了自己的通道，且通道只有 ping / tool / hub_catalog / hub_schema / hub_tool 五种", () => {
     // 通道决定这个工具走 legacy phone_ping、Gate 2 的 tool_request，
     // 还是 Gate 3 的聚合命令名。写错一个字符就会让某个工具静默走错路线，
     // 所以这里逐条断言。
@@ -90,8 +94,9 @@ describe("工具层 / 注册表", () => {
     expect(BATTERY_GET_STATUS_TOOL.transport).toBe("tool");
     expect(HUB_LIST_TOOLS_TOOL.transport).toBe("hub_catalog");
     expect(HUB_CALL_TOOL_TOOL.transport).toBe("hub_tool");
+    expect(HUB_GET_TOOL_SCHEMA_TOOL.transport).toBe("hub_schema");
     for (const tool of TOOL_REGISTRY) {
-      expect(["ping", "tool", "hub_catalog", "hub_tool"]).toContain(tool.transport);
+      expect(["ping", "tool", "hub_catalog", "hub_schema", "hub_tool"]).toContain(tool.transport);
     }
   });
 

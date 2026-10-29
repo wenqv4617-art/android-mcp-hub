@@ -225,7 +225,13 @@ describe("安全 / 与既有生产项目完全隔离", () => {
 //    它挡不住刻意用 YAML 花招绕过的人，但足以挡住无意的越界。
 
 /** 只允许手动触发的**纯测试**工作流：不许有任何部署能力。 */
-const TEST_ONLY_WORKFLOWS = ["android-debug-apk.yml", "worker-gate1-check.yml"] as const;
+const TEST_ONLY_WORKFLOWS = [
+  "android-debug-apk.yml",
+  "android-online-acceptance.yml",
+  "android-device-acceptance.yml",
+  "android-release-apk.yml",
+  "worker-gate1-check.yml",
+] as const;
 
 /** 唯一的部署工作流。它存在的意义就是"部署"，所以对它适用另一套规则。 */
 const DEPLOY_WORKFLOW = "deploy-worker.yml";
@@ -315,15 +321,25 @@ function testOnlyWorkflowViolations(fileName: string, content: string): string[]
 
   // 禁的是"能力"而不是"单词"：注释里提一句 wrangler 无所谓，
   // 真正危险的是这条命令能跑起来、并且有凭据可用。
+  // 唯一允许被测试工作流读取的 Secrets：Android 验收用的配对口令，以及
+  // **交付 APK 的签名材料**。两者都不具备部署能力 —— 签名密钥只能用来给 APK
+  // 签名，配对码只能让一台设备连上已经部署好的 Worker。
+  // 其余任何 `secrets.*` 仍然一律视为越界：白名单是逐字列出来的，不是通配。
+  const ALLOWED_TEST_SECRETS =
+    /secrets\.(GATEWAY_ANDROID_PAIRING_CODE|ANDROID_KEYSTORE_BASE64|ANDROID_KEYSTORE_PASSWORD|ANDROID_KEY_ALIAS|ANDROID_KEY_PASSWORD)\b/g;
+
   const forbidden: Array<[string, RegExp]> = [
     ["部署命令", /\bwrangler\b[^\n]*\bdeploy\b/i],
     ["wrangler-action", /wrangler-action/i],
     ["Cloudflare 账号/API 凭据", /CLOUDFLARE_(API_TOKEN|API_KEY|ACCOUNT_ID|ZONE_ID)/i],
+    // 先剔掉白名单里的引用，剩下的 `secrets.` 才算违规。
     ["GitHub Secrets 注入", /secrets\.|secrets\[/],
     ["云凭据入参", /\bapiToken\b|\bapi_token\b|\bapiKey\b|\bapi_key\b/],
   ];
   for (const [what, re] of forbidden) {
-    if (re.test(body)) out.push(`不得包含${what}`);
+    const haystack =
+      what === "GitHub Secrets 注入" ? body.replace(ALLOWED_TEST_SECRETS, "ALLOWED_SECRET") : body;
+    if (re.test(haystack)) out.push(`不得包含${what}`);
   }
 
   // id-token: write 是 OIDC 换云厂商凭据的前提，等于把部署能力交出去。

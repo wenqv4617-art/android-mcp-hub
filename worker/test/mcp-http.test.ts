@@ -222,6 +222,7 @@ describe("MCP / tools/list", () => {
       "device_get_network",
       "device_get_storage",
       "hub_list_tools",
+      "hub_get_tool_schema",
     ];
     for (const tool of tools) {
       expect(typeof tool["description"]).toBe("string");
