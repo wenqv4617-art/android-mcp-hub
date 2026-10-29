@@ -38,6 +38,8 @@ import com.androidmcphub.app.protocol.PingOutcome
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * 进程内状态总线：前台服务往里写，界面（ViewModel/Compose）从里读。
@@ -128,6 +130,17 @@ class PhoneLinkService : Service() {
     private var connectivity: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    /**
+     * 聚合命令（第三方 MCP 工具）的工作线程池。
+     *
+     * 为什么要单独一组线程：`tool_request` 是在 **WebSocket 读线程**上被处理的
+     * （`PhoneLinkClient.onMessage` → `PhoneLink.onTextFrame`）。一次目录刷新要连
+     * 几台第三方服务器，把它放在读线程上，期间连心跳帧都读不出来 —— 实测里
+     * 并发的 `phone_ping` 超时就是这么发生的。线程数刻意很小（2）：聚合命令在
+     * 协议上是低频动作，多开线程不会更快，只会多出几个并发重连。
+     */
+    private var hubWorkers: ExecutorService? = null
+
     private val handler = Handler(Looper.getMainLooper())
 
     /** 服务启动时刻，用于会话僵死看门狗（还没收到过任何服务端帧时的兜底起点）。 */
@@ -174,6 +187,10 @@ class PhoneLinkService : Service() {
         unregisterNetworkCallback()
         client?.shutdown()
         client = null
+        // 在工作线程上的聚合命令会各自跑到自己的超时后退出；这里不等待它们，
+        // 只保证不会再有新的任务被提交进来。
+        hubWorkers?.shutdown()
+        hubWorkers = null
         LinkBus.publishServiceRunning(false)
         LinkBus.resetLink()
         LinkBus.log.info("前台服务已销毁")
@@ -225,7 +242,13 @@ class PhoneLinkService : Service() {
                     serverStore = McpStores.serverStore(this),
                     authorizationStore = McpStores.authorizationStore(this),
                     enabled = { prefs.capabilitiesEnabled() },
+                    // 分阶段耗时写进界面日志：目录请求慢的时候，第一条要看的就是
+                    // "这 13 秒花在哪一段"。日志里只有 request_id/阶段名/耗时，
+                    // 没有令牌、地址、参数值或工具描述。
+                    log = { line -> LinkBus.log.add(LogLevel.INFO, line) },
                 ),
+                // 5.5：聚合命令离开读线程。
+                hubExecutor = hubWorkerPool(),
             ),
         ).also { created ->
             client = created
@@ -234,6 +257,11 @@ class PhoneLinkService : Service() {
 
         link.start()
     }
+
+    /** [hubWorkers] 的懒创建；服务销毁时统一关闭。 */
+    private fun hubWorkerPool(): ExecutorService = hubWorkers ?: Executors.newFixedThreadPool(HUB_WORKERS) {
+        Thread(it, "hub-work").apply { isDaemon = true }
+    }.also { hubWorkers = it }
 
     /**
      * 前台服务启动失败后的收尾（审计 R3）。
@@ -435,6 +463,14 @@ class PhoneLinkService : Service() {
         private const val STALE_SESSION_TIMEOUT_MS = 5 * 60 * 1000L
 
         private const val WATCHDOG_INTERVAL_MS = 60 * 1000L
+
+        /**
+         * 聚合命令的并发线程数。
+         *
+         * 2 个足够：协议上服务端一次只会等一条 `tool_request` 的结果，多开的线程
+         * 只会在"用户手快点了两次"时各跑各的，而不是把一次目录刷新拆得更快。
+         */
+        private const val HUB_WORKERS = 2
 
         const val ACTION_CONNECT = "com.androidmcphub.app.action.CONNECT"
         const val ACTION_DISCONNECT = "com.androidmcphub.app.action.DISCONNECT"

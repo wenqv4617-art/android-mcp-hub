@@ -82,6 +82,19 @@ class PhoneLinkClient(
             }
             onPing(outcome)
         }
+        // 聚合命令的结果从工作线程回来：**不在这里碰 socket**，而是投回本类的
+        // 单线程调度器，让"发帧"与其它动作（心跳、重连）排在同一条时间线上。
+        l.onToolResultReady = { outcome ->
+            val frame = outcome.frame
+            if (frame == null) {
+                log(LogLevel.WARN, "聚合命令结果没有可发送的帧，已丢弃")
+            } else {
+                scheduler.execute { runCatching { sendFrame(frame) } }
+            }
+        }
+        // 告诉分发器"异步结果送到这里来"。设置它就是开启异步聚合执行的前提
+        // （见 CapabilityDispatcher.hubExecutor）。
+        capabilityDispatcher.deferredSink = { outcome -> l.deliverToolResult(outcome) }
     }
 
     private val socketLock = Any()
@@ -154,6 +167,9 @@ class PhoneLinkClient(
     /** 服务销毁时调用。 */
     fun shutdown() {
         stop()
+        // 先关聚合路由器（它的刷新线程池与目录缓存），再关调度器：
+        // 反过来的话，在飞的结果会撞上一个已经不收任务的调度器。
+        runCatching { capabilityDispatcher.close() }
         scheduler.shutdownNow()
     }
 

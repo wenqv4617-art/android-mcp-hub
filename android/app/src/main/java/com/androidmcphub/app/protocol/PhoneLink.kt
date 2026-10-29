@@ -1,6 +1,7 @@
 package com.androidmcphub.app.protocol
 
 import com.androidmcphub.app.capability.CapabilityDispatcher
+import com.androidmcphub.app.capability.ToolDispatchOutcome
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.SocketFailure
@@ -478,6 +479,38 @@ class PhoneLink(
             return emptyList()
         }
 
+        if (outcome.deferred) {
+            // 已受理，结果稍后异步交付（见 [onToolResultReady]）。
+            // 这里**必须**立刻返回空动作：聚合命令是网络 I/O，读线程上等它就等于
+            // 让整条连接（连心跳）一起停摆。
+            log(LogLevel.INFO, "工具调用 tool=${outcome.toolName} 已受理，结果稍后回发")
+            return emptyList()
+        }
+
+        logOutcome(outcome)
+        val frame = outcome.frame ?: return emptyList()
+        return listOf(LinkAction.Send(frame))
+    }
+
+    /**
+     * 异步（聚合命令）结果的落地口。
+     *
+     * 由传输层设置：必须在**它自己的调度线程**上把帧发出去，不得在本回调里直接碰
+     * socket，也不得回头调用 [PhoneLink] 的任何方法（这条回调是从工作线程来的）。
+     */
+    var onToolResultReady: ((ToolDispatchOutcome) -> Unit)? = null
+
+    /**
+     * 把一条**已结束**的聚合命令结果交给上层发送。由工作线程调用。
+     *
+     * 只做日志与转发；不读写任何连接状态，因此不需要 [lock]。
+     */
+    fun deliverToolResult(outcome: ToolDispatchOutcome) {
+        logOutcome(outcome)
+        onToolResultReady?.invoke(outcome)
+    }
+
+    private fun logOutcome(outcome: ToolDispatchOutcome) {
         if (outcome.ok) {
             log(LogLevel.INFO, "工具调用 tool=${outcome.toolName} 成功，耗时 ${outcome.elapsedMs}ms")
         } else {
@@ -486,9 +519,6 @@ class PhoneLink(
                 "工具调用 tool=${outcome.toolName} 失败 code=${outcome.errorCode} 耗时 ${outcome.elapsedMs}ms",
             )
         }
-
-        val frame = outcome.frame ?: return emptyList()
-        return listOf(LinkAction.Send(frame))
     }
 
     /**

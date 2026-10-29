@@ -4,6 +4,8 @@ import com.androidmcphub.app.protocol.RequestIdLru
 import com.androidmcphub.app.protocol.ToolResultErrorCode
 import com.androidmcphub.app.protocol.encodeToolResult
 import org.json.JSONObject
+import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 
 /** Gate 2：工具去重窗口大小（与 `PING_DEDUP_CAPACITY` 同量级）。 */
 const val TOOL_DEDUP_CAPACITY = 256
@@ -90,8 +92,17 @@ data class ToolDispatchOutcome(
     val elapsedMs: Long,
     /** 重复的 request_id：帧为 null，且**没有**执行任何能力。 */
     val duplicate: Boolean,
-    /** 要回发的 `tool_result` 帧；[duplicate] 时为 null。 */
+    /** 要回发的 `tool_result` 帧；[duplicate] 或 [deferred] 时为 null。 */
     val frame: String?,
+    /**
+     * 已受理，结果稍后**异步**交付（见 [CapabilityDispatcher.deferredSink]）。
+     *
+     * 只有聚合命令会走这条：第三方工具是网络 I/O，不能在 WebSocket 读线程上执行
+     * （那会把 `phone_ping` 一起堵住 —— 实测的并发超时就是这么来的）。
+     * [deferred] 为 true 时调用方**不要**回帧，也不要把它当成失败：
+     * 一次真正到达的结果会以另一条独立的 outcome 交回来。
+     */
+    val deferred: Boolean = false,
 )
 
 /** 未知/非法工具名在日志与返回值里的统一占位符。 */
@@ -156,7 +167,28 @@ class CapabilityDispatcher(
      * 白名单路径 —— 永远不可能借道绕过本机白名单。
      */
     private val hubCommands: HubCommandRouter? = null,
+    /**
+     * 执行聚合命令的执行器（V1 性能专项 5.5）。
+     *
+     * `null`（默认）意味着**同步执行**，这也是所有既有测试的语义。生产接线时传一个
+     * 小线程池，让第三方网络 I/O 离开 `WebSocket` 读线程：读线程被一次目录刷新占用
+     * 期间，连 `phone_ping` 的帧都读不出来，服务端看到的就是"整条链路卡死"。
+     *
+     * 只有[聚合命令][HubCommandRouter]会被丢到这里；本机能力（电池、网络等）全是
+     * 本地同步调用，走执行器只会白添一层调度延迟。
+     */
+    private val hubExecutor: Executor? = null,
 ) {
+
+    /**
+     * 异步结果的落地口（只在 [hubExecutor] 非 null 时使用）。
+     *
+     * 由持有连接的一侧（`PhoneLinkClient`）设置：它在**自己的调度线程**上把帧发出去，
+     * 而不是在刷新的工作线程上直接碰 socket。没设置时退回同步执行 ——
+     * 结果宁可慢一点，也不能因为"没人接"而丢掉。
+     */
+    @Volatile
+    var deferredSink: ((ToolDispatchOutcome) -> Unit)? = null
 
     /**
      * 显式白名单。构造时一次性建立，**没有**运行期注册/注销接口 ——
@@ -223,22 +255,38 @@ class CapabilityDispatcher(
             //      一个都进不来（见 [HubCommandRouter.handles] 的契约）。
             val hub = hubCommands?.takeIf { it.handles(toolName) }
             if (hub != null) {
-                val hubResult = try {
-                    hub.route(toolName, arguments)
-                } catch (t: Throwable) {
-                    // 兜底：路由器自己承诺不抛，但远端数据不可信，这里不赌它守约。
-                    CapabilityResult.Failure(
-                        code = ToolResultErrorCode.TOOL_FAILED,
-                        message = "第三方工具调用失败（${t.javaClass.simpleName}）",
-                    )
+                // 去重是**同步**做完的（就在上面）：同一个 request_id 并发到达两次时，
+                // 第二次必须在第一次受理的那一刻就判重，而不是等结果回来再判 ——
+                // 否则"异步"就等于把重放窗口打开。
+                val executor = hubExecutor
+                val sink = deferredSink
+                if (executor != null && sink != null) {
+                    val task = Runnable {
+                        val outcome = runHub(hub, requestId, toolName, arguments, startedAt)
+                        // sink 自己承诺不抛；再包一层是因为它的实现在连接生命周期里，
+                        // 一个异常不该让刷新线程静默退出。
+                        runCatching { sink(outcome) }
+                    }
+                    return@synchronized try {
+                        executor.execute(task)
+                        ToolDispatchOutcome(
+                            requestId = requestId,
+                            toolName = toolName,
+                            ok = false,
+                            errorCode = null,
+                            elapsedMs = clock() - startedAt,
+                            duplicate = false,
+                            frame = null,
+                            deferred = true,
+                        )
+                    } catch (_: RejectedExecutionException) {
+                        // 执行器已关闭（服务正在销毁）：就地把这一条跑完。
+                        // 用"不回复"来换"不阻塞读线程"在这里是不划算的 ——
+                        // 服务端会一直等到超时，而用户看到的是"手机没反应"。
+                        runHub(hub, requestId, toolName, arguments, startedAt)
+                    }
                 }
-                return@synchronized settle(
-                    requestId = requestId,
-                    // 保留命令名是我们自己的常量，回显它是安全的（它已经过 handles 判定）。
-                    toolName = toolName,
-                    result = hubResult,
-                    startedAt = startedAt,
-                )
+                return@synchronized runHub(hub, requestId, toolName, arguments, startedAt)
             }
 
             // 2/3. 工具名：形状不合法或不在白名单，都收敛成 unsupported_tool。
@@ -326,6 +374,43 @@ class CapabilityDispatcher(
                 startedAt = startedAt,
             )
         }
+
+    /**
+     * 跑一条聚合命令并收口成 outcome。
+     *
+     * **不持锁**：这是本类唯一会离开内部锁的路径，因为它必然包含网络 I/O。
+     * 它读写的东西都是局部变量或线程安全的存储（路由器自己有锁），
+     * 所以不需要也不应该把 [lock] 带过去。
+     */
+    private fun runHub(
+        hub: HubCommandRouter,
+        requestId: String,
+        toolName: String,
+        arguments: JSONObject,
+        startedAt: Long,
+    ): ToolDispatchOutcome {
+        val hubResult = try {
+            hub.routeWithId(requestId, toolName, arguments)
+        } catch (t: Throwable) {
+            // 兜底：路由器自己承诺不抛，但远端数据不可信，这里不赌它守约。
+            CapabilityResult.Failure(
+                code = ToolResultErrorCode.TOOL_FAILED,
+                message = "第三方工具调用失败（${t.javaClass.simpleName}）",
+            )
+        }
+        // 保留命令名是我们自己的常量，回显它是安全的（它已经过 handles 判定）。
+        return settle(
+            requestId = requestId,
+            toolName = toolName,
+            result = hubResult,
+            startedAt = startedAt,
+        )
+    }
+
+    /** 释放聚合路由器（线程池、目录缓存）。幂等；本机能力没有任何需要释放的东西。 */
+    fun close() {
+        hubCommands?.close()
+    }
 
     /**
      * 把一次执行的结论变成 [ToolDispatchOutcome]（含要回发的帧）。

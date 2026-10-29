@@ -45,4 +45,22 @@ interface HubCommandRouter {
      * @param arguments 对端给的参数（可能包含任意垃圾；多余字段、超长文本、非法类型都由实现拒绝）。
      */
     fun route(toolName: String, arguments: JSONObject): CapabilityResult
+
+    /**
+     * 带 `request_id` 的入口：只用于**诊断关联**，不参与任何判定。
+     *
+     * 默认实现直接转调 [route]，所以不认识 request_id 的实现（以及所有测试替身）
+     * 不需要改。实现者唯一需要遵守的是：这个 id 只能出现在日志里，
+     * 不得进入返回值、不得进入任何与第三方的交互。
+     */
+    fun routeWithId(requestId: String, toolName: String, arguments: JSONObject): CapabilityResult =
+        route(toolName, arguments)
+
+    /**
+     * 释放实现持有的资源（线程池、缓存）。默认无操作。
+     *
+     * 分发器在 Android 前台服务销毁时调用一次；必须幂等，且**不得**等待正在进行的
+     * 远端操作 —— 那些操作各自有超时，会在自己的期限内退出。
+     */
+    fun close() = Unit
 }
