@@ -57,32 +57,49 @@ export function publicAddress(value: string): boolean {
   try { return ipaddr.parse(value).range() === "unicast"; } catch { return false; }
 }
 
+/** DoH JSON 提供方，按顺序尝试。
+ *
+ * 线上实测 `cloudflare-dns.com` 的 DoH 端点从 Worker 子请求里连不通（TLS/连接被重置），
+ * 只用一个提供方会让所有上游发现都变成 dns_unavailable。多个提供方互为退路，任意一个
+ * 给出确定答案即可；全部不可达才算 “DNS 不可用”，仍然失败关闭。 */
+const DOH_PROVIDERS: Array<(host: string, type: string) => string> = [
+  (host, type) => `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=${type}`,
+  (host, type) => `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=${type}`,
+];
+
+interface DohAnswer { Status?: number; Answer?: { type: number; data: string }[] }
+
 /** Workers cannot pin fetch's DNS resolution. DoH is an extra check; the exact
  * endpoint allowlist is the trust boundary against DNS rebinding (see report). */
 export async function checkDns(url: URL, env: Env, signal: AbortSignal, network: typeof fetch = fetch): Promise<void> {
   if (env.ENVIRONMENT === "gateway-local-test" && url.hostname === "127.0.0.1") return;
   const answers = await Promise.all(["A", "AAAA"].map(async type => {
-    let response: Response;
-    try {
-      response = await network(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(url.hostname)}&type=${type}`, {
-        headers: { Accept: "application/dns-json" }, redirect: "error", signal,
-      });
-    } catch (error) {
-      // DoH 本身不可达与「域名解析到私网地址」是两件事：分开报，便于线上排障，
-      // 但都不回显上游返回内容。
-      if (error instanceof GatewayError) throw error;
-      throw new GatewayError("dns_unavailable", 503);
+    // “确定答案”（NXDOMAIN / 私网地址）立刻拒绝；只有“提供方不可达”才换下一个。
+    let unavailable = false;
+    for (const provider of DOH_PROVIDERS) {
+      let response: Response;
+      try {
+        response = await network(provider(url.hostname, type), {
+          headers: { Accept: "application/dns-json" }, redirect: "error", signal,
+        });
+      } catch (error) {
+        if (error instanceof GatewayError) throw error;
+        unavailable = true;
+        continue;
+      }
+      if (!response.ok) { unavailable = true; continue; }
+      let data: DohAnswer;
+      try {
+        data = JSON.parse(await boundedText(response.body, 16384)) as DohAnswer;
+      } catch (error) {
+        if (error instanceof GatewayError) throw error;
+        unavailable = true;
+        continue;
+      }
+      if (data.Status !== 0) throw new GatewayError("dns_denied");
+      return (data.Answer ?? []).filter(a => a.type === 1 || a.type === 28).map(a => a.data);
     }
-    if (!response.ok) throw new GatewayError("dns_denied");
-    let data: { Status?: number; Answer?: { type: number; data: string }[] };
-    try {
-      data = JSON.parse(await boundedText(response.body, 16384)) as typeof data;
-    } catch (error) {
-      if (error instanceof GatewayError) throw error;
-      throw new GatewayError("dns_denied");
-    }
-    if (data.Status !== 0) throw new GatewayError("dns_denied");
-    return (data.Answer ?? []).filter(a => a.type === 1 || a.type === 28).map(a => a.data);
+    throw new GatewayError(unavailable ? "dns_unavailable" : "dns_denied", unavailable ? 503 : 400);
   }));
   const ips = answers.flat();
   if (!ips.length || ips.some(ip => !publicAddress(ip))) throw new GatewayError("dns_denied");

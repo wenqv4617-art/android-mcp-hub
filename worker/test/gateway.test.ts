@@ -248,6 +248,26 @@ describe("gateway security policy", () => {
     await expect(checkDns(url, env, new AbortController().signal, (async () => { count++; return new Response(JSON.stringify({ Status: 0, Answer: [{ type: 1, data: "169.254.169.254" }] })); }) as typeof fetch)).rejects.toThrow();
     expect(count).toBe(2);
   });
+  it("falls back to the next DoH provider when the first is unreachable", async () => {
+    const env = { GATEWAY_ALLOWED_URLS: "https://example.com/mcp" } as Env;
+    const url = validateTarget("https://example.com/mcp", env);
+    const urls: string[] = [];
+    const network = (async (input: string | URL | Request) => {
+      const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(href);
+      if (href.includes("cloudflare-dns.com")) throw new TypeError("Network connection lost.");
+      return new Response(JSON.stringify({ Status: 0, Answer: [{ type: 1, data: "93.184.216.34" }, { type: 28, data: "2606:2800:220:1::1" }] }));
+    }) as typeof fetch;
+    await expect(checkDns(url, env, new AbortController().signal, network)).resolves.toBeUndefined();
+    expect(urls.filter(u => u.includes("cloudflare-dns.com"))).toHaveLength(2);
+    expect(urls.filter(u => u.includes("dns.google"))).toHaveLength(2);
+  });
+  it("reports dns_unavailable only when every DoH provider is unreachable", async () => {
+    const env = { GATEWAY_ALLOWED_URLS: "https://example.com/mcp" } as Env;
+    const url = validateTarget("https://example.com/mcp", env);
+    const failing = (async () => { throw new TypeError("Network connection lost."); }) as typeof fetch;
+    await expect(checkDns(url, env, new AbortController().signal, failing)).rejects.toMatchObject({ code: "dns_unavailable" });
+  });
   it("bounds chunked request bodies", async () => {
     const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(32)); c.enqueue(new Uint8Array(32)); c.close(); } });
     await expect(boundedText(stream, 48)).rejects.toThrow("size_limit");
