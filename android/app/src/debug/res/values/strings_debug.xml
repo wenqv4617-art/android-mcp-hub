@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug 构建的应用名覆盖。
+
+  目的只有一个：让「开发用 debug APK」与「固定签名的交付 APK」在桌面上也能一眼区分。
+  两者签名不同，本来就无法互相覆盖安装；名字再一样的话，用户只能靠"应用未安装"
+  这种报错去猜自己装的是哪一个。
+-->
+<resources>
+    <string name="app_name">MCP Hub DEV</string>
+</resources>

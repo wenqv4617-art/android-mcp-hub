@@ -33,11 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.androidmcphub.app.gateway.GatewayService
 import com.androidmcphub.app.gateway.GatewayUiState
 import com.androidmcphub.app.gateway.gatewayErrorText
 import com.androidmcphub.app.mcp.McpUrlPolicy
+import com.androidmcphub.app.ui.components.CopyableRow
 import com.androidmcphub.app.ui.components.EmptyState
 import com.androidmcphub.app.ui.components.HubTextField
 import com.androidmcphub.app.ui.components.NavRow
@@ -537,6 +539,9 @@ private fun LocalServerRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            // Hub 内部 ID：模型调用时填的 server_id。用户给服务器起的名字常常和
+            // 服务器自报的名字长得一样，只有这一行是**永远不会变、也永远唯一**的那个。
+            CopyableRow(label = "ID", value = view.config.id, labelWidth = 24.dp, maxLines = 1)
             Text(
                 text = statusText(view),
                 style = MaterialTheme.typography.bodySmall,

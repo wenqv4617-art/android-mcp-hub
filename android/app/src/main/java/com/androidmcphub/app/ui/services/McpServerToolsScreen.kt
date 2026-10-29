@@ -21,10 +21,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.androidmcphub.app.mcp.McpUrlPolicy
 import com.androidmcphub.app.mcp.store.McpAuthorizationState
+import com.androidmcphub.app.ui.components.CopyableRow
 import com.androidmcphub.app.ui.components.InfoRow
 import com.androidmcphub.app.ui.components.PageHeader
 import com.androidmcphub.app.ui.components.SectionCard
@@ -86,6 +87,22 @@ fun McpServerToolsScreen(
                 title = "服务器",
                 modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
             ) {
+                // 三个名字刻意分开显示：用户起的名字、服务器自报的名字、Hub 内部 ID。
+                // 它们经常长得完全不一样，而只有最后一个是模型调用时要填的 server_id。
+                InfoRow(label = "我的名称", value = view.config.name)
+                InfoRow(
+                    label = "服务器自报名",
+                    value = (view.discovery as? McpDiscovery.Ready)?.serverName?.takeIf { it.isNotBlank() }
+                        ?: "（服务器未提供）",
+                )
+                CopyableRow(label = "Hub 内部 ID", value = view.config.id)
+                Text(
+                    text = "模型调用时用这个 ID 作为 server_id（hub_list_tools / hub_get_tool_schema / hub_call_tool）。" +
+                        "它不是地址，也不含认证信息。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = spacing.xs),
+                )
                 InfoRow(label = "完整地址", value = view.config.url, monospace = true)
                 ServerStatusInfo(view)
                 SettingSwitchRow(
@@ -186,11 +203,8 @@ private fun ServerStatusInfo(view: McpServerView) {
         McpDiscovery.Never -> "尚未发现"
         McpDiscovery.Discovering -> "正在发现…"
         is McpDiscovery.Failed -> "失败：${discovery.reason}"
-        is McpDiscovery.Ready -> buildString {
-            append("已连接")
-            discovery.serverName?.takeIf { it.isNotBlank() }?.let { append("（$it）") }
-            append("，协议版本 ${discovery.protocolVersion}")
-        }
+        // 服务器自报名单独一行展示（见上面的「服务器自报名」），这里只报连接状态。
+        is McpDiscovery.Ready -> "已连接，协议版本 ${discovery.protocolVersion}"
     }
     InfoRow(label = "状态", value = text)
 }
@@ -220,14 +234,8 @@ private fun ToolAuthorizationRow(
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Text(
-            text = "远端名称：${tool.name}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontFamily = FontFamily.Monospace,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        // 这是工具的**原始名**（hub_call_tool 的 tool_name），不是界面标题。
+        CopyableRow(label = "远端名称", value = tool.name, labelWidth = 72.dp, maxLines = 1)
         if (tool.description.isNotBlank()) {
             Text(
                 text = tool.description,
