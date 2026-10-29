@@ -1,4 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.File
+import java.util.Base64
 
 // ---------------------------------------------------------------------------
 // :app —— 唯一模块（骨架阶段：一屏 UI + 一条长连接）
@@ -8,6 +10,43 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+// ---------------------------------------------------------------------------
+// 交付 APK 的固定签名（V1.6）
+//
+// 为什么必须固定：debug keystore 每台机器都不一样、还有 30 天有效期，用它签出来的
+// APK 既不能覆盖安装上一版，也不能覆盖装到别人的手机上。日常交付 APK 必须由**同一把
+// 长期密钥**签，用户才能直接覆盖升级而不丢数据。
+//
+// 密钥**永远不进仓库**：CI 从 GitHub Secrets 取 base64 写到临时目录；本地从
+//   $ANDROID_KEYSTORE_FILE（或 ANDROID_KEYSTORE_BASE64）+ 三个口令变量读。
+// 四个变量：
+//   ANDROID_KEYSTORE_FILE    / ANDROID_KEYSTORE_BASE64（二选一）
+//   ANDROID_KEYSTORE_PASSWORD
+//   ANDROID_KEY_ALIAS
+//   ANDROID_KEY_PASSWORD（缺省时与 store 口令相同）
+//
+// 没配置时 `assembleRelease` 会**直接失败**，而不是产出一个 unsigned 的、
+// 装上就"应用未安装"的 APK —— 那种失败要到用户手里才会暴露。
+// ---------------------------------------------------------------------------
+val signingStoreFile: String? = System.getenv("ANDROID_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+val signingStoreBase64: String? = System.getenv("ANDROID_KEYSTORE_BASE64")?.takeIf { it.isNotBlank() }
+val signingStorePassword: String? = System.getenv("ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+val signingKeyAlias: String? = System.getenv("ANDROID_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+val signingKeyPassword: String? = System.getenv("ANDROID_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+
+val releaseKeystoreFile: File? = run {
+    val fromPath = signingStoreFile?.let(::File)?.takeIf { it.isFile }
+    val fromBase64 = signingStoreBase64?.let { encoded ->
+        File(layout.buildDirectory.get().asFile, "signing/release.jks").also { target ->
+            target.parentFile?.mkdirs()
+            target.writeBytes(Base64.getDecoder().decode(encoded))
+        }
+    }
+    fromPath ?: fromBase64
+}
+val releaseSigningReady: Boolean =
+    releaseKeystoreFile != null && signingStorePassword != null && signingKeyAlias != null
 
 android {
     namespace = "com.androidmcphub.app"
@@ -21,13 +60,30 @@ android {
         versionName = libs.versions.appVersionName.get()
     }
 
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword ?: signingStorePassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // Debug APK 与交付 APK 明确区分：应用名多一个 DEV 后缀，版本名多一个 -debug。
+            // 两者签名不同，本来就不能互相覆盖 —— 这里让它们在桌面和「关于」里也一眼可辨。
+            versionNameSuffix = "-debug"
+            // 应用名覆盖放在 src/debug/res/values/strings_debug.xml（同名资源按构建类型覆盖）。
         }
         release {
             // 骨架阶段不开混淆；规则文件已就位，将来开启时直接生效。
             isMinifyEnabled = false
+            // 没有签名就保持 null，由下面的守卫任务让 assembleRelease 失败。
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -179,4 +235,21 @@ tasks.register<Exec>("verifyManifestClasses") {
 // 挂到 check 上，所以 `./gradlew check` 会跑（注意方向：verify 依赖 assemble，不能反过来）
 tasks.named("check") {
     dependsOn("verifyManifestClasses")
+}
+
+// ---------------------------------------------------------------------------
+// V1.6：交付 APK 必须带固定签名
+//
+// 没配置签名时 AGP 会安静地产出一个 `app-release-unsigned.apk`，构建还是绿色的；
+// 而它装到手机上只会得到"应用未安装"。失败必须在构建机上发生，不是在用户手上。
+// ---------------------------------------------------------------------------
+tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+    doFirst {
+        if (!releaseSigningReady) {
+            throw GradleException(
+                "缺少交付签名材料：请设置 ANDROID_KEYSTORE_FILE（或 ANDROID_KEYSTORE_BASE64）、" +
+                    "ANDROID_KEYSTORE_PASSWORD、ANDROID_KEY_ALIAS、ANDROID_KEY_PASSWORD。",
+            )
+        }
+    }
 }

@@ -144,7 +144,7 @@ class PhoneLinkProtocolTest {
         assertEquals("hello", hello.getString("type"))
         assertEquals("test-phone-1", hello.getString("device_id"))
         assertEquals("phone-link-v1", hello.getString("protocol_version"))
-        assertEquals("0.1.4-gate1", hello.getString("app_version"))
+        assertEquals("1.6.0", hello.getString("app_version"))
         assertEquals(35, hello.getInt("android_sdk"))
     }
 
@@ -165,8 +165,8 @@ class PhoneLinkProtocolTest {
     @Test
     fun `常量与契约一致`() {
         assertEquals("phone-link-v1", PROTOCOL_VERSION)
-        assertEquals("0.1.4-gate1", APP_VERSION)
-        assertEquals("android-mcp-hub/0.1.4-gate1", CLIENT_VERSION)
+        assertEquals("1.6.0", APP_VERSION)
+        assertEquals("android-mcp-hub/1.6.0", CLIENT_VERSION)
         assertEquals(256, PING_DEDUP_CAPACITY)
     }
 
@@ -177,15 +177,17 @@ class PhoneLinkProtocolTest {
      *
      * 应用版本号也是同一种结构：`gradle/libs.versions.toml` 的 `appVersionName` 决定 APK 上显示的
      * versionName，`PhoneLinkProtocol.APP_VERSION` 决定握手时上报给服务端的 `app_version`。
-     * 这两个值必须永远相等，否则审计时"APK 显示 0.1.4-gate1"和"日志里上报 0.1.1-gate0.1"会对不上，
+     * 这两个值必须永远相等，否则审计时"APK 显示 1.6.0"和"日志里上报 0.1.1-gate0.1"会对不上，
      * 而两条链路（构建脚本 / 运行时代码）平时根本不会互相校验。
      */
     @Test
     fun `APP_VERSION 与 Gradle 的 versionName 必须一致`() {
+        // Debug 构建会带 `-debug` 后缀（用来和固定签名的交付 APK 区分），
+        // 而上报给服务端的 app_version 是**应用版本**，不带构建类型后缀。
         assertEquals(
             "版本号有两处来源：gradle/libs.versions.toml 的 appVersionName 与 " +
                 "PhoneLinkProtocol.APP_VERSION。改了其中一个就必须改另一个。",
-            BuildConfig.VERSION_NAME,
+            BuildConfig.VERSION_NAME.removeSuffix("-debug"),
             APP_VERSION,
         )
         assertEquals("android-mcp-hub/$APP_VERSION", CLIENT_VERSION)

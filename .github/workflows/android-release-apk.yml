@@ -1,0 +1,180 @@
+# 交付 APK：用**固定签名**构建两次并证明两次产物同证书、第二次能覆盖安装第一次。
+#
+# 能不能碰生产：不能，而且是结构上不能 ——
+#   * 只有 workflow_dispatch，push / PR / 定时都不会触发；
+#   * 没有 Cloudflare 凭据、没有 wrangler、没有任何 deploy 步骤；
+#   * permissions 只有 contents: read，发不了 Release；
+#   * 读取的 Secrets 只有四个 ANDROID_KEY*（签名材料）。签名密钥只能给 APK 签名，
+#     拿不到任何部署权限；密钥只落盘在 $RUNNER_TEMP，不进仓库、不进日志、不进 APK。
+#
+# 为什么"两次构建"是必要的：用户要求"日常 APK 能覆盖安装"。覆盖安装的充要条件
+# 是**同一个 applicationId + 同一个签名证书**。只构建一次是证明不了这一点的 ——
+# 密钥一旦换了（或 CI 每次用随机 debug key），第二次就装不上，而错误只会在用户
+# 手机上以"应用未安装"暴露。所以这里把"同证书"做成一条门禁，而不是一句承诺。
+name: Android Release APK (Fixed Signature)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_emulator_install:
+        description: '在模拟器上验证"第二次覆盖安装第一次"（多花约 8 分钟）'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  release-apk:
+    name: 固定签名构建与证书校验
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: 安装 Android 35 平台与构建工具
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      # gradle.properties 里那行 aapt2 覆盖是给 arm64 主机用的 qemu 包装脚本。
+      - name: 关闭 aarch64 专用的 aapt2 覆盖
+        run: |
+          sed -i 's|^android\.aapt2FromMavenOverride=.*|# (CI) aapt2 override disabled: x86_64 runner uses the Maven one|' android/gradle.properties
+
+      # 签名材料只写进 $RUNNER_TEMP：不在工作区里，因此不会被 upload-artifact 或
+      # git 误收；也不 echo 任何口令。
+      - name: 准备签名密钥（只在 runner 临时目录）
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "::error::缺少 ANDROID_KEYSTORE_BASE64（见 docs/ANDROID_RELEASE_SIGNING.md）"
+            exit 1
+          fi
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          chmod 600 "$RUNNER_TEMP/release.jks"
+          echo "密钥已写入 runner 临时目录（未输出内容）"
+
+      - name: 单元测试
+        working-directory: android
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: 第一次构建 Release APK
+        working-directory: android
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: 保存第一次产物
+        run: |
+          set -euo pipefail
+          cp android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/build1.apk"
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/build1.apk" | grep 'SHA-256 digest' | head -1 | sed 's/.*: //' > "$RUNNER_TEMP/cert1.txt"
+          echo "build1 cert: $(cat "$RUNNER_TEMP/cert1.txt")"
+
+      - name: 清理后第二次构建 Release APK
+        working-directory: android
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stop
+          ./gradlew --no-daemon clean
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: 校验两次构建证书一致
+        run: |
+          set -euo pipefail
+          cp android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/build2.apk"
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/build2.apk" | grep 'SHA-256 digest' | head -1 | sed 's/.*: //' > "$RUNNER_TEMP/cert2.txt"
+          echo "build2 cert: $(cat "$RUNNER_TEMP/cert2.txt")"
+          if ! diff -u "$RUNNER_TEMP/cert1.txt" "$RUNNER_TEMP/cert2.txt"; then
+            echo "::error::两次构建的签名证书不一致 —— 交付 APK 无法覆盖安装"
+            exit 1
+          fi
+          "$BT/apksigner" verify "$RUNNER_TEMP/build2.apk"
+          cp "$RUNNER_TEMP/build2.apk" "$RUNNER_TEMP/Android-MCP-Hub-release.apk"
+          sha256sum "$RUNNER_TEMP/Android-MCP-Hub-release.apk" | tee "$RUNNER_TEMP/sha256.txt"
+
+      - name: 记录到 Job Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Android MCP Hub · 固定签名交付 APK"
+            echo
+            echo "- 证书 SHA-256（两次构建一致）：\`$(cat "$RUNNER_TEMP/cert1.txt")\`"
+            echo "- APK SHA-256："
+            echo '```'
+            cat "$RUNNER_TEMP/sha256.txt"
+            echo '```'
+            echo
+            echo "安装：\`adb install -r Android-MCP-Hub-release.apk\`；"
+            echo "从旧 debug 签名版本切换时需要先卸载（签名不同，Android 不允许覆盖）。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传交付 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-MCP-Hub-release-apk
+          path: |
+            ${{ runner.temp }}/Android-MCP-Hub-release.apk
+            ${{ runner.temp }}/build1.apk
+            ${{ runner.temp }}/build2.apk
+            ${{ runner.temp }}/sha256.txt
+            ${{ runner.temp }}/cert1.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  overwrite-install:
+    name: 模拟器覆盖安装验证
+    needs: release-apk
+    if: ${{ github.event.inputs.run_emulator_install != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: Android-MCP-Hub-release-apk
+          path: ${{ runner.temp }}/apks
+
+      - name: 启用 KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # 先装 build1，再装 build2。第二条用 `adb install -r`：若签名不同，
+      # 这里会以 INSTALL_FAILED_UPDATE_INCOMPATIBLE 失败 —— 这正是要挡的情况。
+      - name: 覆盖安装两次构建
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-snapshot -gpu swiftshader_indirect
+          script: |
+            set -euo pipefail
+            FIRST="${{ runner.temp }}/apks/build1.apk"
+            SECOND="${{ runner.temp }}/apks/build2.apk"
+            adb install -r "$FIRST"
+            adb shell dumpsys package com.androidmcphub.app | grep -E 'versionName|versionCode' | head -4
+            echo "--- 覆盖安装第二次 ---"
+            adb install -r "$SECOND"
+            adb shell dumpsys package com.androidmcphub.app | grep -E 'versionName|versionCode' | head -4
+            adb shell pm list packages | grep com.androidmcphub.app
+            echo "覆盖安装成功：同一个 applicationId 被第二个 APK 替换，数据未清除"

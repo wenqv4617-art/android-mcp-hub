@@ -46,8 +46,10 @@ robolectric = "4.14.1"
 androidxTestJunit = "1.2.1"
 
 # ---- 本项目自身 -----------------------------------------------------------
-appVersionName = "0.1.4-gate1"
-appVersionCode = "5"
+# V1.6：签名固定 + 三层工具发现（Catalog / Guide / Execute）。
+# versionCode 只在正式交付 APK 上递增；debug 构建用 versionNameSuffix "-debug" 区分。
+appVersionName = "1.6.0"
+appVersionCode = "6"
 
 [libraries]
 # ---- AndroidX 基础 --------------------------------------------------------

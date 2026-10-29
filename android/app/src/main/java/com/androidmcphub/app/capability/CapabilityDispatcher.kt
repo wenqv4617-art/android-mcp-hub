@@ -151,9 +151,9 @@ class CapabilityDispatcher(
      *
      * 默认 `null` = **这台设备上不存在第三方工具这条路**，行为与 Gate 2.5 完全一致
      * （老测试一条都不用改，也证明这条分支是纯增量的）。
-     * 传入实现之后，`hub_list_tools` / `hub_call_tool` 这两个**保留命令名**
-     * 会在下面的第 2 步被它接走，第三方工具名则继续走原来的白名单路径 ——
-     * 永远不可能借道绕过本机白名单。
+     * 传入实现之后，`hub_list_tools` / `hub_get_tool_schema` / `hub_call_tool`
+     * 这几个**保留命令名**会在下面的第 2 步被它接走，第三方工具名则继续走原来的
+     * 白名单路径 —— 永远不可能借道绕过本机白名单。
      */
     private val hubCommands: HubCommandRouter? = null,
 ) {
@@ -217,7 +217,7 @@ class CapabilityDispatcher(
 
             // 1.5. Gate 3：**保留命令**在进白名单之前被接走。
             //      位置是刻意的：去重先做（聚合命令同样不许重放），
-            //      而**白名单查找之后**再处理就晚了 —— 那两个名字不在注册表里，
+            //      而**白名单查找之后**再处理就晚了 —— 那几个名字不在注册表里，
             //      会被直接判成 unsupported_tool。
             //      注意这里只认路由器自己声明的保留名；第三方工具的真实名字
             //      一个都进不来（见 [HubCommandRouter.handles] 的契约）。

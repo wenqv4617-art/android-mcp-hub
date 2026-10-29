@@ -15,14 +15,15 @@ import org.json.JSONObject
  *    [CapabilityPolicy] 只有"这个能力名现在能不能跑"这一层语义，表达不了指纹。
  *
  * 因此分界线画在这里：
- *  * 协议上，第三方调用**永远只走两个保留命令名**（`hub_list_tools` / `hub_call_tool`），
- *    它们出现的**位置固定**、名字永不变；
+ *  * 协议上，第三方工具的调用链**永远只走三个保留命令名**：
+ *    `hub_list_tools`（Catalog 目录）→ `hub_get_tool_schema`（Guide 详情）→
+ *    `hub_call_tool`（Execute 执行）。它们出现的**位置固定**、名字永不变；
  *  * 第三方工具的**真实身份**只在 `arguments` 与返回值里出现，绝不进入本机能力命名空间。
  *
  * ## 实现者必须保证（由 `HubCommandRouterTest` 与 `McpHubRouterTest` 钉住）
  *
- *  1. [handles] 只对**协议里约定的那两个保留命令名**返回 true；不得对任何第三方工具名返回 true，
- *     否则第三方工具就借道绕过了本机白名单。
+ *  1. [handles] 只对**协议里约定的那几个保留命令名**（目录 / 详情 / 执行）返回 true；
+ *     不得对任何第三方工具名返回 true，否则第三方工具就借道绕过了本机白名单。
  *  2. [route] 必须自己完成**全部**校验：服务器是否存在且已启用、工具是否已授权且指纹未变、
  *     参数是否符合该工具的 `inputSchema`。分发器不替它做这些检查。
  *  3. 返回的 [CapabilityResult.Success.payload] 里只放**结果**，不放信封字段

@@ -216,7 +216,7 @@ class PhoneLinkService : Service() {
             capabilityDispatcher = CapabilityDispatcher(
                 capabilities = BuiltInCapabilities.androidCapabilities(this),
                 policy = { prefs.capabilitiesEnabled() },
-                // Gate 3：聚合入口。两个保留命令名（hub_list_tools / hub_call_tool）
+                // Gate 3：聚合入口。保留命令名（hub_list_tools / hub_get_tool_schema / hub_call_tool）
                 // 由这里接走，**不进**上面那份本机能力白名单 —— 第三方工具不是本机能力，
                 // 它的参数校验、授权判定、执行都在 McpHubRouter 里自己完成。
                 // 执行总开关复用同一个用户设置：用户关掉「允许服务端调用本机能力」，
