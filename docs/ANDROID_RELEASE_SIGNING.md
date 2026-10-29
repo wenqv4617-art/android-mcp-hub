@@ -74,7 +74,7 @@ apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
 
 | | Debug | Release（交付） |
 | --- | --- | --- |
-| 应用名 | `MCP Hub DEV` | `MCP Hub` |
+| 应用名 | `MCP Hub DEV` | `Android MCP Hub` |
 | versionName | `1.6.0-debug` | `1.6.0` |
 | 签名 | 本机 debug keystore | 固定发布密钥 |
 | 能否互相覆盖 | **不能** | — |

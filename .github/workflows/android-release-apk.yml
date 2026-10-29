@@ -62,14 +62,23 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
-            echo "::error::缺少 ANDROID_KEYSTORE_BASE64（见 docs/ANDROID_RELEASE_SIGNING.md）"
-            exit 1
-          fi
-          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::缺少 Secret $name（见 docs/ANDROID_RELEASE_SIGNING.md）"
+              exit 1
+            fi
+          done
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           chmod 600 "$RUNNER_TEMP/release.jks"
-          echo "密钥已写入 runner 临时目录（未输出内容）"
+          # 四个变量都要进 GITHUB_ENV：Gradle 在**后续步骤**里运行，step 级 env 到不了那里。
+          # 这些值由 Actions 自动打码，且本步骤不 echo 任何内容。
+          {
+            echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+          } >> "$GITHUB_ENV"
+          echo "签名材料已就绪（口令与密钥内容均未输出）"
 
       - name: 单元测试
         working-directory: android
