@@ -194,14 +194,17 @@ async function main(): Promise<void> {
 
   // Cloudflare 的新版本/Secret 在边缘生效有短暂延迟；这里最多等 60 秒，
   // 避免把「刚部署完还在传播」误判成「配置没生效」。
-  let healthJson: Record<string, unknown> = {};
+  let capabilities: Record<string, unknown> = {};
   let lastHealth = "";
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
       const health = await fetch(`${BASE}/healthz?ready=${Date.now()}`, { redirect: "error", cache: "no-store" });
       if (health.ok) {
-        healthJson = (await health.json()) as Record<string, unknown>;
-        if (healthJson.gateway_enabled === true && healthJson.gateway_android_pairing_configured === true) break;
+        // /healthz 把网关开关放在 capabilities 里；顶层没有这两个字段。
+        const body = (await health.json()) as Record<string, any>;
+        capabilities = (body.capabilities ?? {}) as Record<string, unknown>;
+        lastHealth = `HTTP ${health.status} capabilities=${JSON.stringify(capabilities)}`;
+        if (capabilities.gateway_enabled === true && capabilities.gateway_android_pairing_configured === true) break;
       } else {
         lastHealth = `HTTP ${health.status}`;
       }
@@ -210,8 +213,8 @@ async function main(): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  need(healthJson.gateway_enabled === true, `线上网关未启用（最后一次：${lastHealth || "healthz 未返回" }）`);
-  need(healthJson.gateway_android_pairing_configured === true, "线上未配置 Android 配对口令");
+  need(capabilities.gateway_enabled === true, `线上网关未启用（最后一次：${lastHealth || "healthz 未返回"}）`);
+  need(capabilities.gateway_android_pairing_configured === true, "线上未配置 Android 配对口令");
   log("healthz：网关已启用，配对已配置");
 
   const pairing = await pair();
