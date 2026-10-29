@@ -22,14 +22,17 @@ package com.androidmcphub.app.aggregation
  */
 object HubCommands {
 
-    /** 发现：列出已授权且可用的第三方工具。 */
+    /** 发现：分页列出已授权且可用的第三方工具（默认不带 schema）。 */
     const val LIST_TOOLS = "hub_list_tools"
+
+    /** 参数结构：按需取**一个**已授权工具的最新 inputSchema。 */
+    const val GET_TOOL_SCHEMA = "hub_get_tool_schema"
 
     /** 调用：执行一个**已被用户授权**的第三方工具。 */
     const val CALL_TOOL = "hub_call_tool"
 
     /** 保留命令名的全集。 */
-    val ALL: Set<String> = setOf(LIST_TOOLS, CALL_TOOL)
+    val ALL: Set<String> = setOf(LIST_TOOLS, GET_TOOL_SCHEMA, CALL_TOOL)
 
     fun isHubCommand(name: String): Boolean = name in ALL
 }

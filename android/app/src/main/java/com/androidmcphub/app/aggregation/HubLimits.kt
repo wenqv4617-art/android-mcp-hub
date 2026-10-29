@@ -16,11 +16,32 @@ package com.androidmcphub.app.aggregation
 data class HubLimits(
     /** 最多报告多少台服务器（超出的只计数）。 */
     val maxServers: Int = 8,
-    /** 最多报告多少个工具（超出的只计数）。 */
-    val maxTools: Int = 32,
+    /**
+     * 一次目录扫描最多收集多少个工具（超出的只计数）。
+     *
+     * 这个值不再是"一次返回多少"——返回量由 [maxToolsPerPage] 与分页参数决定。
+     * 它只是收集阶段的内存上限：单台 35 个工具、三台服务器都能完整进入分页。
+     */
+    val maxTools: Int = 200,
+    /** 一页默认返回多少工具。 */
+    val maxToolsPerPage: Int = 50,
+    /** 调用方可以请求的最大页大小。 */
+    val maxPageSize: Int = 100,
+    /**
+     * 目录 JSON（不含 input_schema）的 **UTF-8 字节**预算，必须明显小于 16 KiB 的帧上限。
+     *
+     * 为什么是字节而不是字符：帧的上限（`CapabilityDispatcher.maxResultBytes`）按字节算，
+     * 而中文在 UTF-8 里是 3 字节。按字符预算的话，一份 12,000 "字符"的中文目录可以是
+     * 36 KB —— 照样被整帧丢弃，而且表现和没改之前一模一样。
+     */
+    val maxCatalogBytes: Int = 12_000,
+    /** 目录里单条描述的字符上限；完整描述仍留在手机上（详情页），不出现在目录里。 */
+    val maxListDescription: Int = 200,
+    /** `hub_get_tool_schema` 单次返回 schema 的字符上限。 */
+    val maxSchemaResponseChars: Int = 8_000,
     /** 显示名上限。 */
     val maxDisplayName: Int = 128,
-    /** 描述上限。 */
+    /** 描述上限（本地详情页展示用）。 */
     val maxDescription: Int = 512,
     /** inputSchema 序列化后的字符上限，超出则整块丢弃（宁可不给 schema，也不给半截 schema）。 */
     val maxSchemaChars: Int = 4096,

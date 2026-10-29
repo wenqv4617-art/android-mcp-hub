@@ -51,7 +51,9 @@ class McpHubRouterTest {
         assertEquals("把文本原样回显", entry.getString("description"))
         assertEquals(HubStates.AUTHORIZATION_AUTHORIZED, entry.getString("authorization_state"))
         assertEquals(HubStates.AVAILABILITY_ONLINE, entry.getString("availability"))
-        assertEquals(32, entry.getString("fingerprint").length)
+        // 精简目录：默认不带 schema，也不带授权指纹（指纹只在本机授权判定里用）。
+        assertFalse(entry.has("input_schema"))
+        assertFalse(entry.has("fingerprint"))
         assertEquals(1, payload.getInt("other_tools_count"))
         assertEquals(HubStates.AVAILABILITY_ONLINE, payload.getJSONArray("servers").getJSONObject(0).getString("availability"))
 
@@ -71,17 +73,29 @@ class McpHubRouterTest {
 
         val payload = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject()))
 
-        assertEquals(setOf("servers", "tools", "other_tools_count"), payload.keys().asSequence().toSet())
+        assertEquals(
+            setOf(
+                "servers", "tools", "total_tools", "returned", "offset", "limit",
+                "has_more", "other_tools_count", "schemas_dropped", "truncated",
+            ),
+            payload.keys().asSequence().toSet(),
+        )
         val server = payload.getJSONArray("servers").getJSONObject(0)
         assertEquals(setOf("server_id", "server_name", "availability"), server.keys().asSequence().toSet())
         val entry = payload.getJSONArray("tools").getJSONObject(0)
         assertEquals(
             setOf(
                 "server_id", "tool_name", "display_name", "description",
-                "input_schema", "authorization_state", "availability", "fingerprint",
+                "authorization_state", "availability",
             ),
             entry.keys().asSequence().toSet(),
         )
+        // 服务端（worker/src/mcp/hub.ts）读的就是这一套键；分页字段必须齐全，
+        // 否则模型看到"共 N 个"却没有任何翻页线索。
+        assertEquals(1, payload.getInt("total_tools"))
+        assertEquals(1, payload.getInt("returned"))
+        assertEquals(0, payload.getInt("offset"))
+        assertFalse(payload.getBoolean("has_more"))
     }
 
     @Test
@@ -99,7 +113,7 @@ class McpHubRouterTest {
     }
 
     @Test
-    fun `schema 超限被置空时仍然按原始 schema 回传指纹`() {
+    fun `schema 超限被置空时工具仍然出现在目录里，并指向按需读取入口`() {
         // 真机上的形态：StreamableHttpTransport 会把超限的 inputSchema 置 null，rawJson 保留原文。
         val bigSchema = """{"type":"object","properties":{${(1..40).joinToString(",") { "\"p$it\":{\"type\":\"string\",\"description\":\"${"x".repeat(120)}\"}" }}}}"""
         val big = McpRemoteTool(
@@ -113,7 +127,9 @@ class McpHubRouterTest {
         val h = harness(
             servers = listOf(config("srv_big")),
             transports = mapOf("srv_big" to FakeTransport("srv_big", listOf(big))),
-            hubLimits = HubLimits(maxSchemaChars = 200),
+            // 目录侧上限压到 200，按需读取上限也压小，才能在同一条用例里同时覆盖
+            // "目录不带 schema"与"按需读取也超限时如实说明"。
+            hubLimits = HubLimits(maxSchemaChars = 200, maxSchemaResponseChars = 400),
         )
         val expected = McpToolFingerprint.of(h.serverStore.find("srv_big")!!.url, "big_tool", null, "参数很多", bigSchema)
         h.authStore.grant("srv_big", "big_tool", expected)
@@ -121,11 +137,22 @@ class McpHubRouterTest {
         val entry = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject()))
             .getJSONArray("tools").getJSONObject(0)
 
-        // 指纹 = 原始 schema 的指纹：展示上限变了不该让用户重新授权。
-        assertEquals(expected, entry.getString("fingerprint"))
-        // schema 真的超限 → 不放 input_schema，但在描述里说清楚。
+        // schema 超限只影响**这一条**的 schema，不影响整个目录，也不影响授权
+        // （授权指纹按原始 schema 算，见 h.grant 里的 expected）。
+        assertEquals("big_tool", entry.getString("tool_name"))
         assertFalse(entry.has("input_schema"))
-        assertTrue(entry.getString("description").contains("未提供 schema"))
+        assertTrue(entry.getString("description").contains("hub_get_tool_schema"))
+        assertEquals(1, payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject())).getInt("total_tools"))
+        // 按需读取时也拿不到完整 schema，但会如实说明原因与顶层参数名。
+        val schemaPayload = payload(
+            h.router.route(
+                HubCommands.GET_TOOL_SCHEMA,
+                JSONObject().put("server_id", "srv_big").put("tool_name", "big_tool"),
+            ),
+        )
+        assertEquals("too_large", schemaPayload.getString("input_schema_omitted"))
+        // 顶层参数名会封顶（32），但足以让模型知道该传什么。
+        assertEquals(32, schemaPayload.getJSONArray("properties").length())
     }
 
     @Test
@@ -142,6 +169,187 @@ class McpHubRouterTest {
 
         assertEquals(2, payload.getJSONArray("tools").length())
         assertEquals(2, payload.getInt("other_tools_count"))
+    }
+
+    @Test
+    fun `35 个工具的服务器一次列出全部，且整份目录控制在帧预算内`() {
+        // 这就是"音叙 35 个工具"的形状：每个工具都带一份不小的 schema。
+        // 目录默认不带 schema，所以工具数量本身不该有压力。
+        val schema = """{"type":"object","properties":{"query":{"type":"string","description":"${"x".repeat(300)}"}},"required":["query"]}"""
+        val tools = (1..35).map { tool("tool_%02d".format(it), schema, "播放控制 $it") }
+        val h = harness(
+            servers = listOf(config("srv_music")),
+            transports = mapOf("srv_music" to FakeTransport("srv_music", tools)),
+        )
+        tools.forEach { h.grant("srv_music", it.name) }
+
+        val payload = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject()))
+
+        assertEquals(35, payload.getInt("total_tools"))
+        assertEquals(35, payload.getJSONArray("tools").length())
+        assertEquals(0, payload.getInt("other_tools_count"))
+        assertFalse(payload.getBoolean("has_more"))
+        assertFalse(payload.getJSONArray("tools").getJSONObject(0).has("input_schema"))
+        // 真实帧上限是 16 KiB：留足余量，中文按 3 字节算也算过。
+        assertTrue(payload.toString().toByteArray(Charsets.UTF_8).size < 12 * 1024)
+    }
+
+    @Test
+    fun `目录分页：offset 与 limit 切片，next_offset 可直接翻下一页`() {
+        val tools = (1..5).map { tool("t$it") }
+        val h = harness(
+            servers = listOf(config("srv_alpha")),
+            transports = mapOf("srv_alpha" to FakeTransport("srv_alpha", tools)),
+        )
+        tools.forEach { h.grant("srv_alpha", it.name) }
+
+        val first = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("limit", 2)))
+        assertEquals(5, first.getInt("total_tools"))
+        assertEquals(2, first.getJSONArray("tools").length())
+        assertEquals(2, first.getInt("returned"))
+        assertTrue(first.getBoolean("has_more"))
+        assertEquals(2, first.getInt("next_offset"))
+
+        val second = payload(
+            h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("offset", 2).put("limit", 2)),
+        )
+        assertEquals("t3", second.getJSONArray("tools").getJSONObject(0).getString("tool_name"))
+        assertEquals(4, second.getInt("next_offset"))
+
+        val third = payload(
+            h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("offset", 4).put("limit", 2)),
+        )
+        assertEquals(1, third.getJSONArray("tools").length())
+        assertFalse(third.getBoolean("has_more"))
+        assertFalse(third.has("next_offset"))
+
+        // offset 超过总数不是错误：返回空页，total_tools 仍然如实告诉模型有多少。
+        val beyond = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("offset", 99)))
+        assertEquals(0, beyond.getJSONArray("tools").length())
+        assertEquals(5, beyond.getInt("total_tools"))
+    }
+
+    @Test
+    fun `字符预算截断这一页的尾部时，total_tools 与 next_offset 仍然准确`() {
+        val tools = (1..20).map { tool("t%02d".format(it), description = "说明".repeat(100)) }
+        val h = harness(
+            servers = listOf(config("srv_alpha")),
+            transports = mapOf("srv_alpha" to FakeTransport("srv_alpha", tools)),
+            hubLimits = HubLimits(maxCatalogBytes = 3_000, maxToolsPerPage = 20, maxPageSize = 20),
+        )
+        tools.forEach { h.grant("srv_alpha", it.name) }
+
+        val payload = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("limit", 20)))
+
+        val returned = payload.getJSONArray("tools").length()
+        assertTrue("预算应该挤掉一部分条目，实际返回 $returned", returned in 1 until 20)
+        assertEquals(20, payload.getInt("total_tools"))
+        assertTrue(payload.getBoolean("has_more"))
+        assertEquals(returned, payload.getInt("next_offset"))
+        // 被截掉的不是"消失"：下一轮从 next_offset 接着拿。
+        val next = payload(
+            h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("offset", returned).put("limit", 20)),
+        )
+        assertEquals("t%02d".format(returned + 1), next.getJSONArray("tools").getJSONObject(0).getString("tool_name"))
+    }
+
+    @Test
+    fun `include_schema 只有显式要求时才带，超大 schema 只丢自己那一条`() {
+        val small = tool("small_tool", """{"type":"object","properties":{"q":{"type":"string"}}}""")
+        val huge = tool("huge_tool", """{"type":"object","properties":{"blob":{"type":"string","description":"${"x".repeat(5000)}"}}}""")
+        val h = harness(
+            servers = listOf(config("srv_alpha")),
+            transports = mapOf("srv_alpha" to FakeTransport("srv_alpha", listOf(small, huge))),
+        )
+        h.grant("srv_alpha", "small_tool")
+        h.grant("srv_alpha", "huge_tool")
+
+        val plain = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject()))
+        assertFalse(plain.getJSONArray("tools").getJSONObject(0).has("input_schema"))
+        assertEquals(0, plain.getInt("schemas_dropped"))
+
+        val withSchema = payload(
+            h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("include_schema", true)),
+        )
+        val entries = withSchema.getJSONArray("tools")
+        assertEquals(2, entries.length())
+        assertTrue(entries.getJSONObject(0).has("input_schema"))
+        assertFalse(entries.getJSONObject(1).has("input_schema"))
+        assertEquals(1, withSchema.getInt("schemas_dropped"))
+        assertEquals(2, withSchema.getInt("total_tools"))
+    }
+
+    @Test
+    fun `servers_only 只回答有哪些服务器，不枚举工具`() {
+        val transport = FakeTransport("srv_alpha", (1..35).map { tool("t$it") })
+        val h = harness(servers = listOf(config("srv_alpha")), transports = mapOf("srv_alpha" to transport))
+
+        val payload = payload(h.router.route(HubCommands.LIST_TOOLS, JSONObject().put("servers_only", true)))
+
+        assertEquals(1, payload.getJSONArray("servers").length())
+        assertEquals("srv_alpha", payload.getJSONArray("servers").getJSONObject(0).getString("server_id"))
+        assertEquals(HubStates.AVAILABILITY_ONLINE, payload.getJSONArray("servers").getJSONObject(0).getString("availability"))
+        assertEquals(0, payload.getJSONArray("tools").length())
+        assertTrue(payload.getBoolean("servers_only"))
+    }
+
+    @Test
+    fun `分页参数类型不对一律 invalid_arguments`() {
+        val h = harness(servers = listOf(config("srv_alpha")))
+        for (args in listOf(
+            JSONObject().put("limit", 0),
+            JSONObject().put("limit", 101),
+            JSONObject().put("limit", "50"),
+            JSONObject().put("offset", -1),
+            JSONObject().put("include_schema", "yes"),
+            JSONObject().put("servers_only", 1),
+        )) {
+            assertEquals(args.toString(), "invalid_arguments", failure(h.router.route(HubCommands.LIST_TOOLS, args)).code)
+        }
+    }
+
+    @Test
+    fun `guide 层只给已授权工具返回完整 schema`() {
+        val schema = """{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"""
+        val transport = FakeTransport("srv_alpha", listOf(tool("search", schema), tool("write_note")))
+        val h = harness(servers = listOf(config("srv_alpha")), transports = mapOf("srv_alpha" to transport))
+        h.grant("srv_alpha", "search")
+
+        val payload = payload(
+            h.router.route(
+                HubCommands.GET_TOOL_SCHEMA,
+                JSONObject().put("server_id", "srv_alpha").put("tool_name", "search"),
+            ),
+        )
+        assertEquals("srv_alpha", payload.getString("server_id"))
+        assertEquals("search", payload.getString("tool_name"))
+        assertEquals("mcp:srv_alpha:search", payload.getString("tool_id"))
+        assertEquals("string", payload.getJSONObject("input_schema").getJSONObject("properties").getJSONObject("query").getString("type"))
+        assertTrue(payload.getInt("schema_chars") > 0)
+
+        val refused = failure(
+            h.router.route(
+                HubCommands.GET_TOOL_SCHEMA,
+                JSONObject().put("server_id", "srv_alpha").put("tool_name", "write_note"),
+            ),
+        )
+        assertEquals("not_permitted", refused.code)
+
+        val unknown = failure(
+            h.router.route(
+                HubCommands.GET_TOOL_SCHEMA,
+                JSONObject().put("server_id", "srv_alpha").put("tool_name", "no_such_tool"),
+            ),
+        )
+        assertEquals("unsupported_tool", unknown.code)
+
+        val extra = failure(
+            h.router.route(
+                HubCommands.GET_TOOL_SCHEMA,
+                JSONObject().put("server_id", "srv_alpha").put("tool_name", "search").put("arguments", JSONObject()),
+            ),
+        )
+        assertEquals("invalid_arguments", extra.code)
     }
 
     @Test
@@ -596,9 +804,10 @@ class McpHubRouterTest {
     }
 
     @Test
-    fun `只认两个保留命令名，其余一律 unsupported_tool`() {
+    fun `只认三个保留命令名，其余一律 unsupported_tool`() {
         val h = harness()
         assertTrue(h.router.handles("hub_list_tools"))
+        assertTrue(h.router.handles("hub_get_tool_schema"))
         assertTrue(h.router.handles("hub_call_tool"))
         assertFalse(h.router.handles("battery_get_status"))
         assertFalse(h.router.handles("echo_text"))
