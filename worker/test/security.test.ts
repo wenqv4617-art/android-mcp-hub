@@ -177,6 +177,15 @@ describe("安全 / 与既有生产项目完全隔离", () => {
     }
   });
 
+  it('Worker 源码里的 fetch 不使用 redirect: "error"（线上运行时只接受 follow / manual）', () => {
+    const srcFiles = textFiles().filter((f) => /^worker[\\/]src[\\/].*\.ts$/.test(rel(f)));
+    expect(srcFiles.length).toBeGreaterThan(10);
+    for (const f of srcFiles) {
+      const text = stripComments(readFileSync(f, "utf8"));
+      expect(text, `${rel(f)} 用了 redirect: "error"，部署后会直接抛 TypeError`).not.toMatch(/redirect\s*:\s*["']error["']/);
+    }
+  });
+
   it("Env 类型显式列出四个 Durable Object 绑定，且没有任何 D1 / KV / R2 / Queue", () => {
     const text = stripComments(readFileSync(join(REPO_ROOT, "worker", "src", "env.ts"), "utf8"));
 

@@ -76,20 +76,19 @@ export async function checkDns(url: URL, env: Env, signal: AbortSignal, network:
   const answers = await Promise.all(["A", "AAAA"].map(async type => {
     // “确定答案”（NXDOMAIN / 私网地址）立刻拒绝；只有“提供方不可达”才换下一个。
     let unavailable = false;
-    let reason = "none";
     for (const provider of DOH_PROVIDERS) {
       let response: Response;
       try {
         response = await network(provider(url.hostname, type), {
-          headers: { Accept: "application/dns-json" }, redirect: "error", signal,
+          headers: { Accept: "application/dns-json" }, redirect: "manual", signal,
         });
       } catch (error) {
         if (error instanceof GatewayError) throw error;
         unavailable = true;
-        reason = (error as Error)?.name + ":" + String((error as Error)?.message).slice(0, 80);
         continue;
       }
-      if (!response.ok) { unavailable = true; reason = "HTTP " + response.status; continue; }
+      if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); unavailable = true; continue; }
+      if (!response.ok) { unavailable = true; continue; }
       let data: DohAnswer;
       try {
         data = JSON.parse(await boundedText(response.body, 16384)) as DohAnswer;
@@ -101,7 +100,7 @@ export async function checkDns(url: URL, env: Env, signal: AbortSignal, network:
       if (data.Status !== 0) throw new GatewayError("dns_denied");
       return (data.Answer ?? []).filter(a => a.type === 1 || a.type === 28).map(a => a.data);
     }
-    throw new GatewayError((unavailable ? "dns_unavailable" : "dns_denied") + "|" + reason, unavailable ? 503 : 400);
+    throw new GatewayError(unavailable ? "dns_unavailable" : "dns_denied", unavailable ? 503 : 400);
   }));
   const ips = answers.flat();
   if (!ips.length || ips.some(ip => !publicAddress(ip))) throw new GatewayError("dns_denied");

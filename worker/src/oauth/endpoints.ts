@@ -744,8 +744,10 @@ async function resolveClientIdMetadataDocument(
     const response = await fetch(target.href, {
       headers: { Accept: "application/json" },
       signal,
-      redirect: "error",
+      // Workers 运行时只接受 follow/manual；"error" 会在 fetch 前抛 TypeError。
+      redirect: "manual",
     });
+    if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); return null; }
     if (!response.ok) return null;
     const parsed = JSON.parse(await boundedText(response.body, 65536)) as unknown;
     if (typeof parsed !== "object" || parsed === null) return null;

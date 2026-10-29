@@ -262,11 +262,24 @@ describe("gateway security policy", () => {
     expect(urls.filter(u => u.includes("cloudflare-dns.com"))).toHaveLength(2);
     expect(urls.filter(u => u.includes("dns.google"))).toHaveLength(2);
   });
+  it("treats a DoH redirect as unavailable and asks the next provider", async () => {
+    const env = { GATEWAY_ALLOWED_URLS: "https://example.com/mcp" } as Env;
+    const url = validateTarget("https://example.com/mcp", env);
+    const seen: string[] = [];
+    const network = (async (input: string | URL | Request) => {
+      const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      seen.push(href);
+      if (href.includes("cloudflare-dns.com")) return new Response(null, { status: 302, headers: { location: "https://dns.google/redirected" } });
+      return new Response(JSON.stringify({ Status: 0, Answer: [{ type: 1, data: "93.184.216.34" }] }));
+    }) as typeof fetch;
+    await expect(checkDns(url, env, new AbortController().signal, network)).resolves.toBeUndefined();
+    expect(seen.filter(u => u.includes("dns.google"))).toHaveLength(2);
+  });
   it("reports dns_unavailable only when every DoH provider is unreachable", async () => {
     const env = { GATEWAY_ALLOWED_URLS: "https://example.com/mcp" } as Env;
     const url = validateTarget("https://example.com/mcp", env);
     const failing = (async () => { throw new TypeError("Network connection lost."); }) as typeof fetch;
-    await expect(checkDns(url, env, new AbortController().signal, failing)).rejects.toMatchObject({ code: expect.stringMatching(/^dns_unavailable/) });
+    await expect(checkDns(url, env, new AbortController().signal, failing)).rejects.toMatchObject({ code: "dns_unavailable" });
   });
   it("bounds chunked request bodies", async () => {
     const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(32)); c.enqueue(new Uint8Array(32)); c.close(); } });
