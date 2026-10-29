@@ -99,6 +99,27 @@ Android 使用一条独立的、受限的配对路径：
 本地 `npm run dev` / `npm run e2e` / `test:gateway:workerd` 只证明协议实现，
 **不代替**上述线上验收。
 
+### 5.1 已完成的线上证据（2026-10-29）
+
+| 项目 | 值 |
+| --- | --- |
+| Worker 地址 | `https://android-mcp-hub.causticrry.workers.dev` |
+| 部署工作流 | `deploy-worker.yml`，run `40822250882`（提交 `07175b3`） |
+| 部署后 smoke | `tools/gateway-online-smoke.ts` 全部通过（配对、发现、未授权拒绝、只读调用、重开持久化、确认票据、停用、坏地址、清理） |
+| Android 数据层线上验收 | `android-online-acceptance.yml`，run `40823819297`（提交 `b93a5ab`），`tests=1 failures=0 errors=0 skipped=0`，真实调用返回上游正文 |
+| APK（Debug） | `android-debug-apk.yml` 构建，`com.androidmcphub.app`，versionCode 5，versionName `0.1.4-gate1`，minSdk 26 |
+
+### 5.2 设备级界面验收
+
+`.github/workflows/android-device-acceptance.yml`（手动触发）在 API 35 模拟器上安装
+构建出的 APK，用 `android/tools/device_gateway_flow.py`（adb + uiautomator）真实点击：
+
+打开 App → 服务 → 云端网关 → 输入配对码 → 添加 MCP 服务器 → 服务端发现工具 →
+打开详情 → 授权只读工具 → 真实调用测试 → 拿到上游结果 → 删除服务 → 解除配对。
+
+失败时会把界面树里的可见文本、截图和 logcat 作为 artifact 上传。它和上表两条验收互补：
+一条验服务端契约，一条验打包进 APK 的 Kotlin 数据层，这条验**装上设备后的真实界面**。
+
 ## 6. 测试
 
 - Worker：`npm run typecheck`、`npm test`、`npm run e2e`、`npm run test:gateway:workerd`；

@@ -1,0 +1,109 @@
+# Android 设备级验收：真装 APK、真点「服务 → 云端网关」、真调线上 Worker。
+#
+# 与另外两条验收的分工：
+#   * deploy-worker.yml / tools/gateway-online-smoke.ts —— Node SDK 验服务端契约；
+#   * android-online-acceptance.yml —— APK 里同一份 Kotlin 数据层连线上网关；
+#   * 本工作流 —— 构建出的 APK 装进真实 Android 系统，用 uiautomator 点界面：
+#       打开 App → 服务 → 云端网关 → 配对 → 添加 MCP 服务器 → 服务端发现工具
+#       → 授权只读工具 → 真实调用测试 → 拿到上游结果 → 删服务 → 解除配对。
+#
+# 手动触发；不部署、不改线上配置。唯一的写操作是用配对码创建一条 CI 服务并在结束时删除。
+name: Android device acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_url:
+        description: MCP 上游地址（必须在网关 allowlist 里）
+        required: false
+        default: https://docs.mcp.cloudflare.com/mcp
+      service_name:
+        description: 设备上创建的服务名
+        required: false
+        default: ci-device
+
+permissions:
+  contents: read
+
+jobs:
+  device:
+    name: 真机界面链路（模拟器）
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: 安装 Android 35 平台与构建工具
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;34.0.0" "build-tools;35.0.0"
+
+      # 同其他 Android 工作流：aapt2 覆盖是给 aarch64 主机的，x86_64 runner 必须关掉。
+      - name: 关闭 aarch64 专用的 aapt2 覆盖
+        run: |
+          sed -i 's|^android\.aapt2FromMavenOverride=.*|# (CI) aapt2 override disabled: x86_64 runner uses the Maven one|' android/gradle.properties
+
+      - name: 检查配对码
+        env:
+          PAIRING_CODE: ${{ secrets.GATEWAY_ANDROID_PAIRING_CODE }}
+        run: |
+          test -n "$PAIRING_CODE" || { echo '::error::Missing GATEWAY_ANDROID_PAIRING_CODE repository secret'; exit 1; }
+          echo "::add-mask::$PAIRING_CODE"
+
+      - name: 构建 Debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: 允许当前用户访问 KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: 在模拟器上跑完整闭环
+        uses: ReactiveCircus/android-emulator-runner@v2
+        env:
+          GATEWAY_ANDROID_PAIRING_CODE: ${{ secrets.GATEWAY_ANDROID_PAIRING_CODE }}
+          GATEWAY_BASE_URL: https://android-mcp-hub.causticrry.workers.dev
+          GATEWAY_SERVICE_URL: ${{ inputs.upstream_url }}
+          GATEWAY_SERVICE_NAME: ${{ inputs.service_name }}
+          DEVICE_SHOT_DIR: build/device-shots
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          working-directory: android
+          script: |
+            set -e
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb shell pm grant com.androidmcphub.app android.permission.POST_NOTIFICATIONS || true
+            mkdir -p build/device-shots
+            set +e
+            python3 tools/device_gateway_flow.py
+            status=$?
+            set -e
+            adb exec-out screencap -p > build/device-shots/final.png || true
+            adb logcat -d > build/device-logcat.txt || true
+            exit $status
+
+      - name: 上传截图与日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-device-acceptance
+          path: |
+            android/build/device-shots/
+            android/build/device-logcat.txt
+          if-no-files-found: warn
