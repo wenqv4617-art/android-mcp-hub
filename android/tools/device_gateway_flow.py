@@ -164,8 +164,8 @@ def tap(node: Node) -> None:
     time.sleep(0.9)
 
 
-def tap_text(needle: str, exact: bool = True, timeout: int = 30) -> Node:
-    node = wait_for_text(needle, exact=exact, timeout=timeout)
+def tap_text(needle: str, exact: bool = True, timeout: int = 30, scroll: bool = False) -> Node:
+    node = wait_for_text(needle, exact=exact, timeout=timeout, scroll=scroll)
     tap(node)
     return node
 
@@ -257,11 +257,22 @@ def clear_field() -> None:
 
 
 def launch() -> None:
+    # 不执行 pm clear：它会把工作流里预先授予的通知权限一起清掉，启动时又弹一次权限框。
     adb("shell", "am", "force-stop", PACKAGE, check=False)
-    adb("shell", "pm", "clear", PACKAGE, check=False)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    wait_for_text("首页", timeout=120)
-    wait_for_text("服务", timeout=60)
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        items = nodes(ui_root())
+        if find(items, "首页"):
+            wait_for_text("服务", timeout=60)
+            return
+        dialog = find(items, "Allow") or find(items, "允许")
+        if dialog is not None:
+            log("关闭系统权限对话框")
+            tap(dialog)
+        time.sleep(2)
+    shot("launch-timeout")
+    raise FlowError("App 没有启动到主界面")
 
 
 def pair() -> None:
