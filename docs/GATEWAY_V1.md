@@ -62,7 +62,7 @@ SSRF：运维配置 `GATEWAY_ALLOWED_URLS` 精确端点允许列表（逗号分�
 
 ## ChatGPT 与 Glimmer
 
-ChatGPT 候选接入 URL 为 `https://android-mcp-hub.causticrry.workers.dev/mcp`（沿用既有部署地址；本轮代码未部署到该地址）。协议为 Streamable HTTP，复用现有 OAuth 发现、DCR、PKCE S256、受众与令牌撤销；通用工具需为 `oauth:<client_id>` 创建拥有者身份并逐项授权，不能因为完成 OAuth 就获得新服务工具。真实 ChatGPT 客户端兼容性尚未验收，不能宣称可直接上线接入。
+ChatGPT 候选接入 URL 为 `https://android-mcp-hub.causticrry.workers.dev/mcp`（该地址已部署本轮代码，版本与冒烟记录见 README 状态表）。协议为 Streamable HTTP，复用现有 OAuth 发现、DCR、PKCE S256、受众与令牌撤销；通用工具需为 `oauth:<client_id>` 创建拥有者身份并逐项授权，不能因为完成 OAuth 就获得新服务工具。真实 ChatGPT 客户端兼容性尚未验收，不能宣称可直接上线接入。
 
 Glimmer 仓库未修改。后续由自己的后端鉴别真实用户/Char，再用可信管理面 provisioning 或预置独立 `client:<id>`，逐项批准工具并保管自己的下游令牌。Hub 不信任客户端自报 userId/charId，也不接受请求头直接选择他人身份。每个用户使用自己的上游凭据 Secret 引用；使用 /mcp 的官方 SDK 发起调用，写操作另经可信用户确认流程申请一次性票据。面向公众开放前仍需 Glimmer 后端的用户登录、拥有权校验、确认 UI、速率/配额/预算策略与托管凭据生命周期；现有管理令牌不得交给普通用户。
 
@@ -82,10 +82,10 @@ Glimmer 仓库未修改。后续由自己的后端鉴别真实用户/Char，再�
 
 本轮已实现并验证：Worker 内直接连接远程 MCP 的完整闭环、两种上游传输、既有下游 Streamable HTTP/OAuth、命名路由、持久化服务管理、用户/Char/工具授权、一次性确认与审计、管理 API 和 DOM 交互、原 Android Worker/WS 调用链。原 Android Kotlin 与手机侧聚合模块零改动。
 
-已实现但待真实环境联调：生产 HTTPS/DoH/Secret、Cloudflare 部署后迁移与运行、真实 ChatGPT connector、真实 Android 手机；管理页面真实浏览器布局/CSP 执行。工作流已加入真实 workerd 检查，但远程 CI 未触发。
+已上线验证：生产 HTTPS/DoH/Secret、Cloudflare 部署后的 DO 迁移与运行；部署后公网冒烟（配对、授权、真实第三方调用、票据重放、撤销）通过，记录见 README。仍待真实验收：真实 ChatGPT connector、真实 Android 手机、管理页面在真实浏览器中的布局/CSP 执行。
 
 仅预留/需后续产品接线：Glimmer 登录身份映射、可信用户确认 UI、ChatGPT 高风险工具确认票据交互。当前需确认的工具必须由可信后端/运维提供票据，不能假设 ChatGPT 会自动处理自定义 `_meta`。
 
-尚未开发：第三方 OAuth 授权与刷新托管、任意域名自助注册的安全出口、业务级幂等键/计费配额、超出 120 KiB 单对象注册表的分片与长期审计导出、主动 list_changed 推送、多节点吞吐扩展。均不影响本轮受控最小闭环；默认关闭配置没有改变，未部署生产。
+尚未开发：第三方 OAuth 授权与刷新托管、任意域名自助注册的安全出口、业务级幂等键/计费配额、超出 120 KiB 单对象注册表的分片与长期审计导出、主动 list_changed 推送、多节点吞吐扩展。均不影响本轮受控最小闭环；代码默认仍是 `GATEWAY_ENABLED=false`，线上部署按需显式启用。
 
-最终完整验证：`npm run typecheck` 通过；`npm test` 18 文件 / 429 用例全过；`npm run e2e` 102 项全过；`npm run test:gateway:workerd` 11 项全过；`wrangler deploy --dry-run` 通过。曾有一次 workerd 启动输出本地连接 reset 诊断，测试仍全部通过；单独重跑后诊断未再出现，已再次确认完整协议链成功。无 Cloudflare 账号资源变更、无 ChatGPT 官端成功声明。
+本轮最终验证：`npm run typecheck` 通过；Worker 21 个文件 / 469 项测试全过；`npm run e2e` 114 项全过；签名 Release APK 与线上部署冒烟记录见 README。线上真实第三方调用 10/10 成功，未观察到网关重试；真实 ChatGPT/客户端与真机仍未验收。
