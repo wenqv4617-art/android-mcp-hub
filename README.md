@@ -47,6 +47,7 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | --- | --- |
 | Worker `npx tsc --noEmit` | 通过 |
 | Worker 测试 | **469 项 / 21 个文件全部通过**（`npx vitest run`） |
+| 本地端到端 | **114 项全部通过**（真 HTTP + 真 WebSocket + 官方 MCP SDK） |
 | Android JVM 测试 | **720 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`） |
 | Android Lint | 通过（`abortOnError = true`） |
 | Debug APK | `dist/Android-MCP-Hub-v1.6-debug.apk`（14 MB，SHA-256 `77c6751d…2af57c`） |
