@@ -6,6 +6,9 @@
 本文中的命令都在**可信终端**里执行。凡是出现 `<...>` 的地方都是占位符，
 不要把真实值写进仓库、截图、聊天记录或 URL 查询参数。
 
+> 想要一份可交互的清单（含在浏览器本地生成随机凭据）：打开
+> [`docs/deploy.html`](deploy.html)。它不联网，也不收集任何输入。
+
 ---
 
 ## 0. 前置条件
@@ -71,21 +74,27 @@ Worker 代码与仓库里没有默认值。
 
 每个手机一个 `deviceId` 和一枚随机令牌。`DEVICE_TOKENS` 只保存令牌的 **SHA-256 摘要**。
 
+先在密码管理器里生成一枚 32 字节随机令牌（手机端要填同一枚），再执行：
+
 ```bash
-# 1) 生成 32 字节随机令牌（只存在当前 shell 变量里）
-DEVICE_TOKEN=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+# 1) 从密码管理器粘贴令牌：不回显，也不进 shell history
+read -rsp "设备令牌: " DEVICE_TOKEN; echo ""
 
-# 2) 算出摘要记录（令牌只从 stdin 读，输出不含明文）
-printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- \
-  --device-id my-android-phone --label "Pixel 8"
-
-# 3) 把输出的 JSON 数组保存成 secret（stdin，避免进 shell history）
-printf '%s' '[{"deviceId":"my-android-phone","tokenSha256":"<上一步输出的摘要>","label":"Pixel 8","createdAt":"2026-10-31T00:00:00Z","revokedAt":null}]' \
+# 2) 摘要记录直接写进 Secret：stdout 只有 JSON，令牌只走 stdin
+printf '%s' "$DEVICE_TOKEN" | npm run --silent check:credential -- \
+  --device-id my-android-phone --label "Pixel 8" --json \
   | npx wrangler@4.149.0 secret put DEVICE_TOKENS --config worker/wrangler.jsonc
+
+# 3) 清掉当前 shell 里的明文
+unset DEVICE_TOKEN
 ```
 
-把 `DEVICE_TOKEN` 安全地交给手机端（例如用密码管理器），然后在 App 里填写。
-**不要**把它发到聊天窗口；需要重放时重新生成并轮换。
+不想直接写 Secret 时，把第 2 步的 `--json` 输出先存到密码管理器，再单独
+`wrangler secret put` 粘贴。多台设备时先保留上一台记录，把新记录追加进 JSON 数组。
+
+手机端填写的必须是**同一枚明文令牌**；`DEVICE_TOKENS` 里只有摘要。
+**不要**把明文发到聊天窗口、Issue 或仓库；泄露后立即追加新记录并给旧记录填
+`revokedAt`。
 
 轮换：追加一条同 `deviceId` 的新记录、给旧记录填 `revokedAt`，重新 `secret put`。
 旧连接会在下一次鉴权时失效。

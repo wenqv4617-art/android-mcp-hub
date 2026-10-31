@@ -16,6 +16,11 @@
  *
  * 用法（在可信环境里执行，不要把这行贴到聊天窗口）：
  *   printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone
+ *
+ * 加 `--json` 时只向 stdout 输出那段 JSON，便于直接接给
+ * `wrangler secret put`（npm 的脚本横幅需要用 `--silent` 关掉）：
+ *   printf '%s' "$DEVICE_TOKEN" | npm run --silent check:credential -- \
+ *     --device-id my-android-phone --json | npx wrangler secret put DEVICE_TOKENS
  */
 
 import { createHash } from "node:crypto";
@@ -24,21 +29,24 @@ import { sha256Hex, toHex } from "../worker/src/util/crypto";
 interface Options {
   deviceId: string;
   label: string | null;
+  json: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Options {
   let deviceId: string | null = null;
   let label: string | null = null;
+  let json = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--device-id") deviceId = argv[i + 1] ?? null;
     else if (arg === "--label") label = argv[i + 1] ?? null;
+    else if (arg === "--json") json = true;
   }
   if (deviceId === null || deviceId.trim() === "") {
     console.error("缺少 --device-id。例：printf '%s' \"$DEVICE_TOKEN\" | npm run check:credential -- --device-id my-android-phone");
     process.exit(2);
   }
-  return { deviceId: deviceId.trim(), label };
+  return { deviceId: deviceId.trim(), label, json };
 }
 
 async function readStdin(): Promise<string> {
@@ -82,6 +90,12 @@ async function main(): Promise<void> {
     label: options.label ?? "Gate 1 设备",
     createdAt: new Date().toISOString(),
   };
+
+  if (options.json) {
+    // 只输出 JSON：stderr 仍可承载错误，stdout 可以安全地接给 wrangler。
+    console.log(JSON.stringify([entry]));
+    return;
+  }
 
   console.log("摘要自检通过（两条独立实现一致，64 位小写十六进制）。");
   console.log("令牌本身没有被打印出来，也不会被写进任何文件。");

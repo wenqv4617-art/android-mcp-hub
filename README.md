@@ -89,7 +89,9 @@ cd android
 
 ## 4. 自己部署
 
-完整步骤见 **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**，包括：
+完整步骤见 **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**；想按清单操作，可用
+静态向导 **[docs/deploy.html](docs/deploy.html)**（纯本地页面，不联网）。
+部署文档包括：
 
 - Cloudflare 账户、Worker、四个 Durable Object 与迁移；
 - `DEVICE_TOKENS`、`OAUTH_OWNER_SECRET`、`GATEWAY_ADMIN_TOKEN`、

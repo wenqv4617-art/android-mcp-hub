@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>部署你自己的 Android MCP Hub</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b23; --panel-2:#1b232d; --line:#2a3441;
+    --text:#e6edf3; --muted:#93a1b1; --accent:#7ee787; --accent-2:#79c0ff;
+    --warn:#f2cc60; --danger:#ff7b72; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans SC",sans-serif}
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
+  .wrap{max-width:980px;margin:0 auto;padding:40px 22px 96px}
+  header{padding:34px 0 26px;border-bottom:1px solid var(--line)}
+  .eyebrow{color:var(--accent);font-size:13px;letter-spacing:.12em;text-transform:uppercase}
+  h1{font-size:clamp(28px,4.4vw,44px);line-height:1.18;margin:10px 0 12px;letter-spacing:-.02em}
+  .lede{color:var(--muted);max-width:74ch;margin:0}
+  .badge{display:inline-flex;gap:8px;align-items:center;margin-top:18px;padding:7px 12px;
+    border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:13px;background:var(--panel)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
+  nav{margin:26px 0 8px;display:flex;flex-wrap:wrap;gap:8px}
+  nav a{padding:7px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:13px}
+  nav a:hover{color:var(--text);text-decoration:none;border-color:#3c4a5a}
+  section{margin-top:34px;padding:26px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+  h2{font-size:21px;margin:0 0 6px;letter-spacing:-.01em}
+  h3{font-size:16px;margin:22px 0 8px}
+  p{margin:10px 0}
+  .sub{color:var(--muted);font-size:14px}
+  ol,ul{padding-left:22px}
+  li{margin:7px 0}
+  .step{display:flex;gap:12px;align-items:baseline;margin-bottom:4px}
+  .num{flex:0 0 30px;height:30px;display:grid;place-items:center;border-radius:9px;
+    background:var(--panel-2);border:1px solid var(--line);color:var(--accent);font-weight:700;font-size:14px}
+  pre{position:relative;background:#0a0e13;border:1px solid var(--line);border-radius:10px;
+    padding:14px 46px 14px 15px;overflow:auto;font-size:13.5px;line-height:1.55;margin:12px 0}
+  pre code{white-space:pre}
+  .copy{position:absolute;top:8px;right:8px;border:1px solid var(--line);background:var(--panel-2);
+    color:var(--muted);border-radius:8px;padding:4px 8px;font-size:12px;cursor:pointer}
+  .copy:hover{color:var(--text);border-color:#3c4a5a}
+  .note{border-left:3px solid var(--warn);background:#1d1a10;padding:12px 14px;border-radius:0 10px 10px 0;color:#e8d9a8;margin:14px 0}
+  .danger{border-left-color:var(--danger);background:#211314;color:#ffc9c5}
+  .ok{border-left:3px solid var(--accent);background:#101a12;padding:12px 14px;border-radius:0 10px 10px 0;color:#c7f0cd;margin:14px 0}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));margin-top:14px}
+  .card{padding:16px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px}
+  .card h3{margin:0 0 6px}
+  .card p{margin:0;color:var(--muted);font-size:14px}
+  .tool{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0}
+  button.btn{appearance:none;border:1px solid #2f6f3b;background:#12351b;color:#b7f5c2;
+    padding:9px 14px;border-radius:10px;font-size:14px;cursor:pointer}
+  button.btn:hover{background:#174524}
+  input[type=text]{flex:1 1 260px;min-width:200px;background:#0a0e13;border:1px solid var(--line);
+    color:var(--text);border-radius:10px;padding:9px 11px;font:inherit;font-size:14px}
+  output{display:block;margin-top:10px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;word-break:break-all}
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  footer{margin-top:40px;color:var(--muted);font-size:13px;text-align:center}
+  .kbd{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12px}
+  @media (max-width:560px){section{padding:20px}.wrap{padding:26px 16px 70px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">Android MCP Hub · 自部署向导</div>
+  <h1>在你自己的 Cloudflare 账户里<br>运行自己的 MCP 网关</h1>
+  <p class="lede">这份页面只做两件事：把部署步骤讲清楚，以及在你的浏览器里生成随机凭据。
+  它不联网、不收集、不上传任何内容。维护者的 Worker 不是公共中转服务。</p>
+  <div class="badge"><span class="dot"></span> 纯静态页面 · 无后端 · 无统计 · 不需要登录</div>
+  <nav>
+    <a href="#prep">前置条件</a>
+    <a href="#verify">本地验证</a>
+    <a href="#secrets">生成凭据</a>
+    <a href="#deploy">部署</a>
+    <a href="#check">部署后自检</a>
+    <a href="#client">客户端接入</a>
+    <a href="#trouble">故障排查</a>
+  </nav>
+</header>
+
+<section id="prep">
+  <h2>0 · 前置条件</h2>
+  <p class="sub">所有命令都在你自己的可信终端里执行。凡是 <code>&lt;...&gt;</code> 都是占位符。</p>
+  <table>
+    <tr><th>项</th><th>要求</th><th>确认方式</th></tr>
+    <tr><td>Cloudflare 账号</td><td>能创建 Workers 与 Durable Objects</td><td><code>npx wrangler@4.149.0 whoami</code></td></tr>
+    <tr><td>Node.js</td><td>≥ 20</td><td><code>node -v</code></td></tr>
+    <tr><td>域名</td><td>不需要；<code>*.workers.dev</code> 即可</td><td>部署输出会打印地址</td></tr>
+    <tr><td>Android 构建（可选）</td><td>JDK 17 + Android SDK</td><td><code>java -version</code></td></tr>
+  </table>
+  <div class="note">本部署不使用 D1、KV、R2、Queue 或第三方数据库；持久化由四个 Durable Object 自己完成。</div>
+</section>
+
+<section id="verify">
+  <h2>1 · 取代码并本地验证</h2>
+  <p class="sub">任何一步失败都不要部署。先修好本地，再动线上。</p>
+  <pre><button class="copy">复制</button><code>git clone https://github.com/wenqv4617-art/android-mcp-hub.git
+cd android-mcp-hub
+npm ci
+
+npm run typecheck
+npm run test
+npm run e2e</code></pre>
+  <div class="ok">预期：typecheck 通过，Worker 测试与本地端到端全部通过。e2e 使用真 HTTP、真 WebSocket 和官方 MCP SDK，不依赖你的 Cloudflare 账号。</div>
+</section>
+
+<section id="secrets">
+  <h2>2 · 生成并注入凭据</h2>
+  <p class="sub">下面的随机值只在这个页面里生成，不会离开浏览器。生成后请立刻存进密码管理器；
+  页面刷新或关闭后无法恢复。</p>
+
+  <h3>2.1 设备令牌 → <code>DEVICE_TOKENS</code></h3>
+  <div class="tool">
+    <input id="deviceId" type="text" value="my-android-phone" aria-label="设备 ID" spellcheck="false">
+    <button class="btn" id="genDevice">生成设备令牌与摘要记录</button>
+  </div>
+  <output id="deviceOut"></output>
+  <p class="sub">设备令牌明文只填进手机 App；<code>DEVICE_TOKENS</code> 只保存它的 SHA-256 摘要。
+  把摘要记录整段用 <code>wrangler secret put</code> 注入，不要把明文发进聊天或 Issue。</p>
+
+  <h3>2.2 OAuth 运维口令 → <code>OAUTH_OWNER_SECRET</code></h3>
+  <div class="tool"><button class="btn" data-secret="oauth">生成 32 字节口令</button></div>
+  <output id="oauthOut"></output>
+  <p class="sub">这是 OAuth 同意页的口令，也是 OAuth 面的开关：不设置时整个 OAuth 返回 404。
+  只给 OAuth 客户端使用，不要和下面的管理令牌复用。</p>
+
+  <h3>2.3 操作台管理令牌 → <code>GATEWAY_ADMIN_TOKEN</code></h3>
+  <div class="tool"><button class="btn" data-secret="admin">生成 32 字节令牌</button></div>
+  <output id="adminOut"></output>
+  <p class="sub">只用于 <code>/gateway</code> 操作台与全局管理 API，永远不会下发给客户端或手机。</p>
+
+  <h3>2.4 Android 配对码 → <code>GATEWAY_ANDROID_PAIRING_CODE</code></h3>
+  <div class="tool"><button class="btn" data-secret="pairing">生成 32 字节配对码</button></div>
+  <output id="pairingOut"></output>
+  <p class="sub">只在「手机 → 网关」首次配对时使用。配对成功后请轮换或删除这个 Secret。</p>
+
+  <h3>2.5 注入 Secret</h3>
+  <pre><button class="copy">复制</button><code>npx wrangler@4.149.0 secret put DEVICE_TOKENS --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put OAUTH_OWNER_SECRET --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put GATEWAY_ADMIN_TOKEN --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put GATEWAY_ANDROID_PAIRING_CODE --config worker/wrangler.jsonc</code></pre>
+  <div class="note danger">不要在这个页面、任何网页或聊天窗口里粘贴 Cloudflare API Token。
+  本页面没有输入框，也不会发起网络请求。wrangler 登录请用官方 <code>wrangler login</code>。</div>
+  <h3>2.6 可选：上游凭据 → <code>GATEWAY_UPSTREAM_SECRETS</code></h3>
+  <p class="sub">只有接入需要鉴权的第三方 MCP 服务时才需要。值是 JSON：
+  <code>{"&lt;ownerId&gt;/&lt;secretRef&gt;": "Bearer &lt;上游凭据&gt;"}</code>。
+  键必须和操作台里填的 <code>secretRef</code> 对上；公开上游可以完全不设置。</p>
+</section>
+
+<section id="deploy">
+  <h2>3 · 配置与部署</h2>
+  <p>先编辑 <code>worker/wrangler.jsonc</code> 的 <code>vars</code>（这些不是秘密）：</p>
+  <pre><button class="copy">复制</button><code>"GATEWAY_ENABLED": "true",
+"GATEWAY_ALLOWED_URLS": "https://your-upstream.example/mcp"</code></pre>
+  <ul>
+    <li>允许清单是<strong>精确 URL</strong>（含路径），逗号分隔，不能带 query 或 hash；</li>
+    <li>生产只接受 HTTPS/443，拒绝 IP 字面量、本地域名与 URL 里的用户名密码；</li>
+    <li>新增上游必须改配置并重新部署，客户端不能在运行时扩展。</li>
+  </ul>
+  <pre><button class="copy">复制</button><code>npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run
+npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc</code></pre>
+  <p class="sub">dry-run 应列出脚本名 <code>android-mcp-hub</code>、四个 DO 绑定和迁移 tag
+  <code>v1</code> / <code>v2</code> / <code>v3-gateway</code>。已部署过的 tag 不能修改，只能追加。</p>
+</section>
+
+<section id="check">
+  <h2>4 · 部署后自检</h2>
+  <pre><button class="copy">复制</button><code>BASE=https://&lt;worker&gt;.&lt;subdomain&gt;.workers.dev
+
+curl -sS "$BASE/healthz"
+curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/mcp"      # 期望 401（未带令牌）
+curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/gateway"  # 期望 200</code></pre>
+  <ul>
+    <li><code>/healthz</code> 应显示 <code>gateway_enabled: true</code>、<code>gateway_android_pairing_configured: true</code>；
+      它只回布尔值与类别，不回显凭据。</li>
+    <li>若既没有 OAuth 也没有静态令牌，<code>/mcp</code> 会失败关闭返回 503；配置了认证但未带令牌才是 401。</li>
+    <li>打开 <code>/gateway</code>，用管理令牌登录，添加服务、测试连接、签发客户端令牌。</li>
+  </ul>
+</section>
+
+<section id="client">
+  <h2>5 · 客户端接入</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>URL</h3>
+      <p class="mono">https://&lt;worker&gt;.&lt;subdomain&gt;.workers.dev/mcp</p>
+    </div>
+    <div class="card">
+      <h3>鉴权</h3>
+      <p><code>Authorization: Bearer &lt;客户端令牌&gt;</code><br>或 OAuth 2.1 + PKCE（需配置 OAUTH_OWNER_SECRET）。</p>
+    </div>
+    <div class="card">
+      <h3>令牌从哪来</h3>
+      <p>Android「服务 → 云端网关 → 访问令牌」，或操作台 <code>/gateway</code>。明文只显示一次。</p>
+    </div>
+  </div>
+  <div class="note">令牌只放在 <code>Authorization</code> 头。不要拼进 URL、查询参数、截图或聊天记录。
+  每个客户端单独签发令牌；只读令牌看不到也调不了写操作。</div>
+  <p>逐客户端配置、兼容性与排障见 <a href="CLIENT_SETUP.md">CLIENT_SETUP.md</a>。</p>
+</section>
+
+<section id="trouble">
+  <h2>6 · 常见故障</h2>
+  <table>
+    <tr><th>现象</th><th>常见原因</th><th>处理</th></tr>
+    <tr><td>部署报 <code>Missing entry-point</code></td><td>没带 <code>--config worker/wrangler.jsonc</code></td><td>加上参数重试</td></tr>
+    <tr><td><code>/gateway</code> 404</td><td><code>GATEWAY_ENABLED</code> 不是 <code>"true"</code>，或绑定缺失</td><td>检查 vars 与 durable_objects</td></tr>
+    <tr><td><code>/gateway/pair</code> 404</td><td>没设置配对码 Secret</td><td><code>secret put</code> 后重试，无需重新部署</td></tr>
+    <tr><td><code>/mcp</code> 一直 401</td><td>令牌撤销/过期，或放进了 URL</td><td>重新签发，改走 Authorization 头</td></tr>
+    <tr><td>看不到某个 <code>ext_*</code> 工具</td><td>未授权、服务停用、定义指纹失效</td><td>操作台重新 test + grant</td></tr>
+    <tr><td>上游 <code>target_denied</code></td><td>URL 不在允许清单或不是 HTTPS</td><td>改配置并重新部署</td></tr>
+    <tr><td>原生工具 <code>permission_denied</code></td><td>Android 系统权限未授予</td><td>在系统设置里授予后重试</td></tr>
+    <tr><td>删除类工具 <code>confirmation_required</code></td><td>没传 <code>confirm=true</code></td><td>向用户确认后再带参数重试</td></tr>
+  </table>
+  <p class="sub">完整说明：<a href="SELF_HOSTING.md">SELF_HOSTING.md</a> ·
+  <a href="NATIVE_TOOLS.md">NATIVE_TOOLS.md</a> ·
+  <a href="GATEWAY_V1.md">GATEWAY_V1.md</a></p>
+</section>
+
+<footer>
+  纯静态页面 · 由你自己的 Cloudflare 账户承载一切 · 维护者的 Worker 不替你的部署提供服务<br>
+  <a href="../README.md">返回 README</a>
+</footer>
+</div>
+
+<script>
+(() => {
+  const enc = new TextEncoder();
+  const hex = (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  const randomHex = (n = 32) => hex(crypto.getRandomValues(new Uint8Array(n)));
+  const el = (id) => document.getElementById(id);
+
+  async function sha256(text) {
+    const buf = await crypto.subtle.digest("SHA-256", enc.encode(text));
+    return hex(new Uint8Array(buf));
+  }
+
+  function codeBlock(value, label = "已生成（只显示这一次）") {
+    return `<div class="card"><div class="sub">${label}</div>` +
+      `<div class="mono" style="margin:8px 0 10px">${value}</div>` +
+      `<button class="btn" data-copy="${value}">复制</button></div>`;
+  }
+
+  el("genDevice").addEventListener("click", async () => {
+    const deviceId = (el("deviceId").value || "my-android-phone").trim();
+    const token = randomHex(32);
+    const digest = await sha256(token);
+    const record = JSON.stringify([{
+      deviceId, tokenSha256: digest, label: deviceId,
+      createdAt: new Date().toISOString(), revokedAt: null
+    }], null, 2);
+    el("deviceOut").innerHTML =
+      codeBlock(token, "设备令牌明文：只填进手机 App，不要提交到仓库") +
+      `<div class="card" style="margin-top:10px"><div class="sub">DEVICE_TOKENS 记录：把整段 JSON 通过 stdin 注入</div>` +
+      `<pre style="margin-bottom:0"><code>${record.replace(/</g, "&lt;")}</code></pre></div>`;
+    bindCopy(el("deviceOut"));
+  });
+
+  document.querySelectorAll("button[data-secret]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const kind = btn.dataset.secret;
+      const out = el(kind + "Out");
+      out.innerHTML = codeBlock(randomHex(32));
+      bindCopy(out);
+    });
+  });
+
+  function bindCopy(root) {
+    root.querySelectorAll("button[data-copy]").forEach(b => {
+      b.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(b.dataset.copy);
+          const old = b.textContent;
+          b.textContent = "已复制";
+          setTimeout(() => b.textContent = old, 1200);
+        } catch {
+          b.textContent = "请手动选择复制";
+        }
+      });
+    });
+  }
+
+  document.querySelectorAll("pre .copy").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const text = btn.parentElement.querySelector("code").innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+        const old = btn.textContent;
+        btn.textContent = "已复制";
+        setTimeout(() => btn.textContent = old, 1200);
+      } catch {
+        btn.textContent = "请手动复制";
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>
