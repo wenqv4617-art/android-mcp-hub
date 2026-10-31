@@ -1452,3 +1452,63 @@ commit `b9aa05e`）。于是规则从"一律不许"变成"默认不许 + 一个�
 
 计数变化：`oauth.test.ts` 49→**53**，Worker 单元测试 219→**223**，
 `TEST_REPORT.md` §0/§9 合计 419→**423**。
+
+---
+
+## 13. V1.6.1：后台保活与断线重连专项（2026-10-31）
+
+### 13.1 缺陷与证据
+
+| # | 缺陷 | 证据（修复前） | 修复 |
+| --- | --- | --- | --- |
+| 1 | 进程被回收后无恢复路径 | `onStartCommand` 恒返回 `START_NOT_STICKY`，null intent 被忽略 | 意图落盘 `link_desired`，`ServiceStartPolicy` 按意图返回 `START_STICKY`；界面 `LinkRestorePolicy` 兜底 |
+| 2 | 看门狗"自证死亡" | 连续 5 分钟无服务端帧即停服并进入终态 | 只强制重建 WebSocket，服务/通知/意图保留 |
+| 3 | 熄屏后心跳可能被挂起 | 无 `WAKE_LOCK` | 连接期间持有 `PARTIAL_WAKE_LOCK`，终态/断开/销毁释放 |
+| 4 | 断网要等心跳超时 | 无 `onLost` 处理 | `onLost` 立即关旧 socket 且只安排一次退避；`onAvailable` 立即重连并重置退避 |
+
+云端（Worker/Durable Object）侧复核结论：连接代次、旧 socket 清理、90 秒 liveness、4002/4003 close code
+与 `phone_offline` 判定均符合设计，**本轮未修改、未重新部署 Worker**（线上仍为
+`978bb1d5-7830-429a-8caa-0b07c9b3e1f5`）。
+
+### 13.2 本地验证
+
+```bash
+# Android
+cd android
+./gradlew :app:compileDebugKotlin :app:testDebugUnitTest :app:lintDebug -Pandroid.aapt2FromMavenOverride=
+# Worker
+npm run typecheck
+npx vitest run --config worker/vitest.config.ts
+# 端到端
+npm run e2e
+```
+
+| 项 | 结果 |
+| --- | --- |
+| Android 单元测试 | **759 通过 / 0 失败 / 7 跳过**（56 个测试类） |
+| Android Lint | `BUILD SUCCESSFUL`，`WakelockTimeout` 已显式抑制并注明理由 |
+| Worker 类型检查 | 通过 |
+| Worker 测试 | **469 通过 / 21 个文件** |
+| 本地端到端 | **114 通过 / 0 失败** |
+
+新增/扩展用例见 `android/README-ANDROID.md` §7：`ServiceStartPolicyTest`、`LinkRestorePolicyTest`、
+`LinkDesiredPrefsTest`、`ConnectionLifecycleOwnershipTest`，以及 `PhoneLinkTest` /
+`PhoneLinkReliabilityTest` / `LinkBusTest` 中的断网、换网、看门狗、事件与心跳确认用例。
+
+### 13.3 交付 APK
+
+- 运行：[41184178802](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41184178802)，commit `4277af4`
+- 版本：`1.6.1` / versionCode `7`
+- APK SHA-256：`b7cc104ec92cec5675d2f0dfb9650a90264730d26af0501dde99bff944fada50`
+- 证书 SHA-256：`88aab710faac4be855f93d7fb9fbd7d854861e8f7a1930d2625f4a00344ffc4c`（与 1.6.0 相同）
+- 模拟器 `adb install -r` 两次构建互相覆盖成功
+
+### 13.4 ⛔ NOT RUN：ColorOS / Android 16 真机后台验收
+
+本环境无 adb 设备。以下必须由用户在 OnePlus Ace 6（Android 16 / ColorOS）上执行，
+**在完成之前不得宣称真机验收通过**：
+
+1. 连接后按 Home / 锁屏 / 切换应用 10 分钟以上，用 ChatGPT 调用 `phone_ping`、`battery_get_status`、`device_get_status`；
+2. 飞行模式 30 秒后恢复、Wi-Fi ↔ 蜂窝切换，观察诊断页事件回到 `connected`；
+3. `adb shell am kill com.androidmcphub.app` 后观察服务重建与自动重连；
+4. 在 ColorOS「电池 → 应用 → 允许后台运行/无限制」前后各测一轮并记录差异。

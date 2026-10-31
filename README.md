@@ -50,9 +50,10 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | Worker `npx tsc --noEmit` | 通过 |
 | Worker 测试 | **469 项 / 21 个文件全部通过**（`npx vitest run`） |
 | 本地端到端 | **114 项全部通过**（真 HTTP + 真 WebSocket + 官方 MCP SDK） |
-| Android JVM 测试 | **724 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`） |
+| Android JVM 测试 | **759 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.1 新增 35 项后台保活/重连用例） |
 | Android Lint | 通过（`abortOnError = true`） |
-| 签名 Release APK | [构建运行 41179812533](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41179812533)：`1.6.0` (versionCode 6)，APK SHA-256 `ce64fc0c…932367`，证书 SHA-256 `88aab710…44ffc4c`；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功 |
+| Android 版本 | **V1.6.1**（versionCode 7）：前台服务按用户意图 `START_STICKY` 重建、看门狗只重连不停服、部分唤醒锁、断网/换网即时重连、诊断页连接时序与事件历史 |
+| 签名 Release APK | [构建运行 41184178802](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41184178802)（commit `4277af4`）：`1.6.1` (versionCode 7)，APK SHA-256 `b7cc104e…fada50`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功 |
 | 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`，部署后公网冒烟 PASS（见 [运行 41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)） |
 | 真机 / 真实客户端验收 | **未执行**（本机无 adb 设备、无第三方客户端账号，见文末清单） |
 
@@ -229,4 +230,7 @@ https://<your-worker>.workers.dev/mcp
 4. 在客户端用 URL + Token 或 OAuth 连接 `/mcp`，确认只看到已授权工具；
 5. 依次验证：`phone_ping`、备忘录 CRUD、待办完成、日历读写、提醒、闹钟 Intent、
    使用统计（需在系统设置里授予「使用情况访问」）；
-6. 撤销一枚令牌，确认该客户端立即被拒绝；撤销前已完成的调用不会被追溯取消。
+6. 撤销一枚令牌，确认该客户端立即被拒绝；撤销前已完成的调用不会被追溯取消；
+7. **后台保活（V1.6.1）**：点「连接」后按 Home / 锁屏 / 切到其它应用 10 分钟以上，
+   再从客户端调用 `phone_ping`、`battery_get_status`、`device_get_status`，应全部成功；
+   断网 30 秒或 Wi-Fi↔蜂窝切换后，诊断页事件应回到 `connected`。
