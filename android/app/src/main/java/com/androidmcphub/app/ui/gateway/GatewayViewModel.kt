@@ -73,9 +73,10 @@ class GatewayViewModel(application: Application) : AndroidViewModel(application)
 
     companion object {
         /**
-         * 本仓库上一轮部署的公开地址。只作为输入框的默认值 —— 用户随时可以改，
-         * 它不是凭据，也不带任何管理权限。
+         * 不预填任何地址：Hub 是**每个使用者自己部署**的私有网关，
+         * 维护者的 Worker 不是公共中转服务。优先从用户已保存的服务器地址推导；
+         * 都没有时留空，让用户填写自己的 `https://<worker>.<subdomain>.workers.dev`。
          */
-        const val DEFAULT_GATEWAY_BASE_URL = "https://android-mcp-hub.causticrry.workers.dev"
+        const val DEFAULT_GATEWAY_BASE_URL = ""
     }
 }
