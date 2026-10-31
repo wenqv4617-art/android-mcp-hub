@@ -50,9 +50,9 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | Worker `npx tsc --noEmit` | 通过 |
 | Worker 测试 | **469 项 / 21 个文件全部通过**（`npx vitest run`） |
 | 本地端到端 | **114 项全部通过**（真 HTTP + 真 WebSocket + 官方 MCP SDK） |
-| Android JVM 测试 | **759 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.1 新增 35 项后台保活/重连用例） |
+| Android JVM 测试 | **788 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.2 新增 29 项后台连接可靠性用例） |
 | Android Lint | 通过（`abortOnError = true`） |
-| Android 版本 | **V1.6.1**（versionCode 7）：前台服务按用户意图 `START_STICKY` 重建、看门狗只重连不停服、部分唤醒锁、断网/换网即时重连、诊断页连接时序与事件历史 |
+| Android 版本 | **V1.6.2**（versionCode 8）：服务停止不再冒充用户断开（`SERVICE_DESTROYED` + 保留连接意图）、回到前台自动恢复、迟到的旧网络回调不再误关连接、建连原子化、15 秒协议层 ping；诊断页新增断开来源/连接意图/服务停止原因/上次心跳发送 |
 | 签名 Release APK | [构建运行 41184178802](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41184178802)（commit `4277af4`）：`1.6.1` (versionCode 7)，APK SHA-256 `b7cc104e…fada50`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功 |
 | 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`，部署后公网冒烟 PASS（见 [运行 41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)） |
 | 真机 / 真实客户端验收 | **未执行**（本机无 adb 设备、无第三方客户端账号，见文末清单） |
@@ -214,11 +214,13 @@ https://<your-worker>.workers.dev/mcp
 - **不允许任意 URL**：上游必须逐个加入 `GATEWAY_ALLOWED_URLS`，这是安全边界而非缺陷。
 - **没有 LICENSE 文件**：仓库尚未附开源许可证，对外发布前需由仓库所有者选定；
   第三方依赖的许可证情况见 [docs/OPEN_SOURCE_AUDIT.md](docs/OPEN_SOURCE_AUDIT.md)。
-- **Android 后台保活受系统约束（V1.6.1 已尽量处理，但不能保证永久在线）**：应用使用前台服务 +
-  通知 + 部分唤醒锁 + 连接意图落盘 + `START_STICKY` 重建 + 断线/换网自动重连；用户在系统设置里
-  强行停止应用后，Android 不允许任何应用自愈，只能重新打开 App。ColorOS 等 OEM 省电策略
-  仍可能冻结后台进程，诊断页提供电池策略说明与跳转入口。详见
-  [android/README-ANDROID.md](android/README-ANDROID.md) §2.5。
+- **Android 后台保活受系统约束（V1.6.2 已尽量处理，但不能保证永久在线）**：应用使用前台服务 +
+  通知 + 部分唤醒锁 + 连接意图落盘 + `START_STICKY` 重建 + 断线/换网自动重连 + 15 秒协议层 ping；
+  用户在系统设置里强行停止应用后，Android 不允许任何应用自愈，只能重新打开 App。ColorOS 等 OEM
+  省电策略仍可能冻结或停掉后台进程/服务，本版本能保证的是**不把系统停止误报成"用户主动断开"、
+  保留用户意图、回到前台立即恢复**；诊断页会如实给出断开来源（用户/系统停止/网络/心跳/服务端/认证）
+  并提供电池策略说明与跳转入口。详见
+  [android/README-ANDROID.md](android/README-ANDROID.md) §2.5 与 §2.6。
 
 ---
 
@@ -231,6 +233,8 @@ https://<your-worker>.workers.dev/mcp
 5. 依次验证：`phone_ping`、备忘录 CRUD、待办完成、日历读写、提醒、闹钟 Intent、
    使用统计（需在系统设置里授予「使用情况访问」）；
 6. 撤销一枚令牌，确认该客户端立即被拒绝；撤销前已完成的调用不会被追溯取消；
-7. **后台保活（V1.6.1）**：点「连接」后按 Home / 锁屏 / 切到其它应用 10 分钟以上，
+7. **后台连接稳定性（V1.6.2）**：点「连接」后按 Home / 锁屏 / 切到其它应用 15 分钟以上（建议开着 VPN），
    再从客户端调用 `phone_ping`、`battery_get_status`、`device_get_status`，应全部成功；
-   断网 30 秒或 Wi-Fi↔蜂窝切换后，诊断页事件应回到 `connected`。
+   期间若发生网络重置，应自动重连而不是停服。断网 30 秒或 Wi-Fi↔蜂窝切换后，诊断页事件应回到 `connected`。
+   全程**没有点过「断开」**时，诊断页的「断开来源」不得显示 `user:…`；服务若被系统停掉，
+   应显示「服务停止原因 = 系统停止前台服务」且「连接意图 = 是」，重新打开 App 后 2 秒内自动回到「已连接」。

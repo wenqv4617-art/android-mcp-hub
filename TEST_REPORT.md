@@ -1512,3 +1512,109 @@ npm run e2e
 2. 飞行模式 30 秒后恢复、Wi-Fi ↔ 蜂窝切换，观察诊断页事件回到 `connected`；
 3. `adb shell am kill com.androidmcphub.app` 后观察服务重建与自动重连；
 4. 在 ColorOS「电池 → 应用 → 允许后台运行/无限制」前后各测一轮并记录差异。
+
+---
+
+## 14. V1.6.2：后台连接可靠性专项（2026-10-31）
+
+### 14.1 真机证据与直接矛盾
+
+用户提供的真机日志（OnePlus Ace 6 / Android 16 / ColorOS，VPN 网络）：
+
+```
+16:36:37/38 连接失败 category=dns_failure
+16:36:42 连接成功 generation=46
+16:37:34 连接失败 category=connection_reset
+16:37:36 连接成功 generation=47
+16:38:28 连接失败 category=connection_reset
+16:38:28 开始重连
+16:38:29 发起 WebSocket 连接
+16:38:32 用户主动断开
+16:38:32 状态 → 已断开
+16:38:32 前台服务已销毁
+```
+
+诊断页同一时刻：当前状态「已断开」、前台服务「未运行」、断开原因「用户主动断开」、下次重试「无」、
+最近心跳成功 `16:37:13`。**用户没有点过断开。**
+
+结论（源码级）：最后三行不是用户操作，而是 `PhoneLinkService.onDestroy()` 的收尾路径。
+V1.6.1 的 `onDestroy()` 调用 `client.shutdown()`，`shutdown()` 内部走 `PhoneLink.stop()`，
+而 `stop()` 的默认原因写死为「用户主动断开」，并记一条 `USER_DISCONNECTED`。
+因此**"用户主动断开"只证明服务被销毁，不证明用户点过任何东西**——这正是本次要查清的那条路径。
+至于"谁销毁了服务"，日志只能证明是 `onDestroy` 被调用（进程被杀会跳过它）；
+系统 `stopService()` / OEM 省电策略是唯一与证据相容的解释，但**没有直接证据**证明是哪一方。
+
+### 14.2 缺陷与修复
+
+| # | 缺陷 | 证据 | 修复 |
+| --- | --- | --- | --- |
+| 1 | 服务销毁冒充用户断开，且清空连接意图 | 日志尾部三行 + `onDestroy` 复用 `stop()` | `shutdown()` → `PhoneLink.abandon()`（不记 `USER_DISCONNECTED`、不清意图）；`onDestroy` 记 `SERVICE_DESTROYED` 并区分用户/系统来源 |
+| 2 | 服务被系统停止后，Activity 存活时不恢复 | `ViewModel.init` 只在进程重建时跑一次 | `MainActivity.onStart` → `onAppForegrounded()` 补一次恢复检查（2 秒去重） |
+| 3 | 迟到的旧网络 `onLost` 关掉新网络上的健康连接 | `registerDefaultNetworkCallback` 不保证顺序 | `NetworkCallbackPolicy` 过滤过期 lost、抑制同网络 2 秒内重复 available |
+| 4 | 并发 `openSocket()` 可能建出两条 WSS | 网络回调（主线程）与重连定时器（调度线程）可同时进入 | 关旧→分配代次→建新→记句柄整段放进 `socketLock` |
+| 5 | 启动失败顺手清掉用户意图 | companion `connect()` 失败分支调用 `setLinkDesired(false)` | 保留意图，只记 `startup_failed:<category>` |
+| 6 | 建连成功就伪造"心跳已发送" | 自查发现 `onSocketOpened()` 写 `lastHeartbeatSentAtMs` | 新增 `heartbeatBaselineMs`；诊断页"上次心跳发送"只反映真实发出的一帧 |
+| 7 | 用户断开后 tick 调度线程未回收 | `PhoneLinkClient.stop()` 只关连接 | 补 `scheduler.shutdown()` + dispatcher 关闭 |
+| 8 | 后台静默窗口内链路先死、20~60 秒后才被判定 | 代次 47 心跳成功停在 `16:37:13`，`16:38:28` 才报 reset | OkHttp `pingInterval(15s)`：协议层 ping/pong，早发现半开并保持 NAT 映射 |
+
+第 8 条是**缓解，不是已证明的根因修复**：没有抓包证据证明 `connection_reset` 由哪一跳设备制造；
+Cloudflare DO 侧复核（liveness 90 秒、heartbeat 30 秒、只有 4000/4002/4003 主动关闭）无法解释 52 秒重置，
+应用侧 `connection_reset` 是 TCP 层错误。15 秒协议层 ping 的 pong 由 Cloudflare 边缘自动回复，
+不唤醒休眠中的 DO、不进入 `webSocketMessage`，因此不影响服务端存活判定与 30 秒应用层心跳契约。
+
+### 14.3 诊断页新增字段
+
+「断开来源」`user:ui_button` / `user:notification_action` / `service_destroyed` / `remote_close` /
+`heartbeat_timeout` / `handshake_timeout` / `auth_failed` / `network:<category>` / `network_failure`；
+「连接意图」「服务停止原因」「上次心跳发送」。日志中不含令牌原文。
+
+### 14.4 与 Home Assistant Android Companion 的对照
+
+基于其仓库 HEAD `4c02fda`（2026-10-30）：HA 用 15 分钟周期 `CoroutineWorker` 提升为
+`FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING` 前台服务，无 `START_STICKY`、无自定义 Service、无唤醒锁；
+应用层 `{"type":"ping"}` 30 秒、缺 `pong` 即 `cancel()` 强制重连；重连仅在仍有订阅且上次为 Active 时进行。
+**HA 全仓库没有 OkHttp `pingInterval`**——本项目启用它是兼容设计，不是抄来的机制。
+本项目的 `specialUse` 前台服务类型保持不变：本应用是 MCP 网关而非推送/消息应用，
+不为了绕开系统限制改成不匹配的类型。
+
+### 14.5 本地验证
+
+```bash
+cd android
+JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot" \
+  ./gradlew --no-daemon :app:compileDebugKotlin :app:testDebugUnitTest :app:lintDebug \
+  -Pandroid.aapt2FromMavenOverride=<SDK>/build-tools/36.1.0/aapt2.exe
+npm run typecheck
+npx vitest run --config worker/vitest.config.ts
+npm run e2e
+```
+
+| 项 | 结果 |
+| --- | --- |
+| Android 单元测试 | **788 通过 / 0 失败 / 7 跳过**（58 个测试类） |
+| Android Lint | `BUILD SUCCESSFUL`（`abortOnError = true`） |
+| Worker 类型检查 | 通过 |
+| Worker 测试 | **469 通过 / 21 个文件** |
+| 本地端到端 | **114 通过 / 0 失败** |
+| Worker 是否变更 | **否**——未修改、未重新部署 |
+
+新增用例：`NetworkCallbackPolicyTest`（9）、`BackgroundConnectionContractTest`（6）、
+`PhoneLinkTest` +4、`PhoneLinkReliabilityTest` +3、`LinkBusTest` +6，共 29 条。
+源码扫描类用例只证明"某条路径存在/不存在"，运行时时序由 MockWebServer 真实链路用例覆盖。
+
+### 14.6 交付 APK
+
+见本节末更新（CI 完成后填写运行号、SHA-256、证书一致性）。
+
+### 14.7 ⛔ NOT RUN：ColorOS / Android 16 真机验收
+
+本环境无 adb 设备，以下必须由用户执行，**完成之前不得宣称真机验收通过**：
+
+1. 连接后按 Home / 锁屏 / 切换应用 **15 分钟以上**（开启 VPN），用 ChatGPT 调 `phone_ping`、
+   `battery_get_status`、`device_get_status`；
+2. 期间若诊断页出现 `network:connection_reset` / `heartbeat_timeout`，确认紧接着自动重连成功，
+   且**不出现**「用户主动断开」、服务不停；
+3. 全程未点「断开」时，诊断页「断开来源」不得是 `user:…`；服务被系统停掉时应显示
+   「服务停止原因 = 系统停止前台服务」且「连接意图 = 是」；
+4. 服务被停后重新打开 App，不点任何按钮，应在 2 秒内自动回到「已连接」；
+5. ColorOS「电池 → 应用 → 允许后台运行/无限制」前后各测一轮并记录差异。

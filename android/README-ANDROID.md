@@ -7,7 +7,7 @@
 它不做工具管理、不扫描已安装应用、不启动其它应用、不做跨设备控制。
 
 - 包名 / applicationId：`com.androidmcphub.app`
-- 版本：`0.1.0`（versionCode 1）
+- 版本：`1.6.2`（versionCode 8）
 - 最低系统：Android 8.0（API 26）；编译与目标 SDK：API 35
 
 ---
@@ -217,14 +217,24 @@ enterForeground()  ──Started──▶  startLink()
   `START_NOT_STICKY`，进程被回收后系统不会重建服务，界面又不在前台，于是只能等用户重新打开应用。
 
 **停止**：用户点界面上的「断开」，或者下拉通知栏点通知上的「断开」动作按钮
-（`PendingIntent` 打到服务的 `ACTION_DISCONNECT`）：
+（`PendingIntent` 打到服务的 `ACTION_DISCONNECT`，并带上 `EXTRA_DISCONNECT_SOURCE`）：
 
 ```
-handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) + stopSelf()
+onStartCommand(ACTION_DISCONNECT, source) → handleDisconnect(source)
+  → prefs.setLinkDesired(false)                 // 先落盘"用户不要连接了"
+  → client.stop(source)                         // 记一条带来源的 USER_DISCONNECTED
+  → stopForeground(STOP_FOREGROUND_REMOVE) + stopSelf()
 ```
 
 用户断开后 `PhoneLink` 会置位 `userStopped`，此后**任何**意外断开事件都不会再触发重连（单测有覆盖），
 `link_desired` 同时被置为 false，系统重建服务时也不会再连。
+
+> **V1.6.2 的关键更正**：只有上面这两条**真实用户动作**能清除 `link_desired`，也只有它们会产生
+> `USER_DISCONNECTED` 事件。服务被系统停止（`onDestroy` 但不是用户发起）、前台服务启动失败、
+> 收到无可执行意图的启动请求，全部走 `PhoneLink.abandon()` / `PhoneLinkClient.shutdown()`：
+> 同样禁止重连、同样关 socket，但**保留用户意图**、记成 `SERVICE_DESTROYED` 或启动失败原因。
+> V1.6.1 及以前 `onDestroy` 复用了 `stop()`，其默认原因写死为「用户主动断开」，于是系统回收服务
+> 在诊断页里被显示成用户操作 —— 这正是 V1.6.2 要修的"用户没点断开却显示用户主动断开"。
 
 此外还有两条自动处理：
 
@@ -269,6 +279,80 @@ V1.6.1 起看门狗只**强制重建 WebSocket**，服务、通知与用户意�
   诊断页提供了跳转入口与说明。
 - Doze 深度休眠期间数据连接仍可能被短暂切断，此时心跳超时会触发退避重连；网络恢复后立即重连并重置退避。
 
+### 2.6 V1.6.2：后台连接可靠性
+
+V1.6.1 交付后，真机（OnePlus Ace 6 / Android 16 / ColorOS，VPN 网络）仍出现后台 `phone_offline`。
+V1.6.2 先查清"用户没点断开，日志却写用户主动断开"这条矛盾，再处理连接被反复重置的问题。
+
+**修复 1：服务停止不再冒充用户断开（V1.6.1 的真实缺陷）**
+
+V1.6.1 的 `PhoneLinkService.onDestroy()` 用 `client.shutdown()` 收尾，而当时的 `shutdown()` 内部调用
+`PhoneLink.stop()`，默认原因写死为「用户主动断开」并记一条 `USER_DISCONNECTED`。于是**任何**服务销毁
+（系统 `stopService`、OEM 省电策略、服务启动失败后的 `stopSelf`）都会在诊断页显示"用户主动断开"，
+并且把状态复位成「已断开」。现在：
+
+| 收尾路径 | 事件 | 是否清除 `link_desired` | 是否产生 `USER_DISCONNECTED` |
+| --- | --- | --- | --- |
+| 用户点界面/通知栏「断开」 | 用户断开 | **是** | 是（带 `source=ui_button` / `notification_action`） |
+| 服务 `onDestroy` 且没有任何主动停止标记 | 服务停止 `SERVICE_DESTROYED` | 否 | **否** |
+| 前台服务启动失败 | 启动失败原因 | 否 | **否** |
+| 收到无可执行意图的启动请求 | 无意图停止 | 否 | **否** |
+
+诊断页新增「断开来源」「连接意图」「服务停止原因」「上次心跳发送」四项，来源是闭集：
+`user:<来源>`、`service_destroyed`、`remote_close`、`heartbeat_timeout`、`handshake_timeout`、
+`auth_failed`、`network:<category>`、`network_failure`。回答"是谁断开的"不再依赖从中文日志里猜。
+
+**修复 2：服务被系统停掉后，重新打开应用会恢复**
+
+ViewModel 的 `init` 只在进程重建时跑一次；如果进程还活着、只是前台服务被系统停掉，Activity 回到前台时
+`init` 不会重跑，旧实现会停在"已断开、服务未运行"且不恢复。现在 `MainActivity.onStart` 调
+`HubViewModel.onAppForegrounded()` → 重新读落盘意图 → `LinkRestorePolicy` 判定后才投递 `CONNECT`
+（2 秒去重，避免与 `init` 在同一次启动里各投一次）。这一步**只恢复，不断开**。
+
+**修复 3：迟到的旧网络回调不得关掉新连接**
+
+`registerDefaultNetworkCallback` 不保证回调顺序：Wi-Fi→蜂窝或 VPN 重建时，旧网络的 `onLost` 可能在
+新连接建立之后才到。旧实现见到任何 `onLost` 就判死当前连接，于是"自己断一次再重连一次"。
+`NetworkCallbackPolicy` 用当前默认网络过滤过期 `onLost`，并抑制同一网络 2 秒内的重复 `onAvailable`
+（重复上报会让退避反复归零）。
+
+**修复 4：建连的"关旧→分配代次→建新→记句柄"变成原子操作**
+
+网络恢复回调（主线程）与重连定时器（调度线程）可能同时进入 `openSocket()`。旧实现的"先取消旧 socket、
+再新建"之间存在窗口，两个 socket 都会被建出来（先建的会在 `onOpen` 被 cancel，但服务端已多收一次建连）。
+现在整段放进同一把锁；旧代次的 `onClosing` 也不再回帧。
+
+**修复 5：协议层 ping 保活（15 秒）**
+
+实测形态是"连接建立 ~52 秒后收到 `connection_reset`，而上一次心跳成功停在上一代连接"。这说明
+TCP 链路在后台静默窗口里已经死了，只是应用层 30 秒心跳与操作系统的 TCP 重传超时（RTO）都要等很久才
+报出来。现在 OkHttp 每 15 秒发一个 **WebSocket 协议层 ping**：
+
+- 链路双向可达性由 pong 直接证明，半开连接由 OkHttp 主动判死，不必等 60 秒应用层阈值；
+- 15 秒的持续流量让 VPN/NAT 的闲置映射不容易被判为空闲；
+- Cloudflare Workers/Durable Objects 运行时**自动**回应协议层 ping，且不会唤醒休眠中的 DO，
+  也不进入 `webSocketMessage`，不影响服务端 30 秒应用层心跳 / 90 秒存活判定。
+
+应用层心跳仍是 30 秒（服务端 `livenessTimeoutMs=90_000` 的契约不变）；协议层 ping 只是更早发现、
+更少静默。**这是一项有依据的缓解，不是"已证明的根因修复"**：我们没有抓到能证明 reset 由哪一跳
+网络设备制造的抓包证据，最终报告会如实标注。
+
+**与 Home Assistant Android Companion 的对照**（基于其仓库 HEAD `4c02fda`，2026-10-30）：
+
+| 机制 | HA 的做法 | 本项目的取舍 |
+| --- | --- | --- |
+| 后台宿主 | WorkManager 15 分钟周期 Worker，`setForeground(remoteMessaging)` 提升为前台服务 | 保留自有的 `specialUse` 前台服务：本应用是 MCP 网关，不是推送/消息应用；FGS 类型必须与实际用途匹配，不能为了绕限制改成 `dataSync`/`remoteMessaging` |
+| 心跳 | 应用层 `{"type":"ping"}` 每 30 秒，期待 `pong`；**收不到 pong 就 `webSocket.cancel()`** 强制重连 | 采用同一思路：应用层心跳 + 心跳超时强制重连；额外加 15 秒协议层 ping 做更早的链路探测 |
+| OkHttp 配置 | 全仓库**没有** `pingInterval` | 本项目显式启用——这是兼容设计，不是从 HA 抄来的机制 |
+| 重连 | 仅当"之前是 Active 且仍有订阅"才重连；10 秒起、指数退避上限 2 分钟；URL 变化跳过等待 | 本项目只有"用户希望连接"这一个前提；1 秒起、上限 60 秒、±20% 抖动；网络恢复立即重连 |
+| 网络变化 | 共享 `NetworkCallback`，只有解析出的 URL 变化才立刻重连（`distinctUntilChanged`） | 本项目没有第二套 URL，改为过滤过期 `onLost` + 去重 `onAvailable` |
+| 认证失败 | `ClosedAuth` 停止订阅恢复循环 | 本项目进入 `AuthFailed`/`Revoked` 终态，不自动重连（已有行为） |
+| 唤醒锁 | WebSocket 路径**不持有**唤醒锁 | 本项目保留 `PARTIAL_WAKE_LOCK`，用于保证 1 秒 tick 与 30 秒心跳在熄屏下仍被调度 |
+| 电池优化 | 只在设置页提示用户去开 | 同：诊断页提示 + 跳转，不强迫 |
+
+**仍不可修复的边界**：用户在系统设置里「强行停止」应用、或 OEM 直接杀掉进程时，Android 不允许应用
+自愈；本版本能保证的是**不再误报原因、保留意图、回到前台自动恢复、恢复后诊断页能看到真实原因**。
+
 ---
 
 ## 3. 连接协议
@@ -281,7 +365,7 @@ V1.6.1 起看门狗只**强制重建 WebSocket**，服务、通知与用户意�
 | --- | --- |
 | `Authorization` | `Bearer <用户在界面里填的设备令牌>` |
 | `X-Device-Id` | `<用户在界面里填的设备 ID>` |
-| `X-Client-Version` | `android-mcp-hub/<versionName>`（V1.6.1 为 `android-mcp-hub/1.6.1`） |
+| `X-Client-Version` | `android-mcp-hub/<versionName>`（V1.6.2 为 `android-mcp-hub/1.6.2`） |
 
 服务端 → 手机：
 
@@ -297,7 +381,7 @@ V1.6.1 起看门狗只**强制重建 WebSocket**，服务、通知与用户意�
 手机 → 服务端：
 
 ```json
-{"type":"hello","device_id":"…","protocol_version":"phone-link-v1","app_version":"1.6.1","android_sdk":36}
+{"type":"hello","device_id":"…","protocol_version":"phone-link-v1","app_version":"1.6.2","android_sdk":36}
 {"type":"phone_pong","request_id":"<与 ping 逐字符相同>","timestamp":1760000000155}
 {"type":"heartbeat","timestamp":1760000000500}
 ```
@@ -325,14 +409,21 @@ V1.6.1 起看门狗只**强制重建 WebSocket**，服务、通知与用户意�
 - `401` / `403` → 判定**认证失败**，不自动重连（令牌错了重试没意义），等用户改令牌后手动重连。
 - 服务器地址无效 / 令牌为空 / 配置非法 → 直接进「出错」状态，也不重连。
 - 网络恢复（`onAvailable`）→ 如果正处于「用户已连接但没连上」，立刻重连并**重置退避**。
+  V1.6.2 起先过 `NetworkCallbackPolicy.shouldProcessAvailable()`：同一条网络 2 秒内的重复上报被抑制
+  （否则重复上报会把刚涨起来的退避反复归零）。
 - 网络断开（`onLost`）→ V1.6.1 新增：立刻关掉旧 socket 并进入退避，**同一段断网只安排一次重连**
-  （`onLost` 可能连续来多次，重复回调不会叠加重连任务）。
+  （`onLost` 可能连续来多次，重复回调不会叠加重连任务）。V1.6.2 起先过
+  `NetworkCallbackPolicy.shouldProcessLost()`：迟到的**旧网络** `onLost` 不再关掉已经建在新网络上的连接。
 - 网络切换（Wi-Fi ↔ 蜂窝 ↔ VPN）→ 走 `onAvailable` 的同一条路径：旧连接不可能在旧网络上自愈，
   所以直接重建，而不是等心跳超时。
 - 建连看门狗：发出 Open 后 20 秒内既没握上手也没报错，就当成失败进入退避（避免挂在「连接中」不动）。
 - 看门狗（静默超时）→ 只强制重建 WebSocket，不停服、不置终态（见 2.5）。
+- 协议层 ping（V1.6.2 新增）→ OkHttp 每 15 秒发一个 WebSocket ping，pong 由 Cloudflare 边缘自动回，
+  用来在 15~30 秒内发现半开连接、并让 VPN/NAT 映射保持活跃；它不进入应用层心跳统计，也不影响服务端 90 秒存活判定。
 - **代次隔离**：每次重建都有一个自增的 `reconnectToken` 与连接代次，旧连接的迟到回调
-  （onFailure/onClosed/onMessage）会被丢弃，不会覆盖新连接的状态，也不会在重连窗口里多开一条 WSS。
+  （onFailure/onClosed/onMessage/onClosing）会被丢弃，不会覆盖新连接的状态，也不会在重连窗口里多开一条 WSS。
+  V1.6.2 起 `openSocket()` 的「关旧 socket → 建新 socket → 记句柄」整段在同一把 `socketLock` 内完成，
+  网络回调与重连定时器同时触发也只会有一条 WSS。
 - 所有状态变化写进环形日志，最多 200 条，最新的在最上面；另有 50 条结构化连接事件供诊断页展示。
 
 ---
@@ -518,9 +609,29 @@ V1.6.1 新增（后台保活与断线重连）：
   401 发 `authentication_failed` 且不重连、心跳确认时间戳、事件序列 `connected → disconnected → reconnecting → connected`。
 - `LinkBusTest` 扩展：事件环形上限 50 与顺序、诊断时间戳/原因/重连计数、心跳确认忽略 0、清空事件不动连接状态。
 
+V1.6.2 新增（后台连接可靠性）：
+
+- `NetworkCallbackPolicyTest`（9 条，纯 JVM）：迟到的旧网络 `onLost` 不关新连接、当前网络 `onLost` 必须处理、
+  真正断网必须处理、同网络 2 秒内的重复 `onAvailable` 抑制、换网不受抑制影响、时钟回拨宁可多处理一次。
+- `BackgroundConnectionContractTest`（6 条，源码扫描）：`onDestroy` 只能走 `shutdown()`（不得出现
+  `client.stop(` 或自己记 `USER_DISCONNECTED`，必须记 `SERVICE_DESTROYED`）；启动失败保留意图；
+  服务里清除 `linkDesired` 恰好只有两处（用户断开的两个入口）；用户断开先落盘再关连接；
+  断开来源随 Intent 传递、通知栏按钮带 `notification_action`；网络回调节流；`MainActivity.onStart`
+  必须补一次 `onAppForegrounded` 且不得顺手断开。**它证明"某条路径存在/不存在"，不证明运行时时序。**
+- `PhoneLinkTest` 新增 4 条：`abandon()` 只停连接、不产生 `USER_DISCONNECTED`；`abandon()` 之后
+  任何迟到回调都不会重连；用户断开携带真实来源且重复 `stop()` 不重复记录；心跳发送时间与回调
+  **只在真正发出一帧时**刷新（建连成功不等于发过心跳）。
+- `PhoneLinkReliabilityTest` 新增 3 条（真实 OkHttp 链路）：服务销毁（`shutdown()`）不得记录用户断开；
+  用户断开必须带上真实来源（断言 detail 含 `source=notification_action`）；心跳发送时间会回传，
+  且与「最近心跳成功」是两个独立时间戳。
+- `LinkBusTest` 新增 6 条：`SERVICE_DESTROYED → service_destroyed` 来源且不产生 `USER_DISCONNECTED`；
+  `user:ui_button` 来源映射；`network:connection_reset` / `network:dns_failure` 映射；
+  `remote_close` / `handshake_timeout` / `heartbeat_timeout` / `auth_failed` 映射；
+  `publishHeartbeatSent` 忽略 0；`publishLinkDesired` / `publishServiceStop` 的写入与展示。
+
 合计 **171** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
-> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（V1.6.1）：**759 条用例、0 失败、7 跳过**（命令见本节开头）。
+> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（V1.6.2）：**788 条用例、0 失败、7 跳过**（命令见本节开头）。
 
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >
@@ -574,6 +685,10 @@ V1.6.1 新增（后台保活与断线重连）：
 | **18** | **ColorOS 电池策略** | 默认设置下先测一轮；若出现后台被冻结，按诊断页提示把电池策略改为「无限制」后再测，记录差异 | 只在 ColorOS/Android 16 真机上存在 |
 | **19** | **进程被杀后的恢复** | `adb shell am kill com.androidmcphub.app`（模拟后台回收）→ 系统重建服务后应自动重连；用户主动「强行停止」后则必须靠重新打开 App 恢复 | 进程回收与 `START_STICKY` 重建只在真机发生 |
 | **20** | **断网/换网自动恢复** | 飞行模式 30 秒再关闭、Wi-Fi ↔ 蜂窝切换 → 事件序列出现 `network_changed` → `disconnected` → `reconnecting` → `connected`，最终在线 | 需要真实网络事件 |
+| **21** | **后台不掉线（V1.6.2 核心验收）** | 连接成功后按 Home / 切到别的应用 / 锁屏 15 分钟以上（VPN 开启），用 ChatGPT 调 `phone_ping`、`battery_get_status`、`device_get_status`，全部成功 | 需要真实设备、VPN、OEM 省电策略与第三方客户端 |
+| **22** | **后台意外断开自动恢复** | 期间诊断页若出现 `network:connection_reset` / `heartbeat_timeout`，必须紧接着出现「开始重连」→「连接成功 generation=N+1」，且**不出现**「用户主动断开」、服务不停 | 只有真机后台才会发生 |
+| **23** | **诊断页如实归因** | 无论发生什么，只要用户没点「断开」，诊断页的「断开来源」不得是 `user:…`；服务被系统停掉时应显示「服务停止原因」= 系统停止前台服务，且「连接意图」仍为「是」 | 需要真实系统回收 |
+| **24** | **服务被停后重开 App 恢复** | 在后台把服务停掉（诊断页显示前台服务未运行）→ 重新打开 App，**不点任何按钮**，应在 2 秒内自动回到「已连接」 | 需要真实服务生命周期 |
 
 ---
 
@@ -587,3 +702,9 @@ V1.6.1 新增（后台保活与断线重连）：
 - **V1.6.1 更新**：服务被系统回收后，`START_STICKY` 会在用户此前点过「连接」的前提下重建并自动恢复；
   用户主动「强行停止」或厂商任务管理器「结束」后，Android 不接受任何自愈，只能重新打开 App（界面会恢复连接）。
   仍**不做**开机自启、不做定时唤醒、不申请电池优化白名单。
+- **V1.6.2 更新**：服务被系统停掉（而进程还活着）时，重新打开 App 会在 `onStart` 自动恢复；
+  诊断页现在能区分「用户断开 / 服务被系统停止 / 网络断开 / DNS 失败 / TCP 重置 / 心跳超时 / 服务端关闭 / 认证失败 / 自动重连」。
+  仍未解决的是**厂商强制停用**：ColorOS 的「强行停止」、省电策略直接杀进程之后，Android 不提供任何自愈通道，
+  本版本只能保证不误报、保留意图、并在用户回到应用时立即恢复。
+  V1.6.2 的 15 秒协议层 ping 是**有依据的缓解**（早发现半开、保持 NAT 映射），**不是已证明的根因修复**——
+  我们没有抓到证明 `connection_reset` 由哪一跳设备制造的抓包证据。

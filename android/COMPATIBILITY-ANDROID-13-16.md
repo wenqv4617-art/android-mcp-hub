@@ -166,6 +166,26 @@ Android 不允许任何应用自愈；此时 ChatGPT 调 `phone_ping` 仍会拿�
 
 `[官方规范]` 补充：目标 34+ 的应用从 `BOOT_COMPLETED` 广播里启动某些类型的前台服务也受限；我们**没有申请** `RECEIVE_BOOT_COMPLETED`，也**不注册**任何开机广播 —— 从源头上就没有「开机自启动」这条路。
 
+### 8.1 V1.6.2：服务被系统"停掉"与进程被"杀掉"是两件事
+
+V1.6.1 的恢复逻辑只覆盖了**进程被回收后由 `START_STICKY` 重建服务**这一条路。真机上更常见的是另一种：
+进程还活着，但系统/厂商省电策略用 `stopService()` 把前台服务停掉。这时：
+
+- `onStartCommand` 不会再被调用，`START_STICKY` 无从生效；
+- 只剩 `onDestroy()` 会跑，而 V1.6.1 的 `onDestroy()` 复用了 `stop()`，其默认原因写死为「用户主动断开」，
+  并记一条 `USER_DISCONNECTED` —— 这就是真机上"用户没点断开，诊断页却写用户主动断开"的来源。
+
+V1.6.2 的处理（`[经验判断]` + 源码契约测试）：
+
+1. `onDestroy()` 不再冒充用户动作，只记 `SERVICE_DESTROYED`，并保留落盘的 `link_desired`；
+2. 只有 `handleDisconnect()`（界面/通知栏按钮）与 `PhoneLinkService.disconnect()` 这两处能写
+   `link_desired = false` —— `BackgroundConnectionContractTest` 用源码扫描钉死"恰好两处"；
+3. Activity 还活着时，`MainActivity.onStart → HubViewModel.onAppForegrounded()` 会补一次恢复检查
+   （`ViewModel.init` 只在进程重建时跑一次，早就不成立了）。
+
+`[真机未验证]`：ColorOS 在什么条件下会 `stopService()`（而不是杀进程）仍未确认。本版本能保证的是
+**不再把系统行为写成用户行为**，并让用户回到应用时自动恢复；不能保证服务永不被停。
+
 ---
 
 ## 9. 边到边（edge-to-edge）与返回手势：升到 36 需要处理的两件事
