@@ -3,7 +3,7 @@
  *
  * 这条脚本只做一件事：用**真实的公网 Worker** 走完 Android 服务页要走的同一条链路：
  *   配对 → 添加服务 → 连接上游 → 发现工具 → 未授权拒绝 → 授权 → /mcp 真实调用
- *   → 需确认票据 → 停用拒绝 → 坏地址拒绝 → 删除 → 解除配对。
+ *   → 需确认票据 → 停用拒绝 → 坏地址拒绝 → 删除 → 解除配对 → 撤销后拒绝。
  *
  * 它**不打印**任何令牌：管理令牌、客户端令牌、配对码都只存在于进程内存里。
  * 上游只用精确 allowlist 中的公开文档 MCP；调用参数按工具 inputSchema 生成。
@@ -16,6 +16,7 @@
  * 可选：
  *   SMOKE_SERVICE_URL  只测这一个上游（默认依次尝试公开文档 MCP）
  *   SMOKE_KEEP=1       结束后保留服务与配对（默认清理）
+ *   SMOKE_BENCH_SAMPLES=N  额外采样 tools/list 与只读工具调用，输出 p50/p90（默认 0）
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -25,6 +26,7 @@ const BASE = (process.env.GATEWAY_BASE_URL ?? "").replace(/\/+$/, "");
 const CODE = process.env.GATEWAY_ANDROID_PAIRING_CODE ?? "";
 const DEVICE_ID = process.env.SMOKE_DEVICE_ID ?? "ci-gateway-smoke";
 const KEEP = process.env.SMOKE_KEEP === "1";
+const BENCH_SAMPLES = Math.min(50, Math.max(0, Number(process.env.SMOKE_BENCH_SAMPLES ?? "0") || 0));
 const SERVICE_ID = "ci-smoke";
 const BAD_SERVICE_ID = "ci-smoke-bad";
 
@@ -216,6 +218,34 @@ async function withClient<T>(token: string, fn: (client: Client) => Promise<T>):
   }
 }
 
+function percentile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[index]!;
+}
+
+/** 线上可选采样：只记录耗时与样本数，不打印响应内容或令牌。 */
+async function sample(
+  label: string,
+  count: number,
+  invoke: () => Promise<void>,
+): Promise<void> {
+  if (count <= 0) return;
+  const times: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const started = performance.now();
+    await invoke();
+    times.push(performance.now() - started);
+  }
+  times.sort((a, b) => a - b);
+  const round = (value: number) => Math.round(value * 10) / 10;
+  log(
+    `BENCH ${label}: samples=${count} p50=${round(percentile(times, 50))}ms ` +
+    `p90=${round(percentile(times, 90))}ms min=${round(times[0]!)}ms ` +
+    `max=${round(times[times.length - 1]!)}ms cache=none`,
+  );
+}
+
 async function main(): Promise<void> {
   need(/^https:\/\/[^/]+$/.test(BASE), "GATEWAY_BASE_URL 必须是 https 根地址");
   need(CODE.length >= 8, "缺少 GATEWAY_ANDROID_PAIRING_CODE");
@@ -316,6 +346,17 @@ async function main(): Promise<void> {
     need(result.isError !== true, "只读调用返回 isError");
     readText = textOf(result);
     need(readText.length > 0, "只读调用没有返回任何文本");
+
+    if (BENCH_SAMPLES > 0) {
+      await sample("tools/list", BENCH_SAMPLES, async () => {
+        const listed = await client.listTools();
+        need(listed.tools.some((tool) => tool.name === chosen.gatewayName), "采样时工具列表丢失授权工具");
+      });
+      await sample("ext_read_call", BENCH_SAMPLES, async () => {
+        const sampled = await client.callTool({ name: chosen.gatewayName, arguments: args });
+        need(sampled.isError !== true, "采样时只读调用返回 isError");
+      });
+    }
   });
   log(`只读真实调用成功：${readText.replace(/\s+/g, " ").slice(0, 120)}...`);
 
@@ -396,6 +437,23 @@ async function main(): Promise<void> {
   need((await list(pairing.managementToken)).services.every((row) => row.id !== SERVICE_ID), "删除服务失败");
   await admin(pairing.managementToken, { action: "unpair" });
   log("清理完成：服务已删除，配对已撤销");
+
+  // 撤销必须真的生效：解除配对会同时吊销该客户端的所有令牌。
+  let revokedError = "";
+  try {
+    await withClient(pairing.clientToken, async (client) => {
+      await client.listTools();
+    });
+  } catch (error) {
+    revokedError = error instanceof Error ? error.message : String(error);
+  }
+  need(revokedError.length > 0, "解除配对后客户端令牌仍然可用");
+  need(
+    /401|unauthor|revok|invalid_token/i.test(revokedError),
+    `撤销后的拒绝原因不符：${revokedError.slice(0, 120)}`,
+  );
+  log("撤销：解除配对后客户端令牌被拒绝");
+
   log("ONLINE GATEWAY ACCEPTANCE: PASS");
 }
 

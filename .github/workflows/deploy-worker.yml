@@ -13,8 +13,10 @@ name: Worker manual deployment
 #   · 从仓库 Secret 注入 `GATEWAY_ANDROID_PAIRING_CODE`（只覆盖这一枚，不动别的 Secret）；
 #   · 部署后立即用真实公网地址跑 `tools/gateway-online-smoke.ts`：
 #     配对 → 服务管理 → 工具发现 → 未授权拒绝 → 授权 → /mcp 真实调用 →
-#     需确认票据 → 停用拒绝 → 坏地址拒绝 → 清理。
+#     需确认票据 → 停用拒绝 → 坏地址拒绝 → 清理 → 撤销后拒绝。
 #   这一步失败会让整次部署运行变红；它不能用 dry-run / 本地 workerd 代替。
+#   勾选 verify_only 可跳过部署步骤，只对现有线上部署重复跑这条验收；
+#   bench_samples > 0 时额外输出 tools/list 与只读第三方调用的 p50/p90。
 #
 # ⚠ feat/gate2-core 与 feat/gate2-5-native-tools 这两条路都是**临时**的：真机验证
 #   通过、并入 gate0 之后，应当把下面 if 条件里对应的子句、这段说明，以及
@@ -27,6 +29,16 @@ on:
         description: 'gate0 填 DEPLOY；feat/gate2-core 填 DEPLOY-GATE2；feat/gate2-5-native-tools 填 DEPLOY-GATE2-5'
         required: true
         type: string
+      verify_only:
+        description: '只对现有线上部署跑验收，不重新部署（需要配对 Secret 已存在）'
+        required: false
+        type: boolean
+        default: false
+      bench_samples:
+        description: '线上验收时额外采样 tools/list 与只读第三方调用的次数（0 表示不采样）'
+        required: false
+        type: number
+        default: 0
 
 permissions:
   contents: read
@@ -114,6 +126,7 @@ jobs:
           [[ "$CF_ACCOUNT" =~ ^[0-9a-fA-F]{32}$ ]] || { echo '::error::Invalid CLOUDFLARE_ACCOUNT_ID format'; exit 1; }
 
       - name: Deploy Worker
+        if: ${{ !inputs.verify_only }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -122,6 +135,7 @@ jobs:
       # 只新增/轮换这一枚配对 Secret；其余 Secret（设备令牌、OAuth、上游密钥）
       # 由 Cloudflare 保留，wrangler deploy 不会动它们。
       - name: Configure Android pairing secret
+        if: ${{ !inputs.verify_only }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -136,4 +150,5 @@ jobs:
         env:
           GATEWAY_BASE_URL: https://android-mcp-hub.causticrry.workers.dev
           GATEWAY_ANDROID_PAIRING_CODE: ${{ secrets.GATEWAY_ANDROID_PAIRING_CODE }}
+          SMOKE_BENCH_SAMPLES: ${{ inputs.bench_samples }}
         run: node --import tsx tools/gateway-online-smoke.ts
