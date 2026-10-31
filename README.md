@@ -50,11 +50,11 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | Worker `npx tsc --noEmit` | 通过 |
 | Worker 测试 | **469 项 / 21 个文件全部通过**（`npx vitest run`） |
 | 本地端到端 | **114 项全部通过**（真 HTTP + 真 WebSocket + 官方 MCP SDK） |
-| Android JVM 测试 | **720 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`） |
+| Android JVM 测试 | **724 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`） |
 | Android Lint | 通过（`abortOnError = true`） |
-| Debug APK | `dist/Android-MCP-Hub-v1.6-debug.apk`（14 MB，SHA-256 `77c6751d…2af57c`） |
-| 真实 Cloudflare 部署 | 本轮**未执行**；历史部署地址为 `https://android-mcp-hub.causticrry.workers.dev` |
-| 真机 / 真实客户端验收 | **未执行**（需要设备权限与第三方账号，见文末清单） |
+| 签名 Release APK | [构建运行 41179812533](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41179812533)：`1.6.0` (versionCode 6)，APK SHA-256 `ce64fc0c…932367`，证书 SHA-256 `88aab710…44ffc4c`；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功 |
+| 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`，部署后公网冒烟 PASS（见 [运行 41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)） |
+| 真机 / 真实客户端验收 | **未执行**（本机无 adb 设备、无第三方客户端账号，见文末清单） |
 
 详细历史见 [TEST_REPORT.md](TEST_REPORT.md)、[docs/GATEWAY_V1.md](docs/GATEWAY_V1.md)、
 [docs/ANDROID_GATEWAY_V15.md](docs/ANDROID_GATEWAY_V15.md)。
@@ -205,9 +205,10 @@ https://<your-worker>.workers.dev/mcp
 
 - **未做真机验收**：本轮的 Android 测试全部是 JVM 测试，`UsageStatsManager`、Calendar Provider、
   AlarmClock Intent、通知权限等路径需要真机手工验证（步骤见 [docs/NATIVE_TOOLS.md](docs/NATIVE_TOOLS.md)）。
-- **未做真实客户端验收**：ChatGPT、Claude Desktop、Codex、微光机均未使用真实账号连接本部署。
-- **未部署本轮代码**：线上历史地址运行的是更早版本；升级前请按 [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)
-  走 dry-run 与迁移核对。
+- **未做真实客户端验收**：ChatGPT、Claude Desktop、Codex、微光机均未使用真实账号连接本部署；
+  线上验收使用官方 MCP SDK 客户端，只能算 SDK 级连接，不等于真实客户端验收。
+- **第三方 `ext_*` 没有下游 request_id**：网关审计表有每次调用的 id，但 V1 不把它回传给客户端；
+  原生工具路径的 `request_id` 可以跨 Worker 与 Android 对齐（见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) 4.4）。
 - **上游 OAuth 不自动续期**：上游服务需要运维在 `GATEWAY_UPSTREAM_SECRETS` 里提供 Authorization 值。
 - **不允许任意 URL**：上游必须逐个加入 `GATEWAY_ALLOWED_URLS`，这是安全边界而非缺陷。
 - **没有 LICENSE 文件**：仓库尚未附开源许可证，对外发布前需由仓库所有者选定；

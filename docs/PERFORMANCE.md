@@ -111,7 +111,10 @@ hot-cache catalog: min=0ms median=0ms p95=2ms max=3ms
 - 只有传输/协议失败才映射成 `upstream_timeout` / `upstream_failure` 等错误码。
 
 本地 e2e 的 `boom` 用例钉住了“工具自己报错要原样回传”这一条；
-真实第三方业务失败仍需在线上采样时记录原始返回。
+通用网关的 `ext_*` 路径本轮也修正为同样语义：`isError=true` 的结果先脱敏上游凭据，
+再把 `content` / `structuredContent` 原样回传，审计记 `upstream_tool_error`，
+不再整条替换成 502。成功结果里若出现凭据仍失败关闭。
+真实第三方业务失败（HTTP 200 + 业务字段 `success=false`）仍需在线上采样时记录原始返回。
 
 ---
 
@@ -133,9 +136,8 @@ hot-cache catalog: min=0ms median=0ms p95=2ms max=3ms
 | 项 | 值 |
 | --- | --- |
 | Worker | `https://android-mcp-hub.causticrry.workers.dev` |
-| 版本 ID | `8d267f9e-31db-45ef-8747-aad202301571`（2026-10-31 部署） |
-| 部署运行 | [41179814832](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41179814832) |
-| 采样运行 | [41180041220](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180041220)（`verify_only=true`, `bench_samples=10`） |
+| 版本 ID | `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`（2026-10-31 部署，含工具级错误保留修复） |
+| 部署 + 采样运行 | [41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)（`bench_samples=10`；部署后同一运行内采样） |
 | 采样位置 | GitHub 托管 Ubuntu runner（公网直连，非本机代理） |
 | 鉴权 | 真实配对签发的 `hub_client_*` 受限令牌（值未打印） |
 | 上游 | `https://docs.mcp.cloudflare.com/mcp`（公开文档 MCP，真实第三方） |
@@ -145,21 +147,21 @@ hot-cache catalog: min=0ms median=0ms p95=2ms max=3ms
 
 | 场景 | p50 | p90 | 样本 / 成功 | 缓存状态 | 说明 |
 | --- | ---: | ---: | ---: | --- | --- |
-| `tools/list`（网关令牌，1 个已授权 `ext_*`） | 185.7 ms | 198.6 ms | 10 / 10 | `cache=none` | Worker + DO 鉴权与授权查询；不含原生目录 |
-| 第三方只读工具调用（Cloudflare 文档搜索） | **4 040.6 ms** | **4 099.6 ms** | 10 / 10 | `cache=none` | min 3 896.1 ms / max 4 613.7 ms；含上游真实检索 |
+| `tools/list`（网关令牌，1 个已授权 `ext_*`） | 96.3 ms | 100.1 ms | 10 / 10 | `cache=none` | Worker + DO 鉴权与授权查询；不含原生目录 |
+| 第三方只读工具调用（Cloudflare 文档搜索） | **4 020.0 ms** | **4 233.5 ms** | 10 / 10 | `cache=none` | min 3 772.7 ms / max 4 566.9 ms；含上游真实检索 |
 
 对应的原始日志行（部署流水线输出，未打印令牌）：
 
 ```
-BENCH tools/list: samples=10 p50=185.7ms p90=198.6ms min=181ms max=210.7ms cache=none
-BENCH ext_read_call: samples=10 p50=4040.6ms p90=4099.6ms min=3896.1ms max=4613.7ms cache=none
+BENCH tools/list: samples=10 p50=96.3ms p90=100.1ms min=90.8ms max=101.3ms cache=none
+BENCH ext_read_call: samples=10 p50=4020ms p90=4233.5ms min=3772.7ms max=4566.9ms cache=none
 ```
 
 解读：
 
-- 同一次运行里，`tools/list` 约 0.19 s，而第三方调用约 4.0 s。差距不在网关转发，
+- 同一次运行里，`tools/list` 约 0.10 s，而第三方调用约 4.02 s。差距不在网关转发，
   而在上游检索本身；
-- 10 个样本的 p50 与 p90 很接近（4.04 s / 4.10 s），且 10 次全部成功，
+- 10 个样本的 p50 与 p90 很接近（4.02 s / 4.23 s），且 10 次全部成功，
   **没有观察到网关超时后重放**；历史上 6.1 s 的麦当劳调用落在这个上游延迟区间的上沿，
   与“上游自己慢”一致，而不是缓存失效；
 - 本轮**没有**自动重试，也没有把业务失败改写成传输失败。
