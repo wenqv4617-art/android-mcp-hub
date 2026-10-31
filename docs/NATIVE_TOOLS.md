@@ -128,6 +128,14 @@ Android App「工具与权限」页有三层开关，任何一层关闭都不会
 - **更新与删除只对 Hub 创建的事件开放**。`calendar_create_event` 成功后会记下
   `event_id` 到 `filesDir/calendar_owned.json`；对系统/其它应用创建的事件，
   更新或删除返回 `not_permitted`，不会去改别人的数据。
+- **外部删除与 ID 复用**：事件可能在系统日历里被用户删掉。更新/删除前会先向
+  Calendar Provider 确认目标仍存在；不存在时清掉本地归属记录并返回 `tool_failed`，
+  不再发起系统写入。这样即使 Provider 把同一个行 ID 分配给新事件，也不会误伤。
+  查询本身因权限不足而无法判断时按「仍存在」处理，交给系统写入返回真实错误。
+- **卸载重装**：`calendar_owned.json` 随应用数据一起清除，重装后旧事件不再被视为
+  Hub 创建，更新/删除会返回 `not_permitted`（失败关闭，不会扩大权限）。
+- **并发修改**：Calendar Provider 没有条件更新/ETag，两方同时改同一事件时以最后一次
+  写入为准；本工具不做自动重试，避免把用户的并发修改覆盖成旧值。
 - 查询区间必须 `end_ms > start_ms`，跨度不超过一年；重复事件按发生实例展开；
 - 读取需要 `READ_CALENDAR`，写入需要 `WRITE_CALENDAR`（运行时权限）；
 - 不返回账户邮箱等身份信息；系统没给的字段是 null，不编造；

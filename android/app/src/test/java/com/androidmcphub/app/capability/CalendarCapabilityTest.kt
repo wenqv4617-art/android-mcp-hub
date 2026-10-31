@@ -30,6 +30,8 @@ class CalendarCapabilityTest {
         var updated: Pair<Long, CalendarEventPatch>? = null
         val deleted = mutableListOf<Long>()
         val events = mutableListOf<CalendarEvent>()
+        /** 模拟"事件已经被系统日历外部删除"，但本地归属记录还在。 */
+        val externallyDeleted = mutableSetOf<Long>()
 
         override fun hasReadPermission(): Boolean = read
         override fun hasWritePermission(): Boolean = write
@@ -50,6 +52,8 @@ class CalendarCapabilityTest {
             .filter { it.startMs >= startMs && it.startMs < endMs }
             .filter { query.isBlank() || (it.title ?: "").contains(query, ignoreCase = true) }
             .take(limit)
+
+        override fun exists(eventId: Long): Boolean = eventId !in externallyDeleted
 
         override fun create(spec: NewCalendarEvent): ControlOutcome {
             created = spec
@@ -242,6 +246,38 @@ class CalendarCapabilityTest {
         assertTrue(deleted.ok())
         assertEquals(listOf(8L), f.source.deleted)
         assertFalse("删除后归属记录也要清掉", f.ownership.isOwned(8L))
+    }
+
+    @Test
+    fun `事件被外部删除后，修改会拒绝并清掉本地归属，不碰系统日历`() {
+        val f = Fixture()
+        f.ownership.mark(21L)
+        f.source.externallyDeleted += 21L
+
+        val frame = f.call(
+            "calendar_update_event",
+            JSONObject().put("event_id", "21").put("title", "不该写入"),
+        )
+        assertFalse(frame.ok())
+        assertEquals("tool_failed", frame.code())
+        assertNull("目标不存在时不该发起系统更新", f.source.updated)
+        assertFalse("过期的归属记录必须清掉，避免行 ID 复用后误伤", f.ownership.isOwned(21L))
+    }
+
+    @Test
+    fun `事件被外部删除后，删除会拒绝并清掉本地归属`() {
+        val f = Fixture()
+        f.ownership.mark(22L)
+        f.source.externallyDeleted += 22L
+
+        val frame = f.call(
+            "calendar_delete_event",
+            JSONObject().put("event_id", "22").put("confirm", true),
+        )
+        assertFalse(frame.ok())
+        assertEquals("tool_failed", frame.code())
+        assertTrue("目标不存在时不该发起系统删除", f.source.deleted.isEmpty())
+        assertFalse(f.ownership.isOwned(22L))
     }
 
     private fun createArgs(): JSONObject = JSONObject()

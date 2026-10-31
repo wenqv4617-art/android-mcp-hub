@@ -64,6 +64,8 @@ object UnavailableCalendarSource : CalendarSource {
         query: String,
     ): List<CalendarEvent> = emptyList()
 
+    override fun exists(eventId: Long): Boolean = false
+
     override fun create(spec: NewCalendarEvent): ControlOutcome =
         ControlOutcome.unavailable("当前环境没有日历能力")
 

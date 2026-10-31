@@ -75,6 +75,19 @@ interface CalendarSource {
 
     fun calendars(): List<CalendarInfo>
     fun events(calendarId: Long?, startMs: Long, endMs: Long, limit: Int, query: String): List<CalendarEvent>
+
+    /**
+     * 这条事件此刻是否仍然存在。
+     *
+     * 用于清理本地"Hub 创建"记录：事件可能被用户在系统日历里删掉，之后
+     * Calendar Provider 可能把同一个行 ID 分配给新事件。写入/删除前先确认
+     * 目标还在，避免把行 ID 复用后的**别人的**事件当成自己的。
+     *
+     * 无法判断时（例如读权限被单独撤销、查询抛异常）返回 `true`：宁可让
+     * 后面的系统写入自己失败，也不能因为一次查询失败就误删本地记录。
+     */
+    fun exists(eventId: Long): Boolean
+
     fun create(spec: NewCalendarEvent): ControlOutcome
     fun update(eventId: Long, patch: CalendarEventPatch): ControlOutcome
     fun delete(eventId: Long): ControlOutcome
@@ -258,6 +271,23 @@ class AndroidCalendarSource(context: Context) : CalendarSource {
                 .put("end_ms", end)
                 .put("all_day", spec.allDay),
         )
+    }
+
+    override fun exists(eventId: Long): Boolean {
+        return try {
+            resolver.query(
+                ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
+                arrayOf(CalendarContract.Events._ID),
+                null,
+                null,
+                null,
+            )?.use { it.moveToFirst() } ?: true
+        } catch (_: SecurityException) {
+            // 只给了写权限、没给读权限时无法确认；交给后续写入自己报错。
+            true
+        } catch (_: Throwable) {
+            true
+        }
     }
 
     override fun update(eventId: Long, patch: CalendarEventPatch): ControlOutcome {
@@ -654,11 +684,21 @@ class CalendarUpdateEventCapability(
                 "只能修改由 Android MCP Hub 创建的事件。其它事件请在系统日历应用里修改。",
             )
         }
+        // 本地记录可能是旧的：事件被用户在系统日历里删掉后，行 ID 可能被复用。
+        // 先确认目标还在，不在就清掉旧记录并明确拒绝，绝不去碰可能复用该 ID 的新事件。
+        if (!source.exists(spec.first)) {
+            ownership.unmark(spec.first)
+            return CapabilityResult.Failure(
+                ToolResultErrorCode.TOOL_FAILED,
+                "这条日历事件已不存在（可能被外部删除），本地记录已清理。",
+            )
+        }
         val outcome = try {
             source.update(spec.first, spec.second)
         } catch (t: Throwable) {
             return CapabilityResult.Failure(ToolResultErrorCode.TOOL_FAILED, "修改日历事件失败（${t.javaClass.simpleName}）")
         }
+        if (!outcome.ok && !source.exists(spec.first)) ownership.unmark(spec.first)
         return outcome.toResult()
     }
 
@@ -744,12 +784,20 @@ class CalendarDeleteEventCapability(
                 "只能删除由 Android MCP Hub 创建的事件。其它事件请在系统日历应用里删除。",
             )
         }
+        // 与修改同理：先确认目标仍存在，避免在行 ID 被复用后误删新事件。
+        if (!source.exists(eventId)) {
+            ownership.unmark(eventId)
+            return CapabilityResult.Failure(
+                ToolResultErrorCode.TOOL_FAILED,
+                "这条日历事件已不存在（可能被外部删除），本地记录已清理。",
+            )
+        }
         val outcome = try {
             source.delete(eventId)
         } catch (t: Throwable) {
             return CapabilityResult.Failure(ToolResultErrorCode.TOOL_FAILED, "删除日历事件失败（${t.javaClass.simpleName}）")
         }
-        if (outcome.ok) ownership.unmark(eventId)
+        if (outcome.ok || !source.exists(eventId)) ownership.unmark(eventId)
         return outcome.toResult()
     }
 
