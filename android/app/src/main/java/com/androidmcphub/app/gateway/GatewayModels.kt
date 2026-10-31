@@ -84,10 +84,42 @@ data class GatewayCredentials(
     val clientToken: String,
 )
 
+/**
+ * 一条访问令牌的**元数据**。明文只在签发响应里出现一次，永远不会回到这里。
+ *
+ * `id` 是令牌字符串里内嵌的 8 位十六进制编号（`hub_client_<id>_<secret>`），
+ * 撤销时只传它；服务端按摘要认证，列表里也不会出现摘要。
+ */
+data class GatewayAccessToken(
+    val id: String,
+    val label: String,
+    val scopes: List<String>,
+    val source: String,
+    val createdAtMs: Long?,
+    val expiresAtMs: Long?,
+    val lastUsedAtMs: Long?,
+    val revokedAtMs: Long?,
+) {
+    fun isActive(nowMs: Long): Boolean =
+        revokedAtMs == null && (expiresAtMs == null || expiresAtMs > nowMs)
+
+    /** scope 只能收窄授权，所以这里讲的是"这张令牌最多能做什么"。 */
+    val scopeLabel: String
+        get() = when {
+            scopes.contains("write") -> "读写"
+            scopes.contains("read") -> "只读"
+            else -> "无权限"
+        }
+
+    val sourceLabel: String
+        get() = if (source == "pair") "设备配对" else "手动签发"
+}
+
 /** 列表接口的解析结果。 */
 data class GatewaySnapshot(
     val services: List<GatewayService>,
     val client: GatewayClientInfo?,
+    val tokens: List<GatewayAccessToken> = emptyList(),
 )
 
 /** 添加/编辑表单。 */

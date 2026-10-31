@@ -92,6 +92,62 @@ class GatewaySnapshotParseTest {
     }
 
     @Test
+    fun `令牌只解析元数据，按签发时间倒序，没有编号的条目被忽略`() {
+        val root = JSONObject(
+            """
+            {
+              "clients": [
+                {
+                  "tokens": [
+                    {
+                      "id": "aaaaaaaa",
+                      "label": "Claude",
+                      "scopes": ["read"],
+                      "source": "issued",
+                      "createdAt": 1700000000000,
+                      "expiresAt": null,
+                      "lastUsedAt": null,
+                      "revokedAt": null
+                    },
+                    {
+                      "id": "bbbbbbbb",
+                      "label": "",
+                      "scopes": ["read", "write"],
+                      "source": "pair",
+                      "createdAt": 1700000001000,
+                      "expiresAt": 1800000000000,
+                      "lastUsedAt": 1700000002000,
+                      "revokedAt": null
+                    },
+                    {"label": "没有编号，应被忽略"}
+                  ]
+                }
+              ],
+              "services": []
+            }
+            """.trimIndent(),
+        )
+
+        val tokens = parseSnapshot(root).tokens
+
+        assertEquals(listOf("bbbbbbbb", "aaaaaaaa"), tokens.map { it.id })
+        val pair = tokens.first()
+        assertEquals("访问令牌", pair.label)
+        assertEquals("读写", pair.scopeLabel)
+        assertEquals("设备配对", pair.sourceLabel)
+        assertEquals(1800000000000L, pair.expiresAtMs)
+        assertEquals(1700000002000L, pair.lastUsedAtMs)
+        assertTrue(pair.isActive(1700000003000))
+
+        val issued = tokens.last()
+        assertEquals("只读", issued.scopeLabel)
+        assertEquals("手动签发", issued.sourceLabel)
+        assertNull(issued.expiresAtMs)
+        assertNull(issued.lastUsedAtMs)
+        assertEquals(1700000000000L, issued.createdAtMs)
+    }
+
+    @Test
     fun `没有 android 身份与 grants 时也能解析`() {
         val snapshot = parseSnapshot(JSONObject("""{"services":[]}"""))
         assertTrue(snapshot.services.isEmpty())

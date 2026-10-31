@@ -376,6 +376,79 @@ class GatewayStateTest {
         assertTrue(h.state.state.value.notice!!.contains("本机解除配对"))
     }
 
+    // ---- 访问令牌 ----------------------------------------------------------
+
+    @Test
+    fun `签发令牌时明文只进入一次性状态，只读范围随请求下发`() = runTest {
+        val h = harness(paired = true)
+        val plain = "hub_client_aaaaaaaa_" + "f".repeat(64)
+        h.api.onAdmin = { JSONObject().put("token", plain).put("tokenId", "aaaaaaaa") }
+
+        h.state.issueToken("  Claude Desktop  ", 30, write = false)
+        advanceUntilIdle()
+
+        val request = h.api.adminCalls.last { it.optString("action") == "issue-client-token" }
+        assertEquals("Claude Desktop", request.optString("label"))
+        assertEquals(30, request.optInt("expiresInDays"))
+        val scopes = request.optJSONArray("scopes")!!
+        assertEquals(listOf("read"), (0 until scopes.length()).map(scopes::optString))
+        assertEquals(plain, h.state.state.value.issuedToken)
+        assertFalse(h.state.state.value.issuingToken)
+
+        // 用户确认保存后，明文从内存状态里消失；不会留到下一次重组。
+        h.state.clearIssuedToken()
+        assertNull(h.state.state.value.issuedToken)
+    }
+
+    @Test
+    fun `读写令牌请求同时带上 read 与 write`() = runTest {
+        val h = harness(paired = true)
+        h.state.issueToken("full", 365, write = true)
+        advanceUntilIdle()
+
+        val scopes = h.api.adminCalls.last { it.optString("action") == "issue-client-token" }
+            .optJSONArray("scopes")!!
+        assertEquals(listOf("read", "write"), (0 until scopes.length()).map(scopes::optString))
+    }
+
+    @Test
+    fun `签发失败不留下明文且错误是固定文案`() = runTest {
+        val h = harness(paired = true)
+        h.api.onAdmin = { throw GatewayApiException("token_limit", 429) }
+
+        h.state.issueToken("x", 90, write = true)
+        advanceUntilIdle()
+
+        assertNull(h.state.state.value.issuedToken)
+        assertFalse(h.state.state.value.issuingToken)
+        assertEquals("这个客户端的有效令牌已达上限，请先撤销不用的令牌", h.state.state.value.error)
+    }
+
+    @Test
+    fun `非法有效期在本地就被拒绝，不发请求`() = runTest {
+        val h = harness(paired = true)
+        h.state.issueToken("x", 5000, write = true)
+        advanceUntilIdle()
+        assertEquals(0, h.api.adminCalls.count { it.optString("action") == "issue-client-token" })
+        assertTrue(h.state.state.value.error!!.contains("有效期"))
+    }
+
+    @Test
+    fun `撤销令牌只传编号，非法编号在本地被拒绝`() = runTest {
+        val h = harness(paired = true)
+
+        h.state.revokeToken("not-a-token-id")
+        advanceUntilIdle()
+        assertEquals(0, h.api.adminCalls.count { it.optString("action") == "revoke-client-token" })
+
+        h.state.revokeToken("abcdef12")
+        advanceUntilIdle()
+        val request = h.api.adminCalls.last { it.optString("action") == "revoke-client-token" }
+        assertEquals("abcdef12", request.optString("tokenId"))
+        assertNull(h.state.state.value.busyTokenId)
+        assertTrue(h.state.state.value.notice!!.contains("已撤销"))
+    }
+
     // ---- harness ------------------------------------------------------------
 
     private fun TestScope.harness(paired: Boolean = false): Harness {

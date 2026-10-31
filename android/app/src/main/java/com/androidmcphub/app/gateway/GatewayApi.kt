@@ -91,8 +91,9 @@ class OkHttpGatewayApi(
 
 /** 把管理 API 的 JSON 还原成界面模型。解析集中在这里，避免 UI 里散落 `optString`。 */
 internal fun parseSnapshot(root: JSONObject): GatewaySnapshot {
-    val grants: Map<String, GatewayGrantMode> = root.optJSONArray("clients")
-        ?.optJSONObject(0)
+    // 管理面只返回**这台设备自己的**客户端，所以取第一个即可。
+    val clientJson = root.optJSONArray("clients")?.optJSONObject(0)
+    val grants: Map<String, GatewayGrantMode> = clientJson
         ?.optJSONArray("grants")
         ?.let { array ->
             buildMap {
@@ -111,6 +112,13 @@ internal fun parseSnapshot(root: JSONObject): GatewaySnapshot {
         servicesJson.optJSONObject(index)?.let { parseService(it, grants) }
     }.sortedWith(compareBy({ it.name.lowercase() }, { it.id }))
 
+    val tokens = buildList {
+        val array = clientJson?.optJSONArray("tokens") ?: JSONArray()
+        for (index in 0 until array.length()) {
+            array.optJSONObject(index)?.let { parseToken(it) }?.let(::add)
+        }
+    }.sortedByDescending { it.createdAtMs ?: 0L }
+
     val identity = root.optJSONObject("android")
     val client = identity?.let {
         GatewayClientInfo(
@@ -121,7 +129,34 @@ internal fun parseSnapshot(root: JSONObject): GatewaySnapshot {
             lastPairedAtMs = it.optLong("lastPairedAt").takeIf { value -> value > 0 },
         )
     }
-    return GatewaySnapshot(services = services, client = client)
+    return GatewaySnapshot(services = services, client = client, tokens = tokens)
+}
+
+private fun parseToken(json: JSONObject): GatewayAccessToken? {
+    val id = json.optString("id")
+    if (id.isBlank()) return null
+    val scopes = buildList {
+        val array = json.optJSONArray("scopes") ?: JSONArray()
+        for (index in 0 until array.length()) {
+            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }
+    return GatewayAccessToken(
+        id = id,
+        label = json.optString("label").take(64).ifBlank { "访问令牌" },
+        scopes = scopes,
+        source = json.optString("source"),
+        createdAtMs = json.nullableLong("createdAt"),
+        expiresAtMs = json.nullableLong("expiresAt"),
+        lastUsedAtMs = json.nullableLong("lastUsedAt"),
+        revokedAtMs = json.nullableLong("revokedAt"),
+    )
+}
+
+/** JSON 里的 `null` 与"字段缺失"都还原成 Kotlin `null`，而不是 0。 */
+private fun JSONObject.nullableLong(key: String): Long? {
+    val value = opt(key) ?: return null
+    return (value as? Number)?.toLong()?.takeIf { it > 0 }
 }
 
 private fun parseService(json: JSONObject, grants: Map<String, GatewayGrantMode>): GatewayService? {

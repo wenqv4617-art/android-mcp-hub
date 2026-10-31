@@ -1,11 +1,15 @@
 package com.androidmcphub.app.ui.services
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.material.icons.Icons
@@ -22,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,6 +40,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.androidmcphub.app.gateway.GatewayAccessToken
 import com.androidmcphub.app.gateway.GatewayService
 import com.androidmcphub.app.gateway.GatewayUiState
 import com.androidmcphub.app.gateway.gatewayErrorText
@@ -53,6 +59,9 @@ import com.androidmcphub.app.ui.mcp.McpViewModel
 import com.androidmcphub.app.ui.theme.HubSpacing
 import com.androidmcphub.app.ui.theme.spacing
 import com.androidmcphub.app.ui.theme.statusPalette
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /** 服务页当前查看的是哪一边。两边的数据来源、凭据与授权机制都相互独立。 */
 private enum class ServicesSource { Local, Gateway }
@@ -331,6 +340,18 @@ private fun LazyListScope.gatewayServices(
         }
     }
 
+    if (gateway.paired) {
+        item {
+            GatewayDiagnosticsCard(gateway = gateway)
+        }
+        item {
+            GatewayAccessCard(gateway = gateway)
+        }
+        item {
+            GatewayTokenCard(gatewayViewModel = gatewayViewModel, gateway = gateway)
+        }
+    }
+
     if (gateway.error != null) {
         item {
             SectionCard(
@@ -491,6 +512,352 @@ private fun gatewayStatusText(service: GatewayService): String {
     val base = if (service.tools.isEmpty()) "尚未发现工具" else "${service.tools.size} 个工具 · 已授权 $granted 个"
     val failure = service.lastError?.let { " · 最近一次失败：${gatewayErrorText(it, 0)}" }.orEmpty()
     return base + failure
+}
+
+/**
+ * 连接诊断：配对身份与本机令牌的健康度。
+ *
+ * 不展示任何令牌内容，只讲"这枚令牌现在还灵不灵"——真出问题时，用户最先
+ * 需要知道的是「是本机配对令牌失效了，还是上游服务连不上」。
+ */
+@Composable
+private fun GatewayDiagnosticsCard(gateway: GatewayUiState) {
+    val spacing = MaterialTheme.spacing
+    val now = System.currentTimeMillis()
+    val pairToken = gateway.tokens.firstOrNull { it.source == "pair" }
+    val active = gateway.tokens.count { it.isActive(now) }
+    val revoked = gateway.tokens.count { it.revokedAtMs != null }
+    val expired = gateway.tokens.count {
+        it.revokedAtMs == null && it.expiresAtMs != null && it.expiresAtMs <= now
+    }
+    val pairBroken = pairToken == null || !pairToken.isActive(now)
+
+    SectionCard(
+        title = "连接诊断",
+        subtitle = "配对身份与令牌健康度",
+        modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
+    ) {
+        DiagnosticRow("网关", gateway.baseUrl.ifBlank { "—" })
+        DiagnosticRow(
+            "设备",
+            gateway.client?.let { "${it.deviceName.ifBlank { it.deviceId }} · ${it.ownerId}" } ?: "—",
+        )
+        DiagnosticRow("客户端 ID", gateway.client?.clientId?.takeIf { it.isNotBlank() } ?: "—")
+        DiagnosticRow(
+            "本机 MCP 令牌",
+            when {
+                pairToken == null -> "未找到，请重新配对"
+                pairToken.revokedAtMs != null -> "已撤销，请重新配对"
+                pairToken.expiresAtMs == null -> "有效 · 永不过期"
+                pairToken.expiresAtMs <= now ->
+                    "已过期（${tokenDateFormat.format(Date(pairToken.expiresAtMs))}）"
+                else -> "有效 · ${tokenDateFormat.format(Date(pairToken.expiresAtMs))} 到期"
+            },
+        )
+        DiagnosticRow("访问令牌", "$active 枚有效 · $expired 枚过期 · $revoked 枚撤销")
+        DiagnosticRow(
+            "最近同步",
+            gateway.lastLoadedAtMs?.let { tokenDateFormat.format(Date(it)) } ?: "尚未同步",
+        )
+        if (pairBroken) {
+            Text(
+                text = "本机调用令牌不可用：从这台手机发起的网关工具调用会失败。" +
+                    "请用配对口令重新连接，或让管理员在服务端检查这台设备。",
+                style = MaterialTheme.typography.bodySmall,
+                color = statusPalette.failed,
+                modifier = Modifier.padding(top = spacing.sm),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticRow(label: String, value: String) {
+    val spacing = MaterialTheme.spacing
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = spacing.xs),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(88.dp),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 客户端接入信息：地址与客户端编号。
+ *
+ * 地址里**不含令牌** —— 令牌永远走 `Authorization: Bearer`，所以截图/分享这个
+ * 卡片不会顺手泄露凭据。
+ */
+@Composable
+private fun GatewayAccessCard(gateway: GatewayUiState) {
+    val spacing = MaterialTheme.spacing
+    val base = gateway.baseUrl.trim().trimEnd('/')
+    SectionCard(
+        title = "客户端接入",
+        subtitle = "把这台 Hub 当作远程 MCP 服务器使用",
+        modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
+    ) {
+        CopyableRow(
+            label = "MCP 地址",
+            value = if (base.isBlank()) "（尚未连接）" else "$base/mcp",
+            maxLines = 2,
+        )
+        CopyableRow(
+            label = "客户端 ID",
+            value = gateway.client?.clientId?.takeIf { it.isNotBlank() } ?: "—",
+            labelWidth = 76.dp,
+            maxLines = 1,
+        )
+        Text(
+            text = "在支持远程 MCP 的客户端里填上面的地址，请求头加 " +
+                "Authorization: Bearer <令牌>。地址本身不带任何凭据，" +
+                "令牌也不会写进查询参数。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = spacing.sm),
+        )
+    }
+}
+
+/**
+ * 访问令牌：列表 + 签发 + 一次性展示。
+ *
+ * 明文只在签发成功的那一次进入界面状态；点「我已保存」后从内存里清掉，
+ * 之后再想拿只能重新签发。列表里的编号只够撤销，不足以认证。
+ */
+@Composable
+private fun GatewayTokenCard(gatewayViewModel: GatewayViewModel, gateway: GatewayUiState) {
+    val spacing = MaterialTheme.spacing
+    val now = System.currentTimeMillis()
+    var label by rememberSaveable { mutableStateOf("") }
+    var days by rememberSaveable { mutableStateOf(90) }
+    var allowWrite by rememberSaveable { mutableStateOf(true) }
+    val activeCount = gateway.tokens.count { it.isActive(now) }
+
+    SectionCard(
+        title = "访问令牌",
+        subtitle = "给不同客户端发不同的令牌，撤销时互不影响",
+        trailing = {
+            StatusPill(
+                text = "$activeCount 枚有效",
+                color = if (activeCount > 0) {
+                    statusPalette.connected
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                showDot = activeCount > 0,
+            )
+        },
+        modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
+    ) {
+        val issued = gateway.issuedToken
+        if (issued != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        shape = MaterialTheme.shapes.small,
+                    )
+                    .padding(spacing.md),
+            ) {
+                Text(
+                    text = "只显示这一次",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                Text(
+                    text = "现在复制到客户端。关闭或离开后，Hub 无法再显示这串明文。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.padding(top = spacing.xs),
+                )
+                CopyableRow(
+                    label = "令牌",
+                    value = issued,
+                    maxLines = 3,
+                    modifier = Modifier.padding(top = spacing.sm),
+                )
+                Button(
+                    onClick = { gatewayViewModel.clearIssuedToken() },
+                    modifier = Modifier.padding(top = spacing.sm),
+                ) { Text("我已保存") }
+            }
+        }
+
+        if (gateway.tokens.isEmpty()) {
+            Text(
+                text = "这里还没有令牌记录。签发后，任何持有明文的人都能以这张卡的权限接入。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = if (issued != null) spacing.md else 0.dp),
+            )
+        } else {
+            gateway.tokens.forEachIndexed { index, token ->
+                if (index > 0) HorizontalDivider()
+                GatewayTokenRow(
+                    token = token,
+                    nowMs = now,
+                    busy = gateway.busyTokenId == token.id,
+                    onRevoke = { gatewayViewModel.revokeToken(token.id) },
+                )
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = spacing.md))
+        Text("签发新令牌", style = MaterialTheme.typography.titleSmall)
+
+        HubTextField(
+            value = label,
+            onValueChange = { if (it.length <= 64) label = it },
+            label = "标签",
+            placeholder = "例如 Claude Desktop",
+            supportingText = "只是给你自己看的备注，不影响权限。",
+            modifier = Modifier.padding(top = spacing.sm),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(top = spacing.sm),
+            horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+        ) {
+            listOf(30, 90, 365, 0).forEach { option ->
+                FilterChip(
+                    selected = days == option,
+                    onClick = { days = option },
+                    label = { Text(if (option == 0) "永久" else "$option 天") },
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = spacing.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("允许写操作", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "关闭时只能看到只读工具；「需确认」的工具仍需每次票据。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = allowWrite, onCheckedChange = { allowWrite = it })
+        }
+        Button(
+            onClick = { gatewayViewModel.issueToken(label, days, allowWrite) },
+            enabled = !gateway.issuingToken,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = spacing.sm),
+        ) {
+            if (gateway.issuingToken) {
+                CircularProgressIndicator(modifier = Modifier.padding(end = spacing.sm))
+                Text("正在签发…")
+            } else {
+                Text("签发令牌")
+            }
+        }
+        Text(
+            text = "权限范围只能收窄服务端授权：只读令牌看不到、也调不了写操作；" +
+                "任何令牌都无法越过服务端记录的 grant。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = spacing.sm),
+        )
+    }
+}
+
+@Composable
+private fun GatewayTokenRow(
+    token: GatewayAccessToken,
+    nowMs: Long,
+    busy: Boolean,
+    onRevoke: () -> Unit,
+) {
+    val spacing = MaterialTheme.spacing
+    val revoked = token.revokedAtMs != null
+    val expired = !revoked && token.expiresAtMs != null && token.expiresAtMs <= nowMs
+    val status = when {
+        revoked -> "已撤销"
+        expired -> "已过期"
+        else -> "有效"
+    }
+    val isPair = token.source == "pair"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = spacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = spacing.sm),
+        ) {
+            Text(
+                text = token.label,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${token.scopeLabel} · ${token.sourceLabel} · ${token.id}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "${token.expiryText()} · ${token.usageText()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            StatusPill(
+                text = status,
+                color = if (status == "有效") {
+                    statusPalette.connected
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                showDot = status == "有效",
+            )
+            // 配对令牌就是这台手机调用 /mcp 用的那枚，撤销它等于让本机掉线，
+            // 所以这里不给按钮 —— 要停用请用「解除配对」。
+            if (!isPair && !revoked) {
+                TextButton(onClick = onRevoke, enabled = !busy) {
+                    Text(if (busy) "撤销中…" else "撤销")
+                }
+            }
+        }
+    }
+}
+
+private val tokenDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+
+private fun GatewayAccessToken.expiryText(): String {
+    val expires = expiresAtMs ?: return "永不过期"
+    val text = tokenDateFormat.format(Date(expires))
+    return if (expires <= System.currentTimeMillis()) "已于 $text 过期" else "$text 到期"
+}
+
+private fun GatewayAccessToken.usageText(): String {
+    val used = lastUsedAtMs ?: return "从未使用"
+    return "最近使用 " + tokenDateFormat.format(Date(used))
 }
 
 private fun statusText(view: McpServerView): String = when (val discovery = view.discovery) {

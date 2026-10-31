@@ -7,6 +7,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 
@@ -24,6 +25,16 @@ data class GatewayUiState(
     val loading: Boolean = false,
     val services: List<GatewayService> = emptyList(),
     val client: GatewayClientInfo? = null,
+    val tokens: List<GatewayAccessToken> = emptyList(),
+    /**
+     * 刚签发出来的令牌明文。只在内存里存在到用户点击"我已保存"为止 ——
+     * 不写偏好、不进日志、不进加密存储（存储里只有配对令牌）。
+     */
+    val issuedToken: String? = null,
+    val issuingToken: Boolean = false,
+    val busyTokenId: String? = null,
+    /** 最近一次成功读取管理面清单的时间；只在界面上用于"数据有多新"。 */
+    val lastLoadedAtMs: Long? = null,
     val notice: String? = null,
     val error: String? = null,
     val busyServiceId: String? = null,
@@ -166,6 +177,8 @@ class GatewayState(
                 paired = true,
                 services = snapshot.services,
                 client = snapshot.client,
+                tokens = snapshot.tokens,
+                lastLoadedAtMs = clock(),
                 error = null,
             )
         } catch (error: GatewayApiException) {
@@ -176,6 +189,8 @@ class GatewayState(
                     loading = false,
                     paired = false,
                     services = emptyList(),
+                    tokens = emptyList(),
+                    issuedToken = null,
                     error = "网关凭据已失效，请重新配对",
                 )
             } else {
@@ -308,6 +323,77 @@ class GatewayState(
         }
     }
 
+    // ---- 客户端访问令牌 ----------------------------------------------------
+
+    /**
+     * 签发一枚新的 Bearer 令牌。
+     *
+     * 明文只在这一次响应里回到界面；之后列表里只有编号、标签、范围与时间。
+     * scope 只能**收窄**授权：即使选了「读写」，confirm 模式的工具仍要一次性票据。
+     */
+    fun issueToken(label: String, expiresInDays: Int, write: Boolean) {
+        if (_state.value.issuingToken) return
+        if (expiresInDays < 0 || expiresInDays > MAX_TOKEN_DAYS) {
+            return fail("有效期必须是 0–$MAX_TOKEN_DAYS 天（0 表示不设期限）")
+        }
+        val current = credentials ?: return fail("请先连接云端网关")
+        val base = _state.value.baseUrl
+        val safeLabel = label.trim().take(MAX_TOKEN_LABEL_CHARS).ifBlank { "访问令牌" }
+        _state.value = _state.value.copy(
+            issuingToken = true,
+            error = null,
+            notice = null,
+            issuedToken = null,
+        )
+        scope.launch(io) {
+            try {
+                val response = api.admin(base, current.managementToken, JSONObject().apply {
+                    put("action", "issue-client-token")
+                    put("label", safeLabel)
+                    put("expiresInDays", expiresInDays)
+                    put(
+                        "scopes",
+                        JSONArray(if (write) listOf("read", "write") else listOf("read")),
+                    )
+                })
+                val plain = response.optString("token")
+                _state.value = _state.value.copy(
+                    issuingToken = false,
+                    issuedToken = plain.takeIf { it.isNotBlank() },
+                    notice = "访问令牌已签发：明文只显示这一次",
+                )
+                loadSnapshot()
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(issuingToken = false, error = describe(error))
+            }
+        }
+    }
+
+    /** 用户确认已保存明文后调用；界面据此换回普通列表。 */
+    fun clearIssuedToken() {
+        _state.value = _state.value.copy(issuedToken = null, notice = null)
+    }
+
+    fun revokeToken(tokenId: String) {
+        if (_state.value.busyTokenId != null) return
+        if (!TOKEN_ID.matches(tokenId)) return fail("内部错误：令牌编号不合法")
+        val current = credentials ?: return fail("请先连接云端网关")
+        val base = _state.value.baseUrl
+        _state.value = _state.value.copy(busyTokenId = tokenId, error = null, notice = null)
+        scope.launch(io) {
+            try {
+                api.admin(base, current.managementToken, JSONObject().apply {
+                    put("action", "revoke-client-token")
+                    put("tokenId", tokenId)
+                })
+                _state.value = _state.value.copy(busyTokenId = null, notice = "访问令牌已撤销")
+                loadSnapshot()
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(busyTokenId = null, error = describe(error))
+            }
+        }
+    }
+
     /**
      * 通过网关真实调用一个工具。
      *
@@ -422,7 +508,10 @@ class GatewayState(
     companion object {
         const val MAX_NAME_CHARS = 80
         const val MAX_DESCRIPTION_CHARS = 300
+        const val MAX_TOKEN_LABEL_CHARS = 64
+        const val MAX_TOKEN_DAYS = 3650
         private val SERVICE_ID = Regex("^[a-z][a-z0-9-]{0,31}$")
         private val SECRET_REF = Regex("^[a-z][a-z0-9-]{0,31}$")
+        private val TOKEN_ID = Regex("^[a-f0-9]{8}$")
     }
 }
