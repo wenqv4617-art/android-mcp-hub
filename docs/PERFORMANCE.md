@@ -128,18 +128,76 @@ hot-cache catalog: min=0ms median=0ms p95=2ms max=3ms
 
 ## 4. 线上真实环境采样
 
-> 状态：**待部署后填写**。没有真实 Cloudflare 请求数据之前，这一节不写数字。
->
-> 部署完成后记录：Worker 版本、采样时间、每个场景的 p50/p90、样本数、
-> 缓存状态（`catalog_source` / `refresh_pending`）、HTTP 状态与 `request_id`。
-> 没有连接真实手机时，`phone_ping` / 完整目录只能记录“手机离线”的快速失败，
-> 不能冒充成功样本。
+### 4.1 部署与采样条件
+
+| 项 | 值 |
+| --- | --- |
+| Worker | `https://android-mcp-hub.causticrry.workers.dev` |
+| 版本 ID | `8d267f9e-31db-45ef-8747-aad202301571`（2026-10-31 部署） |
+| 部署运行 | [41179814832](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41179814832) |
+| 采样运行 | [41180041220](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180041220)（`verify_only=true`, `bench_samples=10`） |
+| 采样位置 | GitHub 托管 Ubuntu runner（公网直连，非本机代理） |
+| 鉴权 | 真实配对签发的 `hub_client_*` 受限令牌（值未打印） |
+| 上游 | `https://docs.mcp.cloudflare.com/mcp`（公开文档 MCP，真实第三方） |
+| 手机 | **未连接**；本轮没有真实 Android 设备 |
+
+### 4.2 实测
+
+| 场景 | p50 | p90 | 样本 / 成功 | 缓存状态 | 说明 |
+| --- | ---: | ---: | ---: | --- | --- |
+| `tools/list`（网关令牌，1 个已授权 `ext_*`） | 185.7 ms | 198.6 ms | 10 / 10 | `cache=none` | Worker + DO 鉴权与授权查询；不含原生目录 |
+| 第三方只读工具调用（Cloudflare 文档搜索） | **4 040.6 ms** | **4 099.6 ms** | 10 / 10 | `cache=none` | min 3 896.1 ms / max 4 613.7 ms；含上游真实检索 |
+
+对应的原始日志行（部署流水线输出，未打印令牌）：
+
+```
+BENCH tools/list: samples=10 p50=185.7ms p90=198.6ms min=181ms max=210.7ms cache=none
+BENCH ext_read_call: samples=10 p50=4040.6ms p90=4099.6ms min=3896.1ms max=4613.7ms cache=none
+```
+
+解读：
+
+- 同一次运行里，`tools/list` 约 0.19 s，而第三方调用约 4.0 s。差距不在网关转发，
+  而在上游检索本身；
+- 10 个样本的 p50 与 p90 很接近（4.04 s / 4.10 s），且 10 次全部成功，
+  **没有观察到网关超时后重放**；历史上 6.1 s 的麦当劳调用落在这个上游延迟区间的上沿，
+  与“上游自己慢”一致，而不是缓存失效；
+- 本轮**没有**自动重试，也没有把业务失败改写成传输失败。
+
+### 4.3 没有测到的线上格子
+
+| 场景 | 状态 | 原因 |
+| --- | --- | --- |
+| `phone_ping` | 未采样 | 没有真实手机；`hub_client_*` 令牌按设计也不能调用原生工具 |
+| `servers_only` / 完整 36 工具目录 / `limit=5` | 未采样 | 同上；需要 OAuth 或静态 MCP 令牌 + 已连接手机 |
+| `hub_get_tool_schema` | 未采样 | 同上 |
+| 真实客户端（ChatGPT / Claude Desktop / Codex）时延 | 未采样 | 没有真实账号；本轮只有官方 MCP SDK 客户端 |
+
+这些格子不能用一个“手机离线”的快速失败冒充成功样本，因此保持未采样。
+
+### 4.4 `request_id` 对应关系
+
+- **原生工具路径**（`phone_ping`、`hub_*`、29 个 Android 工具）：Worker 在
+  `worker/src/mcp/http.ts` 生成一次 `request_id`，写
+  `hub.forward_started` / `hub.forward_finished` 日志，并随信封下发给手机；
+  Android 的 `HubTrace` 用同一个 `request_id` 记录 `entry` / `connect` /
+  `list_tools` / `execute` / `done`。三段可以按这个值对齐。
+- **第三方 `ext_*` 路径**：V1 没有把网关内部的审计 ID 回传给下游；审计表里有
+  每次调用的 `id` / `principal` / `serviceId` / `tool` / `outcome`，但客户端拿不到这个 ID。
+  这是已知的可观测性缺口，不应假装三个系统天然共享同一个 `request_id`。
+  本轮线上验收以“同一运行、同一工具、同一参数、10 次全部成功”作为对照，
+  并用 `target_denied`、`confirmation_required`、票据重放等错误语义确认没有被静默重试。
 
 ---
 
 ## 5. 仍未验证的部分
 
-- workerd 真实运行时（本地 e2e 用 Node shim）；
 - 真实 Android 设备上的网络、Doze、后台限制对时延的影响；
-- 真实第三方 MCP 服务（本轮只有本地测试服务器）；
-- 真实客户端（ChatGPT / Claude Desktop / Codex）的端到端时延。
+- 真实客户端（ChatGPT / Claude Desktop / Codex）的端到端时延；
+- 第三方 `ext_*` 路径的 `request_id` 回传（见 4.4）。
+
+已补齐：
+
+- 真实 Cloudflare workerd 与真实公网 Worker（部署 + 线上验收已通过）；
+- 真实第三方 MCP（Cloudflare 文档 MCP，10 次采样全部成功）；
+- 线上鉴权失败（未带令牌 401）与撤销后拒绝（解除配对后旧令牌被拒绝）。

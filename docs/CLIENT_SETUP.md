@@ -15,8 +15,8 @@ https://<your-worker>.<subdomain>.workers.dev/mcp
 
 | 方式 | 适合 | 令牌位置 | 说明 |
 | --- | --- | --- | --- |
-| **URL + Bearer Token** | 支持自定义 Header 的客户端、脚本、CI | `Authorization: Bearer <令牌>` | 明文只显示一次；Hub 只保存 SHA-256 摘要 |
-| **OAuth 2.1 + PKCE** | 支持 OAuth 发现的客户端 | OAuth 访问令牌 | 需要配置 `OAUTH_OWNER_SECRET`；同意页由运维口令保护 |
+| **URL + Bearer Token** | 支持自定义 Header 的客户端、脚本、CI | `Authorization: Bearer <令牌>` | Android / 操作台签发的 `hub_client_*` **只访问已授权的 `ext_*` 第三方工具**；明文只显示一次；Hub 只保存 SHA-256 摘要 |
+| **OAuth 2.1 + PKCE** | 支持 OAuth 发现的客户端 | OAuth 访问令牌 | 需要配置 `OAUTH_OWNER_SECRET`；同意页由运维口令保护；可访问本机原生工具 |
 
 **令牌永远不放在 URL、查询参数、片段或 Cookie 里。** 如果某个客户端只允许填 URL、
 没有 Header/OAuth 输入框，那它就不能安全地接入本 Hub —— 不要为了“先连上”把令牌拼进 URL。
@@ -35,6 +35,10 @@ https://<your-worker>.<subdomain>.workers.dev/mcp
 每个客户端用**不同**的令牌。撤销某一枚不会影响其它客户端；
 撤销/过期在服务端立即生效，不需要等会话重连。
 
+> 这两个入口签发的都是 `hub_client_*`，**只访问已授权的 `ext_*`**。
+> 需要本机原生工具（备忘录、日历、设备状态等）时，请让客户端走 OAuth；
+> 静态 `MCP_ACCESS_TOKEN` 仅保留作本地联调旁路，真实部署默认不配置。
+
 ### 1.2 OAuth
 
 - 资源元数据：`/.well-known/oauth-protected-resource`
@@ -42,8 +46,9 @@ https://<your-worker>.<subdomain>.workers.dev/mcp
 - 动态客户端注册、PKCE S256、刷新令牌轮换均已实现；
 - 回调主机必须出现在 `OAUTH_REDIRECT_ALLOWLIST`（默认 `chatgpt.com`）。
 
-OAuth 只解决“客户端能不能进来”。**进来之后仍然只能看到逐项授权的 `ext_*` 工具**，
-不会因为完成 OAuth 就获得全部上游权限。
+OAuth 只解决“客户端能不能进来”。完成 OAuth 后可以看到**本机原生工具**，
+但**不会**因此获得任何上游 `ext_*` 工具 —— 上游仍须在操作台逐项授权。
+反过来，Android / 操作台签发的 `hub_client_*` 令牌只访问 `ext_*`，看不到本机原生工具。
 
 ---
 

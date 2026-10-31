@@ -15,7 +15,7 @@ import {
   validateTarget,
   type TokenScope,
 } from "./security";
-import { assertNoCredentials, discover, discoverOnClient, upstream, type DiscoveredTool, type Service } from "./upstream";
+import { assertNoCredentials, discover, discoverOnClient, redactCredentials, upstream, type DiscoveredTool, type Service } from "./upstream";
 
 interface Grant { serviceId: string; tool: string; fingerprint: string; revision: string; mode: "read" | "confirm" }
 
@@ -645,12 +645,16 @@ export class GatewayStore {
         });
         // Never retry this call, including 404/session expiry or ambiguous errors.
         const result = await sdk.callTool({ name: grant.tool, arguments: args }, undefined, { signal, timeout: service.timeoutMs });
-        if (result.isError) throw new GatewayError("upstream_tool_error", 502);
-        const encoded = JSON.stringify(result);
+        // 工具自己报的失败（isError）是业务结果，不是传输失败：脱敏后原样回给调用方。
+        // 只有协议/网络/超时问题才走下面的 GatewayError 分支。
+        // 成功的工具结果若含上游凭据，仍然失败关闭（credential_in_result），
+        // 不能把脱敏后的“成功”当成原结果交给调用方。
+        const sanitized = result.isError ? (redactCredentials(result, this.env) as typeof result) : result;
+        const encoded = JSON.stringify(sanitized);
         if (new TextEncoder().encode(encoded).byteLength > RESPONSE_LIMIT) throw new GatewayError("upstream_size_limit", 502);
-        assertNoCredentials(result, this.env);
-        await this.finish(auditId!, "success");
-        return result;
+        assertNoCredentials(sanitized, this.env);
+        await this.finish(auditId!, result.isError ? "upstream_tool_error" : "success");
+        return sanitized;
       });
     } catch (e) {
       const error = e instanceof GatewayError ? e : new GatewayError("upstream_failure", 502);

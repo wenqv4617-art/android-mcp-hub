@@ -218,6 +218,8 @@ Authorization: Bearer <客户端令牌>
 ```
 
 - 令牌在 Android 「服务 → 云端网关 → 访问令牌」或操作台 `/gateway` 签发；
+- 这类 `hub_client_*` 令牌**只访问已授权的 `ext_*`**，看不到本机原生工具；
+  需要原生工具时让客户端走 OAuth（本页 §3.2）；
 - 明文只显示一次，Hub 只保存摘要；
 - 只读令牌看不到、也调不了写操作；任何令牌都不能越过服务端 grant；
 - 不同客户端用不同令牌，撤销时互不影响。
@@ -250,8 +252,13 @@ npx wrangler@4.149.0 deployments list --config worker/wrangler.jsonc
 npx wrangler@4.149.0 rollback <deployment-id> --config worker/wrangler.jsonc
 ```
 
-**只停用网关**（不改代码）：把 `GATEWAY_ENABLED` 改成 `"false"` 后重新部署，
-或删除 `GATEWAY_ADMIN_TOKEN` / `GATEWAY_ANDROID_PAIRING_CODE` Secret。
+**只停用网关转发**：把 `GATEWAY_ENABLED` 改成 `"false"` 后重新部署。
+管理面、配对与 `ext_*` 转发会一起关闭，原生工具仍可用。
+
+**只关闭管理面**：删除 `GATEWAY_ADMIN_TOKEN` Secret（`/gateway` 返回 404），
+已有客户端令牌与转发不受影响。**只关闭新配对**：删除
+`GATEWAY_ANDROID_PAIRING_CODE` Secret（`/gateway/pair` 返回 404），
+已经配对成功的手机不受影响。两者都不是“停用网关”。
 
 **删除部署**（不可逆，先确认没有其他项目在用这个 Worker）：
 

@@ -121,10 +121,13 @@ describe("universal gateway: real HTTP + official SDK through Worker", () => {
     expect((await client.callTool({ name, arguments: {}, _meta: { "hub/confirmation": ticket } })).isError).toBe(true);
     expect(a.calls.length - count).toBe(1);
   });
-  it("sanitizes upstream tool errors and audit rows, never logging credentials", async () => {
+  it("preserves upstream tool errors after redacting credentials, and audit rows", async () => {
     await grant("alpha", "failure");
     const result = await client.callTool({ name: await gatewayName("alpha", "failure"), arguments: {} });
-    expect(result.isError).toBe(true); expect(JSON.stringify(result)).not.toContain("fixture-upstream-secret");
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("hidden internal error");
+    expect(JSON.stringify(result)).toContain("[redacted]");
+    expect(JSON.stringify(result)).not.toContain("fixture-upstream-secret");
     const data = (await admin({ action: "list" })).body;
     expect(data.audit.some((a: any) => a.outcome === "upstream_tool_error")).toBe(true);
     for (const text of [JSON.stringify(data), capturedLogs().join("\n")]) {

@@ -98,6 +98,36 @@ export function assertNoCredentials(value: unknown, env: Env): void {
     (encoded.includes(JSON.stringify(secret).slice(1, -1)) || (secret.startsWith("Bearer ") && encoded.includes(JSON.stringify(secret.slice(7)).slice(1, -1)))))) throw new GatewayError("credential_in_result", 502);
 }
 
+/**
+ * 把上游结果里出现的凭据替换成 `[redacted]`，而不是把整条工具结果丢掉。
+ *
+ * 工具结果可能是业务错误（`isError: true`）—— 它的原始文本对调用方有用，
+ * 不能因为里面碰巧带了一枚上游凭据就降级成笼统的网关错误。先脱敏，再交给
+ * `assertNoCredentials` 做最后一道校验；校验仍失败时调用方按协议错误处理。
+ */
+export function redactCredentials(value: unknown, env: Env): unknown {
+  const secrets = Object.values(JSON.parse(env.GATEWAY_UPSTREAM_SECRETS ?? "{}") as Record<string, string>)
+    .filter((secret): secret is string => typeof secret === "string" && secret.length > 0)
+    .flatMap(secret => secret.startsWith("Bearer ") ? [secret, secret.slice(7)] : [secret])
+    .filter(secret => secret.length > 0)
+    .sort((a, b) => b.length - a.length);
+  if (secrets.length === 0) return value;
+  const redact = (text: string): string => {
+    let output = text;
+    for (const secret of secrets) output = output.split(secret).join("[redacted]");
+    return output;
+  };
+  const walk = (node: unknown): unknown => {
+    if (typeof node === "string") return redact(node);
+    if (Array.isArray(node)) return node.map(walk);
+    if (node !== null && typeof node === "object") {
+      return Object.fromEntries(Object.entries(node).map(([key, child]) => [key, walk(child)]));
+    }
+    return node;
+  };
+  return walk(value);
+}
+
 export async function discoverOnClient(client: Client, signal: AbortSignal, timeoutMs: number): Promise<DiscoveredTool[]> {
   const tools: DiscoveredTool[] = [];
   let cursor: string | undefined;

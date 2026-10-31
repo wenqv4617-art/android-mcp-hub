@@ -6,6 +6,8 @@
 - **标准远程 MCP**：`/mcp` 提供 Streamable HTTP，支持 URL + Bearer Token 与 OAuth 2.1 + PKCE。
 - **通用网关**：把多个第三方 MCP 服务（Streamable HTTP / 旧版 HTTP+SSE）映射成 `ext_*` 工具，
   逐工具授权，客户端看不到未授权的上游。
+- **两种令牌的范围不同**：Android / 操作台签发的 `hub_client_*` 令牌只访问已授权的
+  `ext_*` 第三方工具；本机 36 个原生工具走 OAuth（`oauth:*`）或运维自行配置的静态 MCP 令牌。
 - **Android 原生能力**：36 个 MCP 工具，覆盖备忘录、待办、日历、提醒、闹钟、使用统计、
   设备状态与常用控制。
 - **按最小权限运行**：每个客户端独立令牌、独立授权、可单独撤销；scope 只能收窄授权。
@@ -126,11 +128,13 @@ https://<your-worker>.workers.dev/mcp
 
 1. **URL + Bearer Token**（推荐给支持自定义 Header 的客户端）
    - 在 Android「服务 → 云端网关 → 访问令牌」或操作台 `/gateway` 签发；
+   - 这类 `hub_client_*` 令牌**只访问已授权的 `ext_*` 第三方工具**，看不到本机原生工具；
    - 明文只显示一次；
    - 令牌只放在 `Authorization` 头，**不要**拼进 URL、查询参数或截图。
 2. **OAuth 2.1 + PKCE**
    - 客户端走 RFC 9728 / 8414 发现、动态注册、同意页；
-   - 需要配置 `OAUTH_OWNER_SECRET` 作为运维口令。
+   - 需要配置 `OAUTH_OWNER_SECRET` 作为运维口令；
+   - OAuth 客户端能看到本机原生工具；上游 `ext_*` 仍须逐项授权。
 
 各客户端的实际配置方式、兼容性与限制见 **[docs/CLIENT_SETUP.md](docs/CLIENT_SETUP.md)**。
 **不要**把「连上 Hub」理解成「自动获得所有上游工具」：每个 `ext_*` 工具仍需逐项授权。

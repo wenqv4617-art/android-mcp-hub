@@ -22,7 +22,7 @@
 
 默认 `GATEWAY_ENABLED=false`。管理 API 另用 `GATEWAY_ADMIN_TOKEN`，MCP 令牌不能管理服务；同源 Origin 检查，未提供跨域 CORS。客户端 token 只保存 SHA-256，推荐 `hub_client_` 加 32 字节随机串；所有凭据均由后端生成和保管。
 
-上游认证使用 Worker secret `GATEWAY_UPSTREAM_SECRETS`，JSON 键为 `ownerId/secretRef`，值为完整 Authorization 值。服务只存引用，不向前端返回上游密钥，也不接受任意客户端 Authorization 转发。无上游 OAuth 自动授权/刷新，需运维管理凭据；不同用户必须使用各自的引用。上游工具级错误统一脱敏，响应/目录若包含配置的上游凭据则拒绝。
+上游认证使用 Worker secret `GATEWAY_UPSTREAM_SECRETS`，JSON 键为 `ownerId/secretRef`，值为完整 Authorization 值。服务只存引用，不向前端返回上游密钥，也不接受任意客户端 Authorization 转发。无上游 OAuth 自动授权/刷新，需运维管理凭据；不同用户必须使用各自的引用。上游工具级错误（`isError: true`）先脱敏其中的上游凭据，再把 `content` / `structuredContent` 原样回传给调用方；审计记为 `upstream_tool_error`，不改成传输错误。成功的工具结果或目录若包含配置的上游凭据，仍然失败关闭（`credential_in_result`），以免把脱敏后的“成功”当成原结果。
 
 SSRF：运维配置 `GATEWAY_ALLOWED_URLS` 精确端点允许列表（逗号分隔、无 query/hash），生产仅 HTTPS/443、无 URL 凭据、禁止 IP 字面量和本地域名。每次实际 fetch 检查端点及同源，A/AAAA 通过固定 Cloudflare DoH 检查，任何非公网单播 IP 或解析错误均拒绝；所有重定向拒绝。旧 SSE 的 message 端点也必须逐个批准，允许协议生成的 query。**Workers fetch 不能绑定到已校验的 DNS IP，DoH 与 fetch 存在解析时间差；严格允许列表是最终信任边界，只能批准自己控制或信任其 DNS 的目标，不能开放给任意用户自助添加域名。** 更强的网络层 DNS 固定/出口代理尚未实现。
 

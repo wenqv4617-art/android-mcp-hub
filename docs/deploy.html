@@ -199,7 +199,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/gateway"  # 期望 200</code></
     </div>
     <div class="card">
       <h3>令牌从哪来</h3>
-      <p>Android「服务 → 云端网关 → 访问令牌」，或操作台 <code>/gateway</code>。明文只显示一次。</p>
+      <p>Android「服务 → 云端网关 → 访问令牌」，或操作台 <code>/gateway</code>。明文只显示一次。<br>
+      这类 <code>hub_client_*</code> 只访问已授权的 <code>ext_*</code>；本机原生工具请让客户端走 OAuth。</p>
     </div>
   </div>
   <div class="note">令牌只放在 <code>Authorization</code> 头。不要拼进 URL、查询参数、截图或聊天记录。
@@ -212,7 +213,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/gateway"  # 期望 200</code></
   <table>
     <tr><th>现象</th><th>常见原因</th><th>处理</th></tr>
     <tr><td>部署报 <code>Missing entry-point</code></td><td>没带 <code>--config worker/wrangler.jsonc</code></td><td>加上参数重试</td></tr>
-    <tr><td><code>/gateway</code> 404</td><td><code>GATEWAY_ENABLED</code> 不是 <code>"true"</code>，或绑定缺失</td><td>检查 vars 与 durable_objects</td></tr>
+    <tr><td><code>/gateway</code> 404</td><td><code>GATEWAY_ENABLED</code> 不是 <code>"true"</code>、绑定缺失，或没设置 <code>GATEWAY_ADMIN_TOKEN</code></td><td>检查 vars、durable_objects 与管理令牌</td></tr>
     <tr><td><code>/gateway/pair</code> 404</td><td>没设置配对码 Secret</td><td><code>secret put</code> 后重试，无需重新部署</td></tr>
     <tr><td><code>/mcp</code> 一直 401</td><td>令牌撤销/过期，或放进了 URL</td><td>重新签发，改走 Authorization 头</td></tr>
     <tr><td>看不到某个 <code>ext_*</code> 工具</td><td>未授权、服务停用、定义指纹失效</td><td>操作台重新 test + grant</td></tr>
