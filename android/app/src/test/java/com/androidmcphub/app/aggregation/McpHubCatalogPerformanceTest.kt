@@ -211,6 +211,56 @@ class McpHubCatalogPerformanceTest {
     }
 
     @Test
+    fun `B1b 80 个工具逐页取完，不缺失不重复且元数据一致`() {
+        val tools = (1..80).map { tool("t$it") }
+        val transport = ProbeTransport("srv_a", tools = tools)
+        val h = harness(
+            servers = listOf(config("srv_a")),
+            transports = mapOf("srv_a" to transport),
+            limits = HubLimits(maxTools = 500),
+        )
+        h.grantAll("srv_a", tools)
+
+        val pageSize = 10
+        val seen = mutableListOf<String>()
+        var offset = 0
+        var pages = 0
+        while (true) {
+            val page = h.list(offset = offset, limit = pageSize)
+            pages += 1
+            assertEquals("每一页的总量都必须是 80", 80, page.getInt("total_tools"))
+            assertEquals(offset, page.getInt("offset"))
+            assertEquals("refresh_pending 不能在缓存命中时变成 true", false, page.getBoolean("refresh_pending"))
+            assertEquals(
+                "首页刷新、后续页命中缓存",
+                if (pages == 1) HubCatalog.SOURCE_REFRESH else HubCatalog.SOURCE_CACHE,
+                page.getString("catalog_source"),
+            )
+            val entries = page.getJSONArray("tools")
+            assertEquals(page.getInt("returned"), entries.length())
+            for (i in 0 until entries.length()) {
+                seen += entries.getJSONObject(i).getString("tool_name")
+            }
+            if (!page.getBoolean("has_more")) {
+                assertFalse("最后一页不应再给 next_offset", page.has("next_offset"))
+                assertFalse("取完时不该标记 truncated", page.getBoolean("truncated"))
+                break
+            }
+            assertEquals(offset + entries.length(), page.getInt("next_offset"))
+            offset = page.getInt("next_offset")
+            assertTrue("页数不可能超过工具数", pages <= 80)
+        }
+
+        assertEquals("页数应为 80 / 10", 8, pages)
+        assertEquals("不能有重复", 80, seen.toSet().size)
+        assertEquals("不能有缺失", (1..80).map { "t$it" }.toSet(), seen.toSet())
+        // 翻页全部来自第一次刷新写下的同一份缓存，不重复联网。
+        assertEquals(1, transport.connects.get())
+        // 第一页是 refresh，后续页是 cache —— 缓存状态必须随实际来源变化。
+        h.close()
+    }
+
+    @Test
     fun `B2 limit 只影响这一页，不影响总量`() {
         val tools = (1..30).map { tool("t$it") }
         val h = harness(
@@ -524,6 +574,31 @@ class McpHubCatalogPerformanceTest {
         assertTrue(payload.getLong("elapsed_ms") >= 0)
         assertEquals(HubCatalog.SOURCE_REFRESH, payload.getString("catalog_source"))
         assertTrue(payload.has("refresh_pending"))
+        h.close()
+    }
+
+    @Test
+    fun `E2 冷缓存遇到挂起服务器会等到目录截止时间`() {
+        // 历史真机上「工具目录 3.4–3.8 秒、刷新后仍然慢」的结构性来源：
+        // 目录请求在缓存为空/过期时会**同步等待**刷新，单台挂起的服务器就能吃掉
+        // 整个 catalogDeadlineMs（默认 3_500ms）。这里把截止时间调小，验证的是
+        // “等多久由截止时间决定”，避免为了断言时长拖慢整个测试套件。
+        val slow = ProbeTransport("srv_slow", tools = listOf(tool("t1")), connectDelayMs = 10_000)
+        val h = harness(
+            servers = listOf(config("srv_slow")),
+            transports = mapOf("srv_slow" to slow),
+            limits = HubLimits(catalogDeadlineMs = 700),
+        )
+        h.grantAll("srv_slow", slow.tools)
+
+        val first = timeMs { h.list() }
+        assertTrue("冷缓存应等到截止时间，实测 ${first}ms", first >= 650)
+        assertTrue("不能被单台服务器拖过截止时间太多，实测 ${first}ms", first < 2_000)
+
+        // 单飞：刷新还没结束，第二次请求仍会等同一个 future 到新的截止时间。
+        // 这正是“刷新之后下一次还是慢”的形状 —— 不是缓存没命中，是刷新本身还在飞。
+        val second = timeMs { h.list() }
+        assertTrue("刷新仍在飞时应继续等到截止时间，实测 ${second}ms", second >= 650)
         h.close()
     }
 

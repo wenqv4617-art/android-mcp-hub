@@ -31,6 +31,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { mkdir, writeFile } from "node:fs/promises";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 
 import worker from "../worker/src/index";
@@ -449,6 +450,72 @@ async function connectMcpClient(origin: string, token: string | null): Promise<M
   const client = new Client({ name: "gate0-e2e-client", version: "0.1.0" });
   await client.connect(transport as never);
   return client as unknown as McpClientLike;
+}
+
+// ---------------------------------------------------------------------------
+//  可选：本地性能采样（BENCH=1）
+// ---------------------------------------------------------------------------
+//
+//  这里量的是**整条本地链路**：官方 MCP SDK → 真实 HTTP → Worker/DO（Node shim）
+//  → 真实 WebSocket → 手机替身 → 本地第三方 MCP 服务器（仅第三方调用场景）。
+//  它不是 workerd、不是手机网络、更不是真实 Android 设备；数字只能用来做
+//  “同一台机器上的相对比较”和“有没有数量级异常”，不能拿来当线上 SLA。
+//  结果写入 test-reports/local-performance.json，便于和之后的线上采样对照。
+
+interface BenchResult {
+  ok: boolean;
+  catalogSource?: string;
+  refreshPending?: boolean;
+  availabilitySource?: string;
+}
+
+function percentile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[index] as number;
+}
+
+async function benchScenario(
+  id: string,
+  label: string,
+  samples: number,
+  invoke: () => Promise<BenchResult>,
+): Promise<Record<string, unknown>> {
+  const times: number[] = [];
+  let successes = 0;
+  let state: Omit<BenchResult, "ok"> = {};
+
+  // 预热一次：连接、JIT、HTTP keep-alive 都属于“第一次”的成本，不该混进稳态样本。
+  await invoke().catch(() => undefined);
+
+  for (let i = 0; i < samples; i += 1) {
+    const started = performance.now();
+    try {
+      const result = await invoke();
+      times.push(performance.now() - started);
+      if (result.ok) successes += 1;
+      state = {
+        catalogSource: result.catalogSource,
+        refreshPending: result.refreshPending,
+        availabilitySource: result.availabilitySource,
+      };
+    } catch {
+      times.push(performance.now() - started);
+    }
+  }
+
+  const sorted = [...times].sort((a, b) => a - b);
+  return {
+    id,
+    label,
+    samples,
+    successes,
+    p50_ms: Math.round(percentile(sorted, 50)),
+    p90_ms: Math.round(percentile(sorted, 90)),
+    min_ms: Math.round(sorted[0] ?? 0),
+    max_ms: Math.round(sorted[sorted.length - 1] ?? 0),
+    state,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,6 +1700,129 @@ async function main(): Promise<void> {
         !finalCalls.includes("destructive_write"),
         `服务器记录的工具调用=${finalCalls.join(",")}`,
       );
+
+      // ---- 可选性能采样 ------------------------------------------------
+      if (process.env["BENCH"] === "1") {
+        const samples = Math.min(100, Math.max(5, Number(process.env["BENCH_SAMPLES"] ?? "20") || 20));
+        out("");
+        out(`⑬ 本地性能采样（每个场景预热 1 次 + ${samples} 个样本）`);
+        out("   ⚠ 真 HTTP/SDK/WS，但 Worker 是 Node shim、手机与第三方服务都在本机");
+
+        const stateOf = (structured: Record<string, unknown>): Omit<BenchResult, "ok"> => {
+          const servers = (structured["servers"] as Array<Record<string, unknown>> | undefined) ?? [];
+          return {
+            catalogSource:
+              typeof structured["catalog_source"] === "string" ? structured["catalog_source"] : undefined,
+            refreshPending:
+              typeof structured["refresh_pending"] === "boolean" ? structured["refresh_pending"] : undefined,
+            availabilitySource:
+              typeof servers[0]?.["availability_source"] === "string"
+                ? (servers[0]?.["availability_source"] as string)
+                : undefined,
+          };
+        };
+
+        const scenarios: Array<[string, string, () => Promise<BenchResult>]> = [
+          [
+            "ping",
+            "phone_ping",
+            async () => {
+              const r = await toolCall(LIVE_MCP_DEVICE_ID, 2_000, {}, "phone_ping");
+              return { ok: !r.isError && r.structured["ok"] === true, ...stateOf(r.structured) };
+            },
+          ],
+          [
+            "servers_only",
+            "hub_list_tools · servers_only",
+            async () => {
+              const r = await toolCall(LIVE_MCP_DEVICE_ID, 8_000, { servers_only: true }, "hub_list_tools");
+              return { ok: !r.isError && r.structured["ok"] === true, ...stateOf(r.structured) };
+            },
+          ],
+          [
+            "catalog_full",
+            "hub_list_tools · 完整目录",
+            async () => {
+              const r = await toolCall(LIVE_MCP_DEVICE_ID, 8_000, {}, "hub_list_tools");
+              return { ok: !r.isError && r.structured["ok"] === true, ...stateOf(r.structured) };
+            },
+          ],
+          [
+            "catalog_limit_5",
+            "hub_list_tools · limit=5",
+            async () => {
+              const r = await toolCall(LIVE_MCP_DEVICE_ID, 8_000, { limit: 5 }, "hub_list_tools");
+              return { ok: !r.isError && r.structured["ok"] === true, ...stateOf(r.structured) };
+            },
+          ],
+          [
+            "schema",
+            "hub_get_tool_schema · echo_text",
+            async () => {
+              const r = await toolCall(
+                LIVE_MCP_DEVICE_ID,
+                8_000,
+                { server_id: "live_server", tool_name: "echo_text" },
+                "hub_get_tool_schema",
+              );
+              return {
+                ok: !r.isError && r.structured["tool_name"] === "echo_text",
+                ...stateOf(r.structured),
+              };
+            },
+          ],
+          [
+            "third_party_call",
+            "hub_call_tool · sum_numbers",
+            async () => {
+              const r = await toolCall(
+                LIVE_MCP_DEVICE_ID,
+                8_000,
+                { server_id: "live_server", tool_name: "sum_numbers", arguments: { a: 2, b: 40 } },
+                "hub_call_tool",
+              );
+              return { ok: !r.isError && r.structured["ok"] === true, ...stateOf(r.structured) };
+            },
+          ],
+        ];
+
+        const report = [];
+        for (const [id, label, invoke] of scenarios) {
+          const result = await benchScenario(id, label, samples, invoke);
+          report.push(result);
+          const state = result["state"] as Record<string, unknown>;
+          out(
+            `   ${String(result["id"]).padEnd(18)} p50=${String(result["p50_ms"]).padStart(4)}ms ` +
+              `p90=${String(result["p90_ms"]).padStart(4)}ms  ok=${String(result["successes"])}/${samples}  ` +
+              `catalog_source=${String(state["catalogSource"] ?? "—")} refresh_pending=${String(
+                state["refreshPending"] ?? "—",
+              )}`,
+          );
+        }
+
+        await mkdir("test-reports", { recursive: true });
+        await writeFile(
+          "test-reports/local-performance.json",
+          `${JSON.stringify(
+            {
+              generatedAt: new Date().toISOString(),
+              environment: {
+                runtime: "Node shim (not workerd)",
+                transport: "official MCP SDK over real HTTP + real WebSocket",
+                phone: "mock phone subprocess",
+                thirdParty: "local MCP test server subprocess",
+              },
+              samples,
+              scenarios: report,
+            },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+        out("   已写入 test-reports/local-performance.json");
+        out("");
+      }
     } finally {
       await liveServer.close();
     }

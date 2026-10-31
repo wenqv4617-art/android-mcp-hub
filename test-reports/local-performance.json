@@ -1,0 +1,90 @@
+{
+  "generatedAt": "2026-10-31T07:08:26.700Z",
+  "environment": {
+    "runtime": "Node shim (not workerd)",
+    "transport": "official MCP SDK over real HTTP + real WebSocket",
+    "phone": "mock phone subprocess",
+    "thirdParty": "local MCP test server subprocess"
+  },
+  "samples": 20,
+  "scenarios": [
+    {
+      "id": "ping",
+      "label": "phone_ping",
+      "samples": 20,
+      "successes": 20,
+      "p50_ms": 15,
+      "p90_ms": 17,
+      "min_ms": 4,
+      "max_ms": 18,
+      "state": {}
+    },
+    {
+      "id": "servers_only",
+      "label": "hub_list_tools · servers_only",
+      "samples": 20,
+      "successes": 20,
+      "p50_ms": 15,
+      "p90_ms": 17,
+      "min_ms": 4,
+      "max_ms": 18,
+      "state": {
+        "catalogSource": "cache",
+        "refreshPending": false,
+        "availabilitySource": "cache"
+      }
+    },
+    {
+      "id": "catalog_full",
+      "label": "hub_list_tools · 完整目录",
+      "samples": 20,
+      "successes": 20,
+      "p50_ms": 57,
+      "p90_ms": 65,
+      "min_ms": 44,
+      "max_ms": 66,
+      "state": {
+        "catalogSource": "refresh",
+        "refreshPending": false,
+        "availabilitySource": "live"
+      }
+    },
+    {
+      "id": "catalog_limit_5",
+      "label": "hub_list_tools · limit=5",
+      "samples": 20,
+      "successes": 20,
+      "p50_ms": 51,
+      "p90_ms": 63,
+      "min_ms": 31,
+      "max_ms": 63,
+      "state": {
+        "catalogSource": "refresh",
+        "refreshPending": false,
+        "availabilitySource": "live"
+      }
+    },
+    {
+      "id": "schema",
+      "label": "hub_get_tool_schema · echo_text",
+      "samples": 20,
+      "successes": 20,
+      "p50_ms": 48,
+      "p90_ms": 63,
+      "min_ms": 31,
+      "max_ms": 64,
+      "state": {}
+    },
+    {
+      "id": "third_party_call",
+      "label": "hub_call_tool · sum_numbers",
+      "samples": 20,
+      "successes": 20,
+      "p50_ms": 63,
+      "p90_ms": 78,
+      "min_ms": 25,
+      "max_ms": 80,
+      "state": {}
+    }
+  ]
+}
