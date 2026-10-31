@@ -7,7 +7,7 @@
 它不做工具管理、不扫描已安装应用、不启动其它应用、不做跨设备控制。
 
 - 包名 / applicationId：`com.androidmcphub.app`
-- 版本：`1.6.2`（versionCode 8）
+- 版本：`1.6.3`（versionCode 9）
 - 最低系统：Android 8.0（API 26）；编译与目标 SDK：API 35
 
 ---
@@ -353,6 +353,57 @@ TCP 链路在后台静默窗口里已经死了，只是应用层 30 秒心跳与
 **仍不可修复的边界**：用户在系统设置里「强行停止」应用、或 OEM 直接杀掉进程时，Android 不允许应用
 自愈；本版本能保证的是**不再误报原因、保留意图、回到前台自动恢复、恢复后诊断页能看到真实原因**。
 
+### 2.7 V1.6.3：双端连接诊断与云端日志回传
+
+V1.6.2 解决了"误报原因"和"不能自动恢复"，但真机仍反复出现
+`server_close code=4001` → 重连 → `network:connection_reset` 的循环。只看手机一侧无法回答
+"4001 是谁关的、云端是否认为设备还在线、两条连接是否在抢同一个设备 ID"。V1.6.3 因此做两件事：
+**把手机侧观测结构化**，并**让云端把自己的观测安全地回传给同一台设备**。
+
+**1. 本机事件不再是一句中文**
+
+`LinkEvent` 在 V1.6.3 增加了结构化字段：`generation`、`closeCode`、`category`、`source`、
+`attempt`、`heartbeatAgeMs`、`exceptionClass`。其中：
+
+- `closeCode` 是**实际收到**的关闭帧码；没收到就是 `null`，绝不填 1006 冒充；
+- `category` 只能是 `SocketFailure.ALL` 的闭集值（`dns_failure` / `connection_reset` / `tls_failure` …）；
+- `exceptionClass` 只是异常的**类名**（如 `SocketException`），**不采集 `message`** ——
+  message 可能混有服务器地址或令牌片段；类名在上报前还会按标识符形状再收敛一次。
+- 应用层心跳与 OkHttp 协议层 ping 是两套机制，诊断页分开展示：协议层 ping 由 OkHttp 自动发、
+  Cloudflare 边缘自动回 pong（OkHttp 不提供 pong 回调，页面不会假装观察到了 pong）；
+  应用层心跳才需要 `heartbeat_ack`，并参与 60 秒静默阈值判定。
+
+**2. 断网期间不丢关键证据，但也不能无限攒**
+
+断线时 `diag_event` 发不出去。`DiagReportQueue` 把它排队：上限 **50 条**、超过 **15 分钟**的事件
+不再补发（陈旧事件只会污染合并时间线），两者都会计入丢弃数。下一次连上后按入队顺序补发；
+发送失败时该条放回队首并停止本轮，不会丢。队列在 `PhoneLinkClient` 之外单独实现，因此容量/过期/
+并发行为全部有 JVM 测试（`DiagReportQueueTest`）。
+
+**3. 云端诊断是独立的 HTTPS 查询，不碰主 WebSocket**
+
+`CloudDiagnosticsClient` 使用**独立的 OkHttpClient**：连接/读写 8 秒、整次调用 12 秒，
+不跟随重定向、不自动重试，只发 `GET {server}/diagnostics`（由配置的 WS 地址推导），
+带 `X-Device-Id` 与 `Authorization: Bearer <device token>`。因此：
+
+- 云端查询失败只影响诊断页的状态文案，**不会**触发主连接重连；
+- 主 WebSocket 已经断开时，只要 HTTPS 可达，仍然能读到云端已记录的事件。
+
+云端响应的字段是闭集白名单解析；`detail` 里不认识的键整条丢弃。**关闭码语义（`4001` 等）
+只来自服务端返回的 `close_codes` 映射**，Android 不硬编码，也不凭码值猜原因。
+
+**4. 诊断页：来源切换 + 合并时间线**
+
+诊断页顶部新增「云端状态」卡片（在线/过期、连接代次、最近活动、缓冲区、时钟差、刷新按钮与失败原因），
+时间线支持「本机 / 云端 / 合并」三种来源与按事件类型筛选，并可复制/导出脱敏文本。
+
+合并视图**不直接比较两端原始时间**：云端事件的 `at` 是服务端时间，先用
+`server_time - fetched_at` 得到的时钟差校正到本机时间轴再排序，并在行内同时显示
+「服务端 … → 本机 …」。手机上报的事件另有 `client_at`（手机时钟），也一并展示。
+
+两侧事件只有在**时间相差 ≤15 秒且连接代次不冲突**时才标「可能相关」；任一侧缺代次视为未知
+（可以标），两侧代次不同则明确不是同一条连接（不标）。这是"可能相关"，不是因果结论。
+
 ---
 
 ## 3. 连接协议
@@ -365,7 +416,7 @@ TCP 链路在后台静默窗口里已经死了，只是应用层 30 秒心跳与
 | --- | --- |
 | `Authorization` | `Bearer <用户在界面里填的设备令牌>` |
 | `X-Device-Id` | `<用户在界面里填的设备 ID>` |
-| `X-Client-Version` | `android-mcp-hub/<versionName>`（V1.6.2 为 `android-mcp-hub/1.6.2`） |
+| `X-Client-Version` | `android-mcp-hub/<versionName>`（V1.6.3 为 `android-mcp-hub/1.6.3`） |
 
 服务端 → 手机：
 
@@ -381,7 +432,7 @@ TCP 链路在后台静默窗口里已经死了，只是应用层 30 秒心跳与
 手机 → 服务端：
 
 ```json
-{"type":"hello","device_id":"…","protocol_version":"phone-link-v1","app_version":"1.6.2","android_sdk":36}
+{"type":"hello","device_id":"…","protocol_version":"phone-link-v1","app_version":"1.6.3","android_sdk":36}
 {"type":"phone_pong","request_id":"<与 ping 逐字符相同>","timestamp":1760000000155}
 {"type":"heartbeat","timestamp":1760000000500}
 ```
@@ -631,7 +682,9 @@ V1.6.2 新增（后台连接可靠性）：
 
 合计 **171** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
-> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（V1.6.2）：**788 条用例、0 失败、7 跳过**（命令见本节开头）。
+> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（V1.6.3）：**835 条用例、0 失败、7 跳过**（命令见本节开头；V1.6.3 新增
+`DiagReportQueueTest`、`CloudDiagnosticsClientTest`、`DiagnosticsTimelineTest`、`DiagEventEncodingTest`
+等 47 条诊断用例）。
 
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >

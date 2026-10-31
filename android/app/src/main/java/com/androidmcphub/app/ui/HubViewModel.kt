@@ -7,12 +7,20 @@ import androidx.lifecycle.AndroidViewModel
 import com.androidmcphub.app.core.HubDraft
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.TokenLoadResult
+import com.androidmcphub.app.net.CloudDiagFailure
+import com.androidmcphub.app.net.CloudDiagnostics
+import com.androidmcphub.app.net.CloudDiagnosticsClient
+import com.androidmcphub.app.net.CloudDiagnosticsResult
 import com.androidmcphub.app.service.LinkBus
 import com.androidmcphub.app.service.LinkRestorePolicy
 import com.androidmcphub.app.service.PhoneLinkService
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 界面唯一的 ViewModel。
@@ -109,6 +117,25 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 连接统计：最近成功/心跳/断线、重连次数、当前网络类型。 */
     val diagnostics = LinkBus.diagnostics
+
+    private val cloudDiagClient = CloudDiagnosticsClient(
+        configProvider = { prefs.load() },
+        credentialProvider = { prefs.loadTokenResult() },
+    )
+
+    private val _cloudDiag = MutableStateFlow(CloudDiagUiState())
+
+    /**
+     * 云端诊断查询状态。
+     *
+     * 查询失败时**保留**上一次成功的结果（[CloudDiagUiState.payload]），只把
+     * 失败原因放在 [CloudDiagUiState.failure] —— 用户仍然能看到云端此前的
+     * 事件，同时知道"这份数据不是刚刷新的"。清空旧数据会让一次网络抖动
+     * 看起来像"云端从来没记录过"。
+     */
+    val cloudDiagnostics: StateFlow<CloudDiagUiState> = _cloudDiag.asStateFlow()
+
+    private val cloudFetchInFlight = AtomicBoolean(false)
 
     private val _batteryUnrestricted = MutableStateFlow(isBatteryUnrestricted())
 
@@ -275,6 +302,56 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * 打开诊断页时按需取一次云端日志。
+     *
+     * 只在"还从没成功过、也没有正在进行的查询"时自动取；后续更新由用户
+     * 手动刷新。诊断页不该成为后台轮询接口。
+     */
+    fun refreshCloudDiagnosticsIfNeverLoaded() {
+        val state = _cloudDiag.value
+        if (state.payload == null && !state.loading && state.failure == null) {
+            refreshCloudDiagnostics()
+        }
+    }
+
+    /**
+     * 手动刷新云端诊断。
+     *
+     * 走独立的 HTTPS 客户端，**不碰**主 WebSocket：查询失败不会导致重连，
+     * 主连接断开时只要 HTTPS 可达也照样能拿到云端已有事件。
+     */
+    fun refreshCloudDiagnostics() {
+        if (!cloudFetchInFlight.compareAndSet(false, true)) return
+        _cloudDiag.value = _cloudDiag.value.copy(loading = true, failure = null, failureStatus = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                cloudDiagClient.fetch()
+            } catch (_: Throwable) {
+                // fetch() 自己已收敛所有失败；这里只是兜底，防止意外异常
+                // 让 loading 永远停在 true。
+                CloudDiagnosticsResult.Failure(CloudDiagFailure.BAD_RESPONSE)
+            } finally {
+                cloudFetchInFlight.set(false)
+            }
+            val now = System.currentTimeMillis()
+            _cloudDiag.value = when (result) {
+                is CloudDiagnosticsResult.Success -> CloudDiagUiState(
+                    loading = false,
+                    payload = result.payload,
+                    lastFetchedAtMs = now,
+                )
+
+                is CloudDiagnosticsResult.Failure -> _cloudDiag.value.copy(
+                    loading = false,
+                    failure = result.kind,
+                    failureStatus = result.httpStatus,
+                    lastAttemptAtMs = now,
+                )
+            }
+        }
+    }
+
+    /**
      * 打开应用时恢复"用户此前希望保持连接"的会话。
      *
      * 触发条件刻意收得很紧：
@@ -316,3 +393,19 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
         const val RESTORE_DEBOUNCE_MS = 2_000L
     }
 }
+
+/**
+ * 云端诊断的界面状态。
+ *
+ * [payload] 与 [failure] 可以同时非空：前者是**上一次成功**的云端快照，
+ * 后者是**这一次**查询的失败原因。界面必须把两者分开展示，不能把旧数据
+ * 打扮成刚刷新的结果。
+ */
+data class CloudDiagUiState(
+    val loading: Boolean = false,
+    val payload: CloudDiagnostics? = null,
+    val lastFetchedAtMs: Long? = null,
+    val failure: CloudDiagFailure? = null,
+    val failureStatus: Int? = null,
+    val lastAttemptAtMs: Long? = null,
+)

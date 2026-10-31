@@ -1,5 +1,7 @@
 package com.androidmcphub.app.protocol
 
+import com.androidmcphub.app.core.DiagClientEvent
+import com.androidmcphub.app.core.DiagReport
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -7,7 +9,7 @@ import org.json.JSONObject
 const val PROTOCOL_VERSION = "phone-link-v1"
 
 /** 应用版本，进入 hello 帧；与 build.gradle.kts 的 versionName 保持一致。 */
-const val APP_VERSION = "1.6.2"
+const val APP_VERSION = "1.6.3"
 
 /** 握手时上报的客户端标识：`android-mcp-hub/<version>`。 */
 const val CLIENT_VERSION = "android-mcp-hub/$APP_VERSION"
@@ -291,6 +293,40 @@ fun encodeHeartbeat(ts: Long): String = JSONObject()
     .put("type", "heartbeat")
     .put("timestamp", ts)
     .toString()
+
+/**
+ * 手机 → 服务端的一条连接诊断事件（V1.6.3）。
+ *
+ * 字段名与 `worker/src/phone/messages.ts` 的 `DiagEventFrame` 逐字一致。
+ * 这里只输出 [DiagReport] 里**已经有值**的字段：缺省字段在 JSON 里不存在，
+ * 服务端按 `undefined` 处理，不会把"没观察到"误记成某个具体值。
+ *
+ * 安全约束由数据类本身保证 —— [DiagReport] 没有任何字段能装下令牌、地址或
+ * 请求参数，本函数也不接受自由文本参数。
+ */
+fun encodeDiagEvent(report: DiagReport): String {
+    val obj = JSONObject()
+        .put("type", "diag_event")
+        // 闭集外的名字发成 `unknown`（服务端不认识，整条丢弃）。
+        // 刻意**不**挑一个合法事件顶替 —— 那会把"程序 bug"伪装成某个真实事件。
+        .put("event", if (report.event in DiagClientEvent.ALL) report.event else "unknown")
+        .put("client_at", report.clientAtMs)
+    report.category?.let { obj.put("category", it) }
+    report.closeCode?.let { obj.put("close_code", it) }
+    report.generation?.let { obj.put("generation", it) }
+    report.network?.let { obj.put("network", it) }
+    report.vpn?.let { obj.put("vpn", it) }
+    report.screen?.let { obj.put("screen", it) }
+    report.pid?.let { obj.put("pid", it) }
+    report.processUptimeMs?.let { obj.put("process_uptime_ms", it) }
+    report.appVersion.takeIf { it.isNotBlank() }?.let { obj.put("app_version", it) }
+    report.androidSdk?.let { obj.put("android_sdk", it) }
+    report.localCloseSource?.let { obj.put("local_close_source", it) }
+    report.heartbeatAgeMs?.let { obj.put("heartbeat_age_ms", it) }
+    report.exceptionClass?.let { obj.put("exception_class", it) }
+    report.attempt?.let { obj.put("attempt", it) }
+    return obj.toString()
+}
 
 /** 手机 → 服务端的握手帧。 */
 fun encodeHello(

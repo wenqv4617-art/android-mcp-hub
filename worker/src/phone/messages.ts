@@ -102,11 +102,47 @@ export interface PhoneHeartbeatFrame {
   timestamp?: number;
 }
 
+/**
+ * 手机 → 服务端：一条客户端视角的连接诊断事件（V1.6.3）。
+ *
+ * 这是**观测数据**，不是控制指令：服务端只把它规整后写进该设备的诊断缓冲区，
+ * 永远不会据此建立/关闭连接或改变鉴权结果。字段全部是标量，且服务端会再按
+ * 闭集过滤一遍（见 `phone/diagnostics.ts`）—— 手机发来不认识的值只会被丢掉，
+ * 不会让连接失败。
+ *
+ * 手机侧在断网/重置时无法即时发送；实现上会把这些事件排队，在**下一次**
+ * 连上后补发，因此 `client_at` 可能早于服务端收到它的时刻。这正是需要两个
+ * 时间戳的原因：合并时间线要靠它们对齐，而不是假设手机时钟与服务端一致。
+ */
+export interface DiagEventFrame {
+  type: "diag_event";
+  /** 手机侧事件时刻（epoch ms，手机时钟）。 */
+  client_at?: number;
+  /** 事件名，闭集见 `diagnostics.ts` 的 `CLIENT_EVENTS`。 */
+  event: string;
+  category?: string;
+  /** 触发失败的异常类名（如 `ProtocolException`），不是异常 message。 */
+  exception_class?: string;
+  close_code?: number;
+  generation?: number;
+  network?: string;
+  vpn?: boolean;
+  screen?: string;
+  pid?: number;
+  process_uptime_ms?: number;
+  app_version?: string;
+  android_sdk?: number;
+  local_close_source?: string;
+  heartbeat_age_ms?: number;
+  attempt?: number;
+}
+
 export type IncomingFrame =
   | PongFrame
   | HelloFrame
   | PhoneHeartbeatFrame
   | ToolResultFrame
+  | DiagEventFrame
   | { type: "unknown"; raw_type: string }
   | { type: "invalid"; reason: string };
 
@@ -236,6 +272,45 @@ export function parseIncomingFrame(raw: string): IncomingFrame {
         return { type: "invalid", reason: "tool_result_conflicting_result" };
       }
       return { type: "tool_result", request_id: requestId, ok: false, error: { code, message } };
+    }
+
+    case "diag_event": {
+      const event = obj["event"];
+      if (typeof event !== "string" || event === "") {
+        return { type: "invalid", reason: "diag_event_missing_event" };
+      }
+      // 只搬运白名单字段；值的合法性留给 `diagnostics.ts` 的逐字段校验。
+      // 这里不因为"认不出的枚举值"丢掉整帧 —— 诊断帧的错误不该影响连接，
+      // 服务端会把不认识的值丢弃并保留其余可用的证据。
+      const frame: DiagEventFrame = { type: "diag_event", event };
+      if (typeof obj["client_at"] === "number" && Number.isFinite(obj["client_at"])) {
+        frame.client_at = obj["client_at"];
+      }
+      if (typeof obj["category"] === "string") frame.category = obj["category"];
+      if (typeof obj["exception_class"] === "string") frame.exception_class = obj["exception_class"];
+      if (typeof obj["close_code"] === "number" && Number.isFinite(obj["close_code"])) {
+        frame.close_code = obj["close_code"];
+      }
+      if (typeof obj["generation"] === "number" && Number.isFinite(obj["generation"])) {
+        frame.generation = obj["generation"];
+      }
+      if (typeof obj["network"] === "string") frame.network = obj["network"];
+      if (typeof obj["vpn"] === "boolean") frame.vpn = obj["vpn"];
+      if (typeof obj["screen"] === "string") frame.screen = obj["screen"];
+      if (typeof obj["pid"] === "number" && Number.isFinite(obj["pid"])) frame.pid = obj["pid"];
+      if (typeof obj["process_uptime_ms"] === "number" && Number.isFinite(obj["process_uptime_ms"])) {
+        frame.process_uptime_ms = obj["process_uptime_ms"];
+      }
+      if (typeof obj["app_version"] === "string") frame.app_version = obj["app_version"];
+      if (typeof obj["android_sdk"] === "number" && Number.isFinite(obj["android_sdk"])) {
+        frame.android_sdk = obj["android_sdk"];
+      }
+      if (typeof obj["local_close_source"] === "string") frame.local_close_source = obj["local_close_source"];
+      if (typeof obj["heartbeat_age_ms"] === "number" && Number.isFinite(obj["heartbeat_age_ms"])) {
+        frame.heartbeat_age_ms = obj["heartbeat_age_ms"];
+      }
+      if (typeof obj["attempt"] === "number" && Number.isFinite(obj["attempt"])) frame.attempt = obj["attempt"];
+      return frame;
     }
 
     default:

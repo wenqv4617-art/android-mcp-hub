@@ -499,7 +499,7 @@ class StreamableHttpTransport(
         const val CLIENT_NAME = "android-mcp-hub"
 
         /** `BuildConfig` 拿不到版本号时的兜底（例如某些测试环境）。 */
-        const val FALLBACK_CLIENT_VERSION = "1.6.2"
+        const val FALLBACK_CLIENT_VERSION = "1.6.3"
 
         const val SESSION_HEADER = "Mcp-Session-Id"
 

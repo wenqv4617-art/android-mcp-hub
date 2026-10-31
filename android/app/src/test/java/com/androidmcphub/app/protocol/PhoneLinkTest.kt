@@ -736,7 +736,7 @@ class PhoneLinkTest {
     fun `V161 连接事件区分成功、断开、重连与用户断开`() {
         val h = Harness()
         h.connect()
-        h.link.onSocketClosed(1006, "网络重置")
+        h.link.onSocketClosed(4001, "replaced")
         h.now += 1_000L
         h.link.onReconnectTimerFired()
         h.link.onSocketOpened(androidSdk = 35)
@@ -745,7 +745,7 @@ class PhoneLinkTest {
         assertEquals(
             listOf(
                 LinkEventKind.CONNECTED,
-                LinkEventKind.DISCONNECTED,
+                LinkEventKind.SERVER_CLOSED,
                 LinkEventKind.RECONNECTING,
                 LinkEventKind.CONNECTED,
             ),

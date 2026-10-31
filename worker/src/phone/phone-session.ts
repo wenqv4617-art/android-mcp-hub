@@ -42,9 +42,29 @@ import {
 import type { Env } from "../env";
 import { logEvent } from "../util/log";
 import {
+  buildEvent,
+  capNumericRecord,
+  DIAG_MAX_AGE_MS,
+  DIAG_MAX_CLOSE_INTENTS,
+  DIAG_MAX_EVENTS,
+  DIAG_MAX_OPEN_TRACK,
+  emptyDiagnostics,
+  pruneEvents,
+  restoreDiagnostics,
+  sanitizeDetailValue,
+  type DiagCloseIntent,
+  type DiagDetailValue,
+  type DiagEvent,
+  type DiagEventType,
+  type DiagSource,
+  type ServerCloseReason,
+  type StoredDiagnostics,
+} from "./diagnostics";
+import {
   encodeServerFrame,
   normalizeToolErrorCode,
   parseIncomingFrame,
+  type DiagEventFrame,
   type ServerFrame,
   type ToolResultFrame,
 } from "./messages";
@@ -200,6 +220,10 @@ export interface PhoneSessionMetrics {
    * 的直接证据。
    */
   reauthorizationsApplied: number;
+  /** V1.6.3：诊断事件写入存储失败了几次（诊断本身绝不影响连接）。 */
+  diagStorageFailures: number;
+  /** V1.6.3：手机上报的诊断帧因为速率限制被丢弃的条数。 */
+  diagReportsRejected: number;
 }
 
 function emptyMetrics(): PhoneSessionMetrics {
@@ -241,6 +265,8 @@ function emptyMetrics(): PhoneSessionMetrics {
     lastToolResultAt: null,
     credentialRejections: 0,
     reauthorizationsApplied: 0,
+    diagStorageFailures: 0,
+    diagReportsRejected: 0,
   };
 }
 
@@ -312,6 +338,14 @@ const STORAGE_KEY_ACTIVITY = "last_activity_at";
 const STORAGE_KEY_REVOCATION = "revocation";
 /** 旧版本（Gate 1.5）写下的粘性布尔。只用来给审计记录补一个 `at`，不再是门禁。 */
 const STORAGE_KEY_REVOKED_LEGACY = "revoked_device_ids";
+/**
+ * V1.6.3：该设备的连接诊断缓冲区（见 `phone/diagnostics.ts`）。
+ *
+ * 与 `pending` / `metrics` 一样按设备隔离 —— DO 本身是按 `idFromName(deviceId)`
+ * 切的，所以"设备 A 读设备 B 的日志"在路由层面就不成立；这里再加一道
+ * 设备头一致性检查，防止 Worker 转发错误时把另一台设备的事件交出去。
+ */
+const STORAGE_KEY_DIAGNOSTICS = "diagnostics";
 
 /**
  * 内部路由前缀。这些路径**只**能被 Worker 通过 DO 绑定访问，公网不可达。
@@ -326,6 +360,14 @@ export const ROUTE_TOOL = "/internal/phone/tool";
 export const ROUTE_REVOKE = "/internal/phone/revoke";
 export const ROUTE_STATUS = "/internal/phone/status";
 export const ROUTE_RESET = "/internal/phone/testing/reset";
+/**
+ * V1.6.3：诊断查询 / 认证失败上报（内部路由，公网不可达）。
+ *
+ * `GET` 返回该设备的连接事件缓冲区；`POST` 只接受一条 `auth_failure`
+ * 事件 —— Worker 在升级鉴权失败时用它把"凭据被拒"写进同一台设备的诊断流。
+ * 公网入口是 `GET /phone/diagnostics`，它**必须**先通过设备令牌鉴权。
+ */
+export const ROUTE_DIAGNOSTICS = "/internal/phone/diagnostics";
 
 /** 内部标记头：证明这次升级已经过 Worker 的设备鉴权。 */
 export const INTERNAL_DEVICE_HEADER = "X-Phone-Session-Device";
@@ -383,6 +425,13 @@ export class PhoneSession implements DurableObject {
    */
   private lastPhoneActivityAt = 0;
 
+  /** V1.6.3：按设备隔离、有界的连接诊断事件缓冲区（落盘，跨驱逐保留）。 */
+  private diag: StoredDiagnostics = emptyDiagnostics();
+  /** 手机上报诊断帧的速率窗口（每小时会随对象驱逐重置，可接受）。 */
+  private diagReportWindow = { startAt: 0, count: 0 };
+  /** Worker 上报认证失败的速率窗口 —— 防止攻击者用错误令牌刷爆缓冲区。 */
+  private authFailureWindow = { startAt: 0, count: 0, lastAt: 0 };
+
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
@@ -406,6 +455,19 @@ export class PhoneSession implements DurableObject {
       }
       const activity = await ctx.storage.get<number>(STORAGE_KEY_ACTIVITY);
       this.lastPhoneActivityAt = typeof activity === "number" && Number.isFinite(activity) ? activity : 0;
+
+      // V1.6.3：诊断缓冲区。损坏/不认识的存储内容退化为空缓冲区 —— 诊断数据
+      // 不能成为"对象起不来"的原因。读回时顺手按时间与容量裁剪一次。
+      const storedDiag = await ctx.storage.get(STORAGE_KEY_DIAGNOSTICS);
+      const restored = restoreDiagnostics(storedDiag);
+      if (restored !== null) {
+        const pruned = pruneEvents(restored.events, Date.now());
+        restored.events = pruned.events;
+        restored.dropped += pruned.dropped;
+        this.diag = restored;
+      } else {
+        this.diag = emptyDiagnostics();
+      }
 
       const leftovers = (await ctx.storage.get<Record<string, StoredPending>>(STORAGE_KEY_PENDING)) ?? {};
       const leftoverIds = Object.keys(leftovers);
@@ -452,6 +514,8 @@ export class PhoneSession implements DurableObject {
         return this.handleRevoke(request);
       case ROUTE_STATUS:
         return this.handleStatus();
+      case ROUTE_DIAGNOSTICS:
+        return this.handleDiagnostics(request);
       case ROUTE_RESET:
         return this.handleTestingReset();
       default:
@@ -531,10 +595,18 @@ export class PhoneSession implements DurableObject {
     const server = pair[1];
 
     const previousSockets = this.ctx.getWebSockets();
+    // V1.6.3：在替换之前先记下旧连接的代次 —— 诊断页要能回答"这次建连是不是
+    // 替换掉了另一条同设备连接"，以及被替换的是哪个代次。
+    const previousAttachments = previousSockets
+      .map((s) => s.deserializeAttachment() as SocketAttachment | null)
+      .filter((a): a is SocketAttachment => a !== null);
+    const replacedGeneration =
+      previousAttachments.length > 0 ? Math.max(...previousAttachments.map((a) => a.generation)) : null;
 
     // 代次先递增再接受：从这一刻起的任何 pong 只有在标着新代次时才可能被接受。
     this.generation += 1;
     const generation = this.generation;
+    this.diag.opens[String(generation)] = Date.now();
     const attachment: SocketAttachment = { deviceId, generation, credentialId };
     server.serializeAttachment(attachment);
     // 记下"这台 DO 最近服务的是哪台设备"，让连接关掉之后 status 仍能回答
@@ -542,6 +614,13 @@ export class PhoneSession implements DurableObject {
     this.lastConnectedDeviceId = deviceId;
 
     this.ctx.acceptWebSocket(server, [`device:${deviceId}`, `gen:${generation}`]);
+
+    // V1.6.3：**先**登记"这是服务端主动关闭"，再调用 close()。
+    // 顺序反过来的话，关闭事件可能在意图登记之前就被投递，诊断里就只能看到
+    // 手机侧收到的 4001，而看不出"是谁关的、为什么"。
+    for (const att of previousAttachments) {
+      this.markServerClose(att.generation, CLOSE_CODE_REPLACED, "replaced_by_newer_connection", "handle_connect");
+    }
 
     // 关掉旧连接。用应用自定义关闭码，手机侧可以据此区分"被替换"与"网络断了"。
     for (const old of previousSockets) {
@@ -559,6 +638,38 @@ export class PhoneSession implements DurableObject {
       [STORAGE_KEY_GENERATION]: generation,
       [STORAGE_KEY_METRICS]: this.metrics,
     });
+
+    // V1.6.3：记录"设备重新上线"与每一条被替换掉的旧连接。
+    // `replaced_generation` 明确写出被替换的代次 —— 这正是判断
+    // "是否存在两条连接竞争同一个设备 ID"的直接证据。
+    await this.recordDiag({
+      source: "durable_object",
+      type: "device_online",
+      generation,
+      detail: {
+        replaced: replacedGeneration !== null,
+        replaced_generation: replacedGeneration,
+        replaced_count: previousAttachments.length,
+        open_sockets: this.ctx.getWebSockets().length,
+      },
+    });
+    for (const att of previousAttachments) {
+      await this.recordDiag({
+        source: "durable_object",
+        type: "replaced",
+        generation: att.generation,
+        close_code: CLOSE_CODE_REPLACED,
+        close_reason: "replaced_by_newer_connection",
+        server_initiated: true,
+        duration_ms: this.connectionDurationMs(att.generation),
+        detail: {
+          cause: "replaced",
+          caller: "handle_connect",
+          old_generation: att.generation,
+          new_generation: generation,
+        },
+      });
+    }
 
     // ★ Gate 0.1 审计 R1：**主动**终结旧代次遗留的待处理请求。
     //
@@ -689,7 +800,10 @@ export class PhoneSession implements DurableObject {
    * 记账用 `credentialRejections` 单独统计"凭据级"拒绝（问题 1/2 的观测量），
    * 终结交给 [terminateSockets]，保证在途请求被**明确**判失败而不是拖到超时。
    */
-  private async noteRevokedRequest(rejection: { scope: "device" | "credential"; credentialId: string | null }): Promise<void> {
+  private async noteRevokedRequest(
+    rejection: { scope: "device" | "credential"; credentialId: string | null },
+    caller: "ping_request" | "tool_request" = "ping_request",
+  ): Promise<void> {
     this.metrics.requestsRejectedRevoked += 1;
     if (rejection.scope === "credential") this.metrics.credentialRejections += 1;
     await this.bestEffort("flush_metrics", () => this.flushMetrics());
@@ -697,6 +811,7 @@ export class PhoneSession implements DurableObject {
       scope: rejection.scope,
       credentialId: rejection.credentialId,
       reason: rejection.scope === "credential" ? "request_with_revoked_credential" : "request_with_revoked_device",
+      caller,
     });
   }
 
@@ -748,6 +863,8 @@ export class PhoneSession implements DurableObject {
     scope: "device" | "credential";
     credentialId: string | null;
     reason: string;
+    /** V1.6.3：诊断里记录的"谁发起的关闭"。缺省是 `terminate_sockets`。 */
+    caller?: DiagCloseIntent["caller"];
   }): Promise<{ closed: number; pendingFailed: number }> {
     // 先选出"这次到底该终结哪些连接"，**再**决定要不要换代次 —— 顺序很重要，
     // 因为代次是 DO 级别的全局计数，"换一次"就等于宣布"所有在途请求都作废"
@@ -792,6 +909,17 @@ export class PhoneSession implements DurableObject {
       [STORAGE_KEY_METRICS]: this.metrics,
     });
 
+    // V1.6.3：先登记每一条连接的"服务端主动关闭意图"（4002 + 真实调用来源），
+    // 再 close。顺序和 `handleConnect` 里的替换路径一致 —— 关闭事件可能先于
+    // 后面的任何 await 被投递，顺序反了就只能看到客户端视角的 4002。
+    const caller = options.caller ?? "terminate_sockets";
+    for (const socket of targets) {
+      const att = socket.deserializeAttachment() as SocketAttachment | null;
+      if (att !== null) {
+        this.markServerClose(att.generation, CLOSE_CODE_REVOKED, "device_credential_revoked", caller);
+      }
+    }
+
     let closed = 0;
     for (const socket of targets) {
       try {
@@ -803,6 +931,27 @@ export class PhoneSession implements DurableObject {
       } catch {
         // 已经关了 —— 无所谓。
       }
+    }
+
+    // 每条被撤销的连接一条 `revoked` 事件：关机原因是服务端写的标签，
+    // 不采用任何来自对端的自由文本。
+    for (const socket of targets) {
+      const att = socket.deserializeAttachment() as SocketAttachment | null;
+      const socketGeneration = att?.generation ?? null;
+      await this.recordDiag({
+        source: "durable_object",
+        type: "revoked",
+        generation: socketGeneration,
+        close_code: CLOSE_CODE_REVOKED,
+        close_reason: "device_credential_revoked",
+        server_initiated: true,
+        duration_ms: socketGeneration === null ? null : this.connectionDurationMs(socketGeneration),
+        detail: {
+          cause: "revoked",
+          caller,
+          auth_scope: options.scope,
+        },
+      });
     }
 
     await this.bestEffort("reschedule_alarm", () => this.rescheduleAlarm());
@@ -948,7 +1097,23 @@ export class PhoneSession implements DurableObject {
       scope,
       credentialId: requestedCredentialId,
       reason,
+      caller: "revoke",
     });
+
+    // 没有活连接被关掉时也要留下证据：撤销是一次**状态变化**，诊断页需要能
+    // 说清"这段时间里这台设备被撤销过"，而不是因为当时没连着就什么都看不到。
+    // 这里不写关闭码 —— 什么都没关，编一个码只会误导。
+    if (terminated.closed === 0) {
+      await this.recordDiag({
+        source: "durable_object",
+        type: "revoked",
+        generation: this.generation,
+        close_code: null,
+        close_reason: "device_credential_revoked",
+        server_initiated: null,
+        detail: { cause: "revoked", caller: "revoke", auth_scope: scope },
+      });
+    }
 
     logEvent("warn", "phone_session.revoked", {
       deviceId: requestedDeviceId,
@@ -1027,6 +1192,27 @@ export class PhoneSession implements DurableObject {
       silenceMs: silence,
     });
 
+    // V1.6.3：判死是**服务端主动关闭**，必须留下"谁判的、静默了多久"。
+    // 先登记意图再 close，随后的 close 事件才能被正确归因（否则只能看到 4000）。
+    this.markServerClose(generation, 4000, "liveness_timeout", this.livenessCaller(trigger));
+    await this.recordDiag({
+      source: "durable_object",
+      type: "liveness_timeout",
+      generation,
+      close_code: 4000,
+      close_reason: "liveness_timeout",
+      server_initiated: true,
+      duration_ms: this.connectionDurationMs(generation),
+      detail: {
+        cause: "liveness_timeout",
+        caller: this.livenessCaller(trigger),
+        silent_ms: silence,
+        liveness_timeout_ms: this.cfg.livenessTimeoutMs,
+        heartbeat_interval_ms: this.cfg.heartbeatIntervalMs,
+        pending_requests: this.pending.size,
+      },
+    });
+
     for (const requestId of [...this.pending.keys()]) {
       await this.failPending(requestId, "phone_disconnected", `等待期间链路静默超过 ${this.cfg.livenessTimeoutMs} ms，已判定连接死亡`, "disconnect");
     }
@@ -1063,7 +1249,7 @@ export class PhoneSession implements DurableObject {
     //   重新授权之后同一条路径会自动放行，而用旧凭据开着的连接会被当场拒。
     const rejection = this.revocationCheck(deviceId);
     if (rejection !== null) {
-      await this.noteRevokedRequest(rejection);
+      await this.noteRevokedRequest(rejection, "ping_request");
       return json(this.failureFor("ping", requestId, deviceId, null, "device_revoked", this.revokedMessage(rejection.scope)), 403);
     }
 
@@ -1150,7 +1336,7 @@ export class PhoneSession implements DurableObject {
     // 且在离线判断之前 —— 撤销优先于"手机不在线"。
     const rejection = this.revocationCheck(deviceId);
     if (rejection !== null) {
-      await this.noteRevokedRequest(rejection);
+      await this.noteRevokedRequest(rejection, "tool_request");
       return json(this.failureFor("tool", requestId, deviceId, toolName, "device_revoked", this.revokedMessage(rejection.scope)), 403);
     }
 
@@ -1359,6 +1545,372 @@ export class PhoneSession implements DurableObject {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  //  V1.6.3：连接诊断缓冲区的写入 / 查询
+  // ---------------------------------------------------------------------------
+  //
+  //  所有写入都走 [recordDiag] —— 它做三件事：构造（字段白名单在
+  //  `diagnostics.ts` 里）、裁剪（时间 + 容量）、落盘（失败只记账，不影响连接）。
+  //  没有任何一条诊断路径会向外抛异常：诊断是**观测**，不能改变被测系统的行为。
+
+  private async recordDiag(input: {
+    source: DiagSource;
+    type: DiagEventType;
+    generation?: number | null;
+    close_code?: number | null;
+    close_reason?: ServerCloseReason | null;
+    server_initiated?: boolean | null;
+    duration_ms?: number | null;
+    client_at?: number | null;
+    detail?: unknown;
+  }): Promise<DiagEvent | null> {
+    const now = Date.now();
+    this.diag.seq += 1;
+    const event = buildEvent(this.diag.seq, now, input);
+    if (event === null) return null;
+
+    this.diag.events.push(event);
+    const pruned = pruneEvents(this.diag.events, now);
+    if (pruned.dropped > 0) {
+      this.diag.dropped += pruned.dropped;
+      this.diag.events = pruned.events;
+    }
+    this.diag.first_at = this.diag.events.length > 0 ? this.diag.events[0]!.at : null;
+    this.diag.opens = capNumericRecord(this.diag.opens, DIAG_MAX_OPEN_TRACK);
+    this.diag.close_intents = capNumericRecord(this.diag.close_intents, DIAG_MAX_CLOSE_INTENTS);
+    await this.persistDiagnostics();
+    return event;
+  }
+
+  /**
+   * 诊断缓冲区落盘。**失败只记账**：连接、请求结算和鉴权都不依赖它。
+   *
+   * 与 `bestEffort()` 分开，是因为这里要累加的是专门的
+   * `diagStorageFailures`，而不是 `settleStorageFailures` —— 后者的非零值
+   * 意味着"请求结果的落盘镜像可能丢了"，那是更严重的信号，不能被诊断噪声污染。
+   */
+  private async persistDiagnostics(): Promise<void> {
+    try {
+      await this.ctx.storage.put(STORAGE_KEY_DIAGNOSTICS, this.diag);
+    } catch {
+      this.metrics.diagStorageFailures += 1;
+      logEvent("warn", "phone_session.diag_persist_failed", {
+        errorCode: "storage_failure",
+        reason: "diagnostics",
+        generation: this.generation,
+      });
+    }
+  }
+
+  /**
+   * 登记"服务端即将主动关闭这条连接"。
+   *
+   * **必须在调用 `close()` 之前**执行：`webSocketClose` 事件可能早于我们
+   * 后面的任何 `await` 被投递，没有这条意图就只能看到手机最终收到的关闭码，
+   * 看不出"是谁关的、为什么"（任务书第二阶段的核心要求）。
+   */
+  private markServerClose(
+    generation: number,
+    code: number,
+    reason: ServerCloseReason,
+    caller: DiagCloseIntent["caller"],
+  ): void {
+    if (!Number.isInteger(generation) || generation < 0) return;
+    this.diag.close_intents[String(generation)] = { code, reason, caller, at: Date.now(), generation };
+    this.diag.close_intents = capNumericRecord(this.diag.close_intents, DIAG_MAX_CLOSE_INTENTS);
+  }
+
+  /** 某代次连接从建立到现在的时长；没有建连记录时返回 null（不猜）。 */
+  private connectionDurationMs(generation: number): number | null {
+    const opened = this.diag.opens[String(generation)];
+    if (typeof opened !== "number" || !Number.isFinite(opened) || opened <= 0) return null;
+    const elapsed = Date.now() - opened;
+    return elapsed >= 0 ? elapsed : null;
+  }
+
+  /** 把判死触发点映射到闭集里的调用来源。 */
+  private livenessCaller(trigger: string): "alarm" | "ping_request" | "tool_request" {
+    if (trigger === "ping_request" || trigger === "tool_request") return trigger;
+    return "alarm";
+  }
+
+  /**
+   * 手机上报的一条诊断事件。
+   *
+   * 这是**只写观测数据**的路径：不建立连接、不关闭连接、不改变鉴权结果。
+   * 三道收敛保证它不会变成日志注入或放大器：
+   *   1. 速率限制（每实例每分钟 20 条）；
+   *   2. 事件名必须命中闭集（复用 `diagnostics.ts` 的枚举校验）；
+   *   3. 所有字段再过一次逐字段白名单，认不出的值丢弃、帧本身不影响连接。
+   */
+  private async handleClientDiag(ws: WebSocket, frame: DiagEventFrame): Promise<void> {
+    const now = Date.now();
+    if (now - this.diagReportWindow.startAt > 60_000) {
+      this.diagReportWindow = { startAt: now, count: 0 };
+    }
+    this.diagReportWindow.count += 1;
+    if (this.diagReportWindow.count > 20) {
+      this.metrics.diagReportsRejected += 1;
+      await this.bestEffort("flush_metrics", () => this.flushMetrics());
+      return;
+    }
+
+    // 事件名闭集：用 detail 规则表里同一个枚举来判，保证两处永远一致。
+    const eventName = sanitizeDetailValue("client_event", frame.event);
+    if (typeof eventName !== "string") return;
+
+    const att = ws.deserializeAttachment() as SocketAttachment | null;
+    const socketGeneration = att?.generation ?? this.generation;
+    const reportedGeneration =
+      typeof frame.generation === "number" && Number.isInteger(frame.generation) && frame.generation >= 0
+        ? frame.generation
+        : socketGeneration;
+
+    // 手机说"服务端把我关了"时，用我们自己登记的关闭意图交叉验证 ——
+    // 有意图 ⇒ 可以确认是服务端主动关闭、并给出真实调用来源；
+    // 没有意图 ⇒ 不臆断（`server_initiated: null`），因为可能是边缘节点、
+    // 网络或另一侧先断的，诊断页会把它标成"可能相关"而不是结论。
+    const intent = this.diag.close_intents[String(reportedGeneration)] ?? null;
+    const isServerCloseReport = eventName === "server_close";
+
+    await this.recordDiag({
+      source: "android",
+      type: "client_report",
+      generation: reportedGeneration,
+      close_code: frame.close_code ?? null,
+      close_reason: isServerCloseReport ? (intent?.reason ?? null) : null,
+      server_initiated: isServerCloseReport ? (intent !== null ? true : null) : null,
+      client_at: frame.client_at ?? null,
+      detail: {
+        client_event: eventName,
+        cause: "client_reported",
+        category: frame.category,
+        exception_class: frame.exception_class,
+        network: frame.network,
+        screen: frame.screen,
+        vpn: frame.vpn,
+        pid: frame.pid,
+        process_uptime_ms: frame.process_uptime_ms,
+        app_version: frame.app_version,
+        android_sdk: frame.android_sdk,
+        local_close_source: frame.local_close_source,
+        heartbeat_age_ms: frame.heartbeat_age_ms,
+        attempt: frame.attempt,
+        client_generation: frame.generation,
+        caller: intent?.caller,
+      },
+    });
+  }
+
+  /**
+   * 诊断查询 / 认证失败上报。
+   *
+   * ⚠ 这是**内部路由**：公网只通过 `GET /phone/diagnostics`（Worker 鉴权后）
+   *   打到它。它不接触 WebSocket —— 主连接断着的时候，只要 HTTPS 可达，
+   *   手机仍然能读到云端已有的事件。
+   */
+  private async handleDiagnostics(request: Request): Promise<Response> {
+    const bound = this.ctx.id?.name ?? null;
+    const headerDevice = request.headers.get(INTERNAL_DEVICE_HEADER);
+
+    if (request.method === "POST") {
+      return this.handleAuthFailureReport(request, headerDevice, bound);
+    }
+    if (request.method !== "GET") {
+      return new Response(JSON.stringify({ error: "method_not_allowed" }), {
+        status: 405,
+        headers: { "Content-Type": "application/json", Allow: "GET, POST" },
+      });
+    }
+
+    // 设备头一致性：Worker 用**已鉴权**的设备 ID 选择 DO 实例又原样转发，
+    // 两者不一致只可能是转发逻辑出了 bug —— 宁可直接拒绝，也不要把这台设备
+    // 的事件交给一个声称自己是另一台设备的调用方。
+    const knownDevice = bound ?? this.lastConnectedDeviceId;
+    if (knownDevice !== null && headerDevice !== knownDevice) {
+      logEvent("warn", "phone_session.diag_device_mismatch", {
+        deviceId: knownDevice,
+        reason: "device_header_mismatch",
+      });
+      return new Response(JSON.stringify({ error: "device_mismatch" }), { status: 409 });
+    }
+
+    const url = new URL(request.url);
+    const rawLimit = Number(url.searchParams.get("limit") ?? "");
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), DIAG_MAX_EVENTS) : 100;
+    const rawSince = Number(url.searchParams.get("since_ms") ?? "");
+    const sinceMs = Number.isFinite(rawSince) && rawSince > 0 ? Math.floor(rawSince) : null;
+
+    const now = Date.now();
+    const pruned = pruneEvents(this.diag.events, now);
+    if (pruned.dropped > 0) {
+      this.diag.events = pruned.events;
+      this.diag.dropped += pruned.dropped;
+      this.diag.first_at = this.diag.events.length > 0 ? this.diag.events[0]!.at : null;
+      await this.persistDiagnostics();
+    }
+
+    const selected = sinceMs === null ? this.diag.events : this.diag.events.filter((e) => e.at >= sinceMs);
+    const events = selected.slice(Math.max(0, selected.length - limit));
+    const socket = this.currentSocket();
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        device_id: headerDevice ?? knownDevice,
+        /** 服务端当前时刻，供手机换算两端时钟差（合并时间线不能假设时钟一致）。 */
+        server_time: now,
+        /** 云端对"设备是否在线"的判定（应用层判活，不只是 socket 是否注册着）。 */
+        online: this.socketIsLive(socket),
+        socket_open: socket !== null,
+        stale: socket !== null && !this.socketIsLive(socket),
+        connection_generation: this.generation,
+        last_phone_activity_at: this.lastPhoneActivityAt === 0 ? null : this.lastPhoneActivityAt,
+        events,
+        summary: this.diagnosticsSummary(),
+        buffer: {
+          size: this.diag.events.length,
+          returned: events.length,
+          dropped: this.diag.dropped,
+          first_at: this.diag.first_at,
+          last_at: this.diag.events.length > 0 ? this.diag.events[this.diag.events.length - 1]!.at : null,
+          max_events: DIAG_MAX_EVENTS,
+          max_age_ms: DIAG_MAX_AGE_MS,
+        },
+        /**
+         * 关闭码语义（本仓库自己写死的标签）。直接随查询返回，App 不必
+         * 内置一份可能过期的映射表 —— 这也是"4001 到底代表什么"的答案来源。
+         */
+        close_codes: {
+          "4000": "liveness_timeout",
+          "4001": "replaced_by_newer_connection",
+          "4002": "device_credential_revoked",
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+    );
+  }
+
+  /**
+   * Worker 在升级鉴权失败时把"被拒"写进同一台设备的诊断流。
+   *
+   * 速率限制挡的是"攻击者用错误令牌刷爆事件缓冲区"：同一台设备 10 秒内
+   * 最多记一条、每小时最多 30 条。被限流的上报返回 `recorded: false`，
+   * **不报错** —— Worker 侧这是 best-effort，不应该因为记账被拒而改变
+   * 那次升级本身的响应。
+   */
+  private async handleAuthFailureReport(
+    request: Request,
+    headerDevice: string | null,
+    bound: string | null,
+  ): Promise<Response> {
+    const knownDevice = bound ?? this.lastConnectedDeviceId;
+    if (knownDevice !== null && headerDevice !== knownDevice) {
+      return new Response(JSON.stringify({ error: "device_mismatch" }), { status: 409 });
+    }
+
+    let body: { auth_reason?: unknown; auth_scope?: unknown; auth_source?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return new Response(JSON.stringify({ error: "invalid_json" }), { status: 400 });
+    }
+
+    const now = Date.now();
+    if (now - this.authFailureWindow.startAt > 60 * 60 * 1000) {
+      this.authFailureWindow = { startAt: now, count: 0, lastAt: 0 };
+    }
+    const tooSoon = now - this.authFailureWindow.lastAt < 10_000;
+    const tooMany = this.authFailureWindow.count >= 30;
+    if (tooSoon || tooMany) {
+      return new Response(JSON.stringify({ ok: true, recorded: false, reason: tooMany ? "hour_limit" : "debounce" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      });
+    }
+
+    const event = await this.recordDiag({
+      source: "worker",
+      type: "auth_failure",
+      generation: this.generation,
+      detail: {
+        auth_reason: body.auth_reason,
+        auth_scope: body.auth_scope,
+        auth_source: body.auth_source,
+        cause: "auth_failure",
+      },
+    });
+    this.authFailureWindow.lastAt = now;
+    this.authFailureWindow.count += 1;
+
+    return new Response(JSON.stringify({ ok: true, recorded: event !== null }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  }
+
+  /** 给 App 状态面板用的摘要：最近上线/下线/服务端主动关闭，以及替换次数。 */
+  private diagnosticsSummary(): {
+    last_online_at: number | null;
+    last_offline_at: number | null;
+    last_offline_reason: ServerCloseReason | null;
+    last_offline_close_code: number | null;
+    last_server_initiated_close_at: number | null;
+    replaced_events: number;
+    revocations: number;
+    liveness_timeouts: number;
+    auth_failures: number;
+    client_reports: number;
+  } {
+    const summary = {
+      last_online_at: null as number | null,
+      last_offline_at: null as number | null,
+      last_offline_reason: null as ServerCloseReason | null,
+      last_offline_close_code: null as number | null,
+      last_server_initiated_close_at: null as number | null,
+      replaced_events: 0,
+      revocations: 0,
+      liveness_timeouts: 0,
+      auth_failures: 0,
+      client_reports: 0,
+    };
+    for (const event of this.diag.events) {
+      switch (event.type) {
+        case "device_online":
+          summary.last_online_at = Math.max(summary.last_online_at ?? 0, event.at);
+          break;
+        case "device_offline":
+          if (summary.last_offline_at === null || event.at >= summary.last_offline_at) {
+            summary.last_offline_at = event.at;
+            summary.last_offline_reason = event.close_reason;
+            summary.last_offline_close_code = event.close_code;
+          }
+          if (event.server_initiated === true) {
+            summary.last_server_initiated_close_at = Math.max(summary.last_server_initiated_close_at ?? 0, event.at);
+          }
+          break;
+        case "replaced":
+          summary.replaced_events += 1;
+          break;
+        case "revoked":
+          summary.revocations += 1;
+          break;
+        case "liveness_timeout":
+          summary.liveness_timeouts += 1;
+          break;
+        case "auth_failure":
+          summary.auth_failures += 1;
+          break;
+        case "client_report":
+          summary.client_reports += 1;
+          break;
+        case "hello":
+          break;
+      }
+    }
+    return summary;
+  }
+
   /**
    * 测试专用：清空待处理表与指标。
    * 公网不可达（只有 Worker 的 DO 绑定能打到这个路径），因此不需要额外的鉴权。
@@ -1376,9 +1928,15 @@ export class PhoneSession implements DurableObject {
     // 就成了绕过撤销的后门。★ 集中审计问题 2：这里读的是新的
     // `STORAGE_KEY_REVOCATION` 审计记录，不再是那个粘性布尔。
     this.revocation = (await this.ctx.storage.get<RevocationRecord>(STORAGE_KEY_REVOCATION)) ?? this.revocation;
+    // 诊断缓冲区**可以**被 reset 清掉：它是观测数据，不是安全状态。
+    // （撤销记录在上面被刻意保留 —— 两者性质不同，注释见上。）
+    this.diag = emptyDiagnostics();
+    this.authFailureWindow = { startAt: 0, count: 0, lastAt: 0 };
+    this.diagReportWindow = { startAt: 0, count: 0 };
     await this.ctx.storage.put({
       [STORAGE_KEY_PENDING]: {},
       [STORAGE_KEY_METRICS]: this.metrics,
+      [STORAGE_KEY_DIAGNOSTICS]: this.diag,
     });
     return json({
       ok: true,
@@ -1422,6 +1980,8 @@ export class PhoneSession implements DurableObject {
           scope,
           generation: sender.generation,
         });
+        // V1.6.3：先登记关闭意图，再发错误帧 / close —— 与另外两条关闭路径一致。
+        this.markServerClose(sender.generation, CLOSE_CODE_REVOKED, "device_credential_revoked", "revoked_message");
         this.safeSend(ws, { type: "error", code: "device_revoked", message: this.revokedMessage(scope) });
         try {
           ws.close(CLOSE_CODE_REVOKED, "device credential revoked");
@@ -1432,6 +1992,7 @@ export class PhoneSession implements DurableObject {
           scope,
           credentialId: sender.credentialId,
           reason: scope === "credential" ? "message_from_revoked_credential" : "message_from_revoked_device",
+          caller: "revoked_message",
         });
         return;
       }
@@ -1497,9 +2058,25 @@ export class PhoneSession implements DurableObject {
             androidSdk: frame.android_sdk,
             protocolVersion: frame.protocol_version,
           });
+          // V1.6.3：把客户端自报的版本写进诊断流 —— 合并时间线时能看出
+          // "这条连接是哪个 App 版本的行为"，而不必去翻 Worker 日志。
+          await this.recordDiag({
+            source: "android",
+            type: "hello",
+            generation: att?.generation ?? this.generation,
+            detail: {
+              app_version: frame.app_version,
+              android_sdk: frame.android_sdk,
+              protocol_version: frame.protocol_version,
+            },
+          });
         }
         return;
       }
+
+      case "diag_event":
+        await this.handleClientDiag(ws, frame);
+        return;
 
       case "heartbeat":
         this.safeSend(ws, { type: "heartbeat_ack", server_time: Date.now() });
@@ -1809,6 +2386,37 @@ export class PhoneSession implements DurableObject {
       socketGeneration,
       currentGeneration: this.generation,
     });
+
+    // V1.6.3：先记录**服务端视角的断线**，再决定要不要动当前的待处理请求。
+    // 旧代次同样要记 —— "旧连接被替换后关闭"本身是最重要的证据之一。
+    //
+    // `server_initiated` 来自我们自己在调用 close() 之前登记的意图：
+    //   · true  → 这条连接是服务端主动关闭的（替换/判死/撤销），`caller` 说明是哪里干的；
+    //   · false → 本次运行的服务端**没有**发起过关闭（手机主动关、网络重置、半开连接）；
+    // 没有收成关闭帧时 `close_code` 如实为 null，绝不补一个"看起来合理"的码。
+    const intent = this.diag.close_intents[String(socketGeneration)] ?? null;
+    await this.recordDiag({
+      source: "durable_object",
+      type: "device_offline",
+      generation: socketGeneration,
+      close_code: closeCode ?? intent?.code ?? null,
+      close_reason:
+        intent?.reason ??
+        (closeCode === 1000 || closeCode === 1001
+          ? "client_closed"
+          : closeCode === null
+            ? "unknown"
+            : "peer_closed"),
+      server_initiated: intent !== null,
+      duration_ms: this.connectionDurationMs(socketGeneration),
+      detail: {
+        cause,
+        caller: intent?.caller,
+      },
+    });
+    delete this.diag.close_intents[String(socketGeneration)];
+    delete this.diag.opens[String(socketGeneration)];
+    await this.persistDiagnostics();
 
     if (socketGeneration !== this.generation) {
       // 被替换掉的老连接的关闭事件 —— 与当前连接无关，不要动当前的待处理请求。

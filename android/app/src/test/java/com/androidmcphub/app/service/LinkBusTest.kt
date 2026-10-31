@@ -214,12 +214,20 @@ class LinkBusTest {
     @Test
     fun `连接成功与断开分别刷新诊断页的时间与原因`() {
         LinkBus.recordEvent(LinkEventKind.CONNECTED, atMs = 10_000L)
-        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "服务端关闭 code=1006", atMs = 20_000L)
+        LinkBus.recordEvent(
+            LinkEvent(
+                kind = LinkEventKind.SERVER_CLOSED,
+                atMs = 20_000L,
+                detail = "服务端关闭 code=4001",
+                closeCode = 4001,
+            ),
+        )
 
         val d = LinkBus.diagnostics.value
         assertEquals(10_000L, d.lastConnectedAtMs)
         assertEquals(20_000L, d.lastDisconnectAtMs)
-        assertEquals("服务端关闭 code=1006", d.lastDisconnectReason)
+        assertEquals("服务端关闭 code=4001", d.lastDisconnectReason)
+        assertEquals(4001, d.lastDisconnectCloseCode)
     }
 
     @Test
@@ -280,26 +288,60 @@ class LinkBusTest {
 
     @Test
     fun `V162 用户断开的事件细节带真实来源`() {
-        LinkBus.recordEvent(LinkEventKind.USER_DISCONNECTED, detail = "source=ui_button")
+        LinkBus.recordEvent(
+            LinkEvent(
+                kind = LinkEventKind.USER_DISCONNECTED,
+                atMs = 30_000L,
+                detail = "source=ui_button",
+                source = "ui_button",
+            ),
+        )
 
         assertEquals("user:ui_button", LinkBus.diagnostics.value.lastDisconnectSource)
     }
 
     @Test
     fun `V162 网络类失败按闭集类别落成来源标签`() {
-        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "连接失败 category=connection_reset")
+        LinkBus.recordEvent(
+            LinkEvent(
+                kind = LinkEventKind.SOCKET_FAILURE,
+                atMs = 40_000L,
+                detail = "连接失败 category=connection_reset",
+                category = "connection_reset",
+            ),
+        )
         assertEquals("network:connection_reset", LinkBus.diagnostics.value.lastDisconnectSource)
 
-        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "连接失败 category=dns_failure")
+        LinkBus.recordEvent(
+            LinkEvent(
+                kind = LinkEventKind.SOCKET_FAILURE,
+                atMs = 41_000L,
+                detail = "连接失败 category=dns_failure",
+                category = "dns_failure",
+            ),
+        )
         assertEquals("network:dns_failure", LinkBus.diagnostics.value.lastDisconnectSource)
     }
 
     @Test
     fun `V162 服务端关闭、握手超时、心跳超时与认证失败各有独立来源`() {
-        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "服务端关闭 code=4000")
+        LinkBus.recordEvent(
+            LinkEvent(
+                kind = LinkEventKind.SERVER_CLOSED,
+                atMs = 50_000L,
+                detail = "服务端关闭 code=4000",
+                closeCode = 4000,
+            ),
+        )
         assertEquals("remote_close", LinkBus.diagnostics.value.lastDisconnectSource)
 
-        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "握手超时（21000ms）")
+        LinkBus.recordEvent(
+            LinkEvent(
+                kind = LinkEventKind.HANDSHAKE_TIMEOUT,
+                atMs = 60_000L,
+                detail = "握手超时（21000ms）",
+            ),
+        )
         assertEquals("handshake_timeout", LinkBus.diagnostics.value.lastDisconnectSource)
 
         LinkBus.recordEvent(LinkEventKind.HEARTBEAT_TIMEOUT, detail = "90000ms 无服务端帧")

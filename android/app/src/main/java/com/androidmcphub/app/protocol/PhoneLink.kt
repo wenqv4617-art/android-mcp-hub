@@ -2,6 +2,7 @@ package com.androidmcphub.app.protocol
 
 import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.capability.ToolDispatchOutcome
+import com.androidmcphub.app.core.DiagCloseSource
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LinkEvent
 import com.androidmcphub.app.core.LinkEventKind
@@ -226,7 +227,7 @@ class PhoneLink(
         consecutiveFailures = 0
         log(LogLevel.INFO, "$reason（source=$source）")
         // 重复调用（例如服务随后销毁）不该在诊断里留下第二条"用户断开"。
-        if (!wasStopped) emit(LinkEventKind.USER_DISCONNECTED, "source=$source")
+        if (!wasStopped) emit(LinkEventKind.USER_DISCONNECTED, "source=$source", source = source)
         setState(LinkState.Idle)
         listOf(LinkAction.Close)
     }
@@ -266,8 +267,14 @@ class PhoneLink(
      * 连接失败。[category] **必须**是 `SocketFailure` 闭集里的固定类别，不是异常原文；
      * [httpStatus] 非空表示是从 WebSocket 升级响应里拿到的状态码，
      * 401 / 403 视为认证失败：凭据错了重试没有意义，交给用户改令牌后手动重连。
+     * [exceptionClass] 只允许异常**类名**（见 `normalizeExceptionClass`），
+     * 不传 message —— 那里面可能混有地址或凭据片段。
      */
-    fun onSocketFailure(category: String, httpStatus: Int?): List<LinkAction> =
+    fun onSocketFailure(
+        category: String,
+        httpStatus: Int?,
+        exceptionClass: String? = null,
+    ): List<LinkAction> =
         synchronized(lock) {
             if (!attemptInFlight && !socketOpen) {
                 // 已经处理过的终态回调，忽略
@@ -290,11 +297,23 @@ class PhoneLink(
                 // 终态就得把**还挂着的**重连定时器一并作废，否则一个在认证失败之前
                 // 排下的定时器到点后会把连接重新拉起来，绕过"不自动重连"这条规则。
                 reconnectScheduled = false
-                emit(LinkEventKind.AUTHENTICATION_FAILED, "HTTP $httpStatus，不自动重连")
+                emit(
+                    LinkEventKind.AUTHENTICATION_FAILED,
+                    "HTTP $httpStatus，不自动重连",
+                    generation = generationOrNull(),
+                    category = safeCategory,
+                    exceptionClass = exceptionClass,
+                )
                 setState(LinkState.AuthFailed("HTTP $httpStatus"))
                 return@synchronized emptyList()
             }
-            emit(LinkEventKind.DISCONNECTED, "连接失败 category=$safeCategory")
+            emit(
+                LinkEventKind.SOCKET_FAILURE,
+                "连接失败 category=$safeCategory",
+                generation = generationOrNull(),
+                category = safeCategory,
+                exceptionClass = exceptionClass,
+            )
             scheduleReconnect("连接失败（category=$safeCategory：$text）")
         }
 
@@ -330,8 +349,17 @@ class PhoneLink(
             return@synchronized emptyList()
         }
 
-        emit(LinkEventKind.DISCONNECTED, "服务端关闭 code=$code")
-        scheduleReconnect("服务端关闭连接（code=$code, reason=$reason）")
+        // 只记录**实际收到**的关闭码；welcome 之前就断开的连接没有服务端代次。
+        emit(
+            LinkEventKind.SERVER_CLOSED,
+            "服务端关闭 code=$code",
+            generation = generationOrNull(),
+            closeCode = code,
+        )
+        // V1.6.3：`reason` 是对端自由文本，可能被改造过的服务端塞进任意内容
+        // （包括令牌形状的字符串）。只记关闭码；原因交给云端按**自己的**
+        // 关闭意图来判定（服务端知道是不是自己关的、为什么关）。
+        scheduleReconnect("服务端关闭连接（code=$code）")
     }
 
     /** 重连定时器到点。 */
@@ -387,7 +415,13 @@ class PhoneLink(
         if (userStopped) return@synchronized emptyList()
         if (isTerminal(state)) return@synchronized emptyList()
 
-        emit(LinkEventKind.NETWORK_CHANGED, "默认网络已断开")
+        // 网络断开时若 socket 还开着，本机会主动关掉它 —— 这是**本机**的关闭动作，
+        // 来源如实记成 network_lost，而不是等云端猜"为什么 30 秒后没了连接"。
+        emit(
+            LinkEventKind.NETWORK_CHANGED,
+            "默认网络已断开",
+            source = DiagCloseSource.NETWORK_LOST,
+        )
         if (!socketOpen && !attemptInFlight) return@synchronized emptyList()
 
         socketOpen = false
@@ -410,7 +444,12 @@ class PhoneLink(
         log(LogLevel.WARN, "看门狗：连续 ${silentMs / 1000} 秒没有服务端帧，强制重连（不停止服务）")
         socketOpen = false
         attemptInFlight = false
-        emit(LinkEventKind.HEARTBEAT_TIMEOUT, "看门狗判定 ${silentMs / 1000}s 无服务端帧")
+        emit(
+            LinkEventKind.HEARTBEAT_TIMEOUT,
+            "看门狗判定 ${silentMs / 1000}s 无服务端帧",
+            source = DiagCloseSource.WATCHDOG,
+            heartbeatAgeMs = silentMs,
+        )
         scheduleReconnect("看门狗判定会话僵死（${silentMs}ms 无服务端帧）")
     }
 
@@ -493,7 +532,7 @@ class PhoneLink(
             if (attemptStartedAtMs > 0L && now - attemptStartedAtMs > HANDSHAKE_TIMEOUT_MS) {
                 val waited = now - attemptStartedAtMs
                 attemptInFlight = false
-                emit(LinkEventKind.DISCONNECTED, "握手超时（${waited}ms）")
+                emit(LinkEventKind.HANDSHAKE_TIMEOUT, "握手超时（${waited}ms）")
                 return@synchronized scheduleReconnect("建连超时（${waited}ms 内未完成 WebSocket 握手）")
             }
             return@synchronized emptyList()
@@ -508,7 +547,12 @@ class PhoneLink(
             log(LogLevel.WARN, "${silent}ms 未收到服务端任何帧（阈值 ${timeoutMs}ms），判定链路已死")
             socketOpen = false
             attemptInFlight = false
-            emit(LinkEventKind.HEARTBEAT_TIMEOUT, "${silent}ms 无服务端帧")
+            emit(
+                LinkEventKind.HEARTBEAT_TIMEOUT,
+                "${silent}ms 无服务端帧",
+                generation = generationOrNull(),
+                heartbeatAgeMs = silent,
+            )
             return@synchronized scheduleReconnect("心跳超时（${silent}ms 无任何服务端帧）")
         }
 
@@ -556,7 +600,7 @@ class PhoneLink(
                 "心跳=${heartbeatIntervalMs}ms 超时=${pingTimeoutMs}ms " +
                 "max_pending=${w.maxPendingRequests ?: config.maxPendingRequests}",
         )
-        emit(LinkEventKind.CONNECTED, "代次 ${w.connectionGeneration}")
+        emit(LinkEventKind.CONNECTED, "代次 ${w.connectionGeneration}", generation = w.connectionGeneration)
         setState(LinkState.Connected(w.connectionGeneration))
         return emptyList()
     }
@@ -680,7 +724,7 @@ class PhoneLink(
         val humanAttempt = attemptIndex + 1
         val deadline = clock() + delay
         log(LogLevel.WARN, "$why；第 $humanAttempt 次重连将在 ${delay}ms 后")
-        emit(LinkEventKind.RECONNECTING, "第 $humanAttempt 次，${delay}ms 后")
+        emit(LinkEventKind.RECONNECTING, "第 $humanAttempt 次，${delay}ms 后", attempt = humanAttempt)
         setState(LinkState.Reconnecting(attempt = humanAttempt, delayMs = delay, deadlineMs = deadline))
         return listOf(LinkAction.Close, LinkAction.ScheduleReconnect(delay))
     }
@@ -695,10 +739,40 @@ class PhoneLink(
      * 记录一条结构化事件。调用前必须已持有 [lock]。
      *
      * [detail] 由本类拼装，只含代次/次数/固定类别/耗时；回调实现必须非阻塞。
+     *
+     * V1.6.3 起额外带结构化证据（代次、关闭码、失败类别、本地关闭来源、心跳静默
+     * 时长）。这些字段是**事件发生那一刻**的事实快照，不是"当前值" ——
+     * 例如 `SERVER_CLOSED` 里的代次就是被关闭的那条连接代次。
      */
-    private fun emit(kind: LinkEventKind, detail: String) {
-        onEvent?.invoke(LinkEvent(kind = kind, atMs = clock(), detail = detail))
+    private fun emit(
+        kind: LinkEventKind,
+        detail: String,
+        generation: Long? = null,
+        closeCode: Int? = null,
+        category: String? = null,
+        source: String? = null,
+        attempt: Int? = null,
+        heartbeatAgeMs: Long? = null,
+        exceptionClass: String? = null,
+    ) {
+        onEvent?.invoke(
+            LinkEvent(
+                kind = kind,
+                atMs = clock(),
+                detail = detail,
+                generation = generation,
+                closeCode = closeCode,
+                category = category,
+                source = source,
+                attempt = attempt,
+                heartbeatAgeMs = heartbeatAgeMs,
+                exceptionClass = exceptionClass,
+            ),
+        )
     }
+
+    /** 已经收到过 welcome 才有一个真实的服务端代次；否则是 null，不是 0。 */
+    private fun generationOrNull(): Long? = connectionGeneration.takeIf { it > 0L }
 
     /**
      * ★ 集中审计问题 4：进入"凭据被服务端撤销"的终态。调用前必须已持有 [lock]。
@@ -721,7 +795,14 @@ class PhoneLink(
             "服务端撤销了本机凭据（$evidence）；**不自动重连**。" +
                 "请到「高级设置」更新设备令牌（或重新配对）后手动点「连接」",
         )
-        emit(LinkEventKind.AUTHENTICATION_FAILED, "凭据已被撤销（$evidence）")
+        emit(
+            LinkEventKind.AUTHENTICATION_FAILED,
+            "凭据已被撤销（$evidence）",
+            closeCode = code,
+            // 错误帧路径是**本机**随后关掉 socket；4002 路径是服务端先关的，
+            // 不能记成本机主动关闭。
+            source = if (code == null) DiagCloseSource.REVOKED else null,
+        )
         setState(LinkState.Revoked(REVOKED_DETAIL))
     }
 

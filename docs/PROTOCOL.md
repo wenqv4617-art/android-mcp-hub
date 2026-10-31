@@ -469,3 +469,79 @@ Gate 3 让 Android 当**第三方 MCP 客户端**：它连真实 MCP 服务器�
   其余（HTTP 错误、协议错误、超时、结果过大、服务器拒绝）→ `tool_failed`。
   旧版 App 收到这两个保留命令会回 `unsupported_tool`，服务端如实转述成"这台手机
   还不支持聚合"，不伪造空目录。
+
+## 12. 连接诊断（V1.6.3）
+
+诊断是**观测**通道，不是控制通道：服务端只把手机上报的事件规整后写进该设备的
+诊断缓冲区，永远不会据此建立/关闭连接或改变鉴权结果。
+
+### 12.1 手机 → 服务端：`diag_event`
+
+```json
+{
+  "type": "diag_event",
+  "event": "socket_failure",
+  "client_at": 1760000000000,
+  "category": "connection_reset",
+  "exception_class": "SocketException",
+  "close_code": 4001,
+  "generation": 52,
+  "network": "wifi", "vpn": true, "screen": "off",
+  "pid": 1234, "process_uptime_ms": 60000, "android_sdk": 36,
+  "app_version": "1.6.3",
+  "local_close_source": "ui_button",
+  "heartbeat_age_ms": 32000,
+  "attempt": 3
+}
+```
+
+* `event` 闭集：`connected` / `disconnected` / `reconnecting` / `network_changed` /
+  `heartbeat_timeout` / `authentication_failed` / `user_disconnected` /
+  `service_destroyed` / `service_restarted` / `server_close` / `socket_failure` /
+  `handshake_timeout` / `transport_close`。认不出的值整条丢弃。
+* `category` 闭集见 `diagnostics.ts` 的 `FAILURE_CATEGORIES`；`network` / `screen` /
+  `local_close_source` 也都是闭集。`exception_class` 只接受标识符形状
+  （`^[A-Za-z_$][A-Za-z0-9_$.]{0,63}$`），**不采集异常 message**。
+* `client_at` 是手机时钟；断网期间事件会排队、连上后补发，因此可能早于服务端
+  收到它的时刻。合并时间线必须同时使用两个时间戳，不能假设两端时钟一致。
+* 每 60 秒最多 20 条；超出直接丢弃并计数。帧内的任何字段都不会让连接失败。
+
+### 12.2 服务端 → 手机：`GET /phone/diagnostics`
+
+鉴权与主连接相同：`X-Device-Id` + `Authorization: Bearer <device token>`。
+只返回**该凭据对应设备**的事件；换设备 ID 读不到别人的日志，未认证一律 401。
+响应带 `Cache-Control: no-store`，不含令牌、地址或请求参数。
+
+```json
+{
+  "ok": true,
+  "device_id": "…",
+  "server_time": 1760000005000,
+  "online": false, "socket_open": false, "stale": false,
+  "connection_generation": 52,
+  "last_phone_activity_at": 1760000000000,
+  "events": [
+    { "seq": 7, "at": 1760000000000, "client_at": 1759999999000,
+      "source": "durable_object", "type": "replaced", "generation": 51,
+      "close_code": 4001, "close_reason": "replaced_by_newer_connection",
+      "server_initiated": true, "duration_ms": 30000, "detail": {} }
+  ],
+  "summary": { "last_online_at": 0, "last_offline_at": 0, "last_offline_reason": null,
+               "last_offline_close_code": 4001, "replaced_events": 3 },
+  "buffer": { "size": 9, "returned": 1, "dropped": 2,
+              "max_events": 200, "max_age_ms": 86400000 },
+  "close_codes": {
+    "4000": "liveness_timeout",
+    "4001": "replaced_by_newer_connection",
+    "4002": "device_credential_revoked"
+  }
+}
+```
+
+* 每设备最多保留 **200 条 / 24 小时**，超出按最旧丢弃并累计 `dropped`；
+  查询只返回最近的事件，`buffer` 如实报告是否发生过丢弃。
+* 服务端主动关闭会在调用 `close()` **之前**登记关闭意图；`server_initiated`
+  只有在能对上意图时才是 `true`，对不上是 `null`（"无法确定"），绝不编造。
+* 服务端没收到正常关闭帧时，事件如实记为异常断连；`close_code` 只在确实观测到
+  关闭帧时填写，不会用 1006 之类的码冒充。
+* `close_codes` 是关闭码语义的**唯一来源**；客户端不得硬编码或凭码值猜原因。

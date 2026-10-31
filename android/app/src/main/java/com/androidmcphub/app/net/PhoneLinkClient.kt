@@ -1,14 +1,18 @@
 package com.androidmcphub.app.net
 
 import com.androidmcphub.app.capability.CapabilityDispatcher
+import com.androidmcphub.app.core.DeviceSnapshot
+import com.androidmcphub.app.core.DiagReport
 import com.androidmcphub.app.core.HubConfig
 import com.androidmcphub.app.core.LinkEvent
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.TokenLoadResult
+import com.androidmcphub.app.core.buildDiagReport
 import com.androidmcphub.app.core.hostOf
 import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.normalizeWebSocketUrl
 import com.androidmcphub.app.protocol.CLIENT_VERSION
+import com.androidmcphub.app.protocol.encodeDiagEvent
 import com.androidmcphub.app.protocol.LinkAction
 import com.androidmcphub.app.protocol.LinkState
 import com.androidmcphub.app.protocol.PhoneLink
@@ -61,6 +65,13 @@ class PhoneLinkClient(
      * 这样"忘记接线"的后果是功能缺失，而不是悄悄多出一个可被远程调用的能力。
      */
     private val capabilityDispatcher: CapabilityDispatcher = CapabilityDispatcher(emptyList(), clock = clock),
+    /**
+     * V1.6.3：事件发生时的本机上下文（网络类型、VPN、屏幕状态、PID、进程运行时长）。
+     *
+     * 由前台服务注入；默认是空快照 —— 这样 JVM 单测不需要 Android 框架也能构造
+     * 客户端，而生产环境必然拿到真实值。**不得**在这里放任何用户数据。
+     */
+    private val deviceSnapshotProvider: () -> DeviceSnapshot = { DeviceSnapshot() },
 ) {
 
     private val scheduler: ScheduledExecutorService =
@@ -79,6 +90,8 @@ class PhoneLinkClient(
         l.onStateChanged = { state ->
             log(LogLevel.INFO, "状态 → ${describeState(state)}")
             onStateChanged(state)
+            // 连上之后把断网期间排队的诊断事件补发出去。
+            if (state is LinkState.Connected) scheduleReportFlush()
         }
         l.onPing = { outcome ->
             if (!outcome.duplicate) {
@@ -86,7 +99,10 @@ class PhoneLinkClient(
             }
             onPing(outcome)
         }
-        l.onEvent = { event -> onEvent(event) }
+        l.onEvent = { event ->
+            onEvent(event)
+            enqueueDiagReport(event)
+        }
         l.onHeartbeatAck = { atMs -> onHeartbeatAck(atMs) }
         l.onHeartbeatSent = { atMs -> onHeartbeatSent(atMs) }
         // 聚合命令的结果从工作线程回来：**不在这里碰 socket**，而是投回本类的
@@ -117,6 +133,65 @@ class PhoneLinkClient(
 
     /** 已排队的重连定时器世代号，用于丢弃过期的定时器。 */
     private val reconnectToken = AtomicInteger(0)
+
+    // ---- V1.6.3 客户端诊断上报 ---------------------------------------------
+
+    /**
+     * 待上报的 `diag_event`：断网/重连期间事件发不出去，先排队，连上后补发。
+     *
+     * 为什么必须排队而不是"发不出去就算了"：要回答的正是"连接为什么反复断开"，
+     * 而断线那一刻的事件恰恰是最关键的证据。丢掉它们，云端只会看到一条条
+     * `device_online`，看不到手机那一侧同时发生了什么。
+     */
+    private val reportQueue = DiagReportQueue(
+        limit = REPORT_QUEUE_LIMIT,
+        maxAgeMs = REPORT_MAX_AGE_MS,
+        clock = clock,
+    )
+
+    /** 记录一条事件，并在合适的时候补发队列。可以在 PhoneLink 的锁里被调用：只做入队。 */
+    private fun enqueueDiagReport(event: LinkEvent) {
+        reportQueue.enqueue(buildDiagReport(event, deviceSnapshotProvider()))
+        // 已连接时立刻发；否则等 onStateChanged(Connected) 或下一次事件触发补发。
+        if (link.state is LinkState.Connected) scheduleReportFlush()
+    }
+
+    private fun scheduleReportFlush() {
+        try {
+            scheduler.execute { runCatching { flushPendingReports() } }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // 调度器已经关闭（用户断开/服务销毁）：队列随客户端一起丢弃即可。
+        }
+    }
+
+    /** 在 [scheduler] 线程上把队列里的诊断事件按发生顺序发出去。 */
+    private fun flushPendingReports() {
+        if (socket == null) return
+        // 太旧的证据由队列丢弃（它们已不能解释"刚刚"发生的事）。
+        val expired = reportQueue.drain { trySendReport(it) }
+        if (expired > 0) {
+            log(LogLevel.WARN, "丢弃 $expired 条过期诊断事件（超过 ${REPORT_MAX_AGE_MS / 60_000} 分钟）")
+        }
+    }
+
+    /** @return true 表示已发送或已确定无需重试；false 表示当前发不出去。 */
+    private fun trySendReport(report: DiagReport): Boolean {
+        val ws = synchronized(socketLock) { socket } ?: return false
+        val frame = runCatching { encodeDiagEvent(report) }.getOrNull()
+            // 编码失败是本地 bug，重试也不会变好：直接丢弃这一条，不阻塞后续事件。
+            ?: return true
+        return ws.send(frame)
+    }
+
+    private fun clearPendingReports() {
+        reportQueue.clear()
+    }
+
+    /** 排队中的诊断事件数（测试与诊断用）。 */
+    val pendingDiagReportCount: Int get() = reportQueue.size
+
+    /** 因容量/过期而丢失的诊断事件数（测试与诊断用）。**不**上报，避免自我引用。 */
+    val droppedDiagReportCount: Int get() = reportQueue.droppedCount
 
     init {
         // 每秒一次：驱动应用层心跳（R3）与心跳超时/握手超时检测
@@ -176,6 +251,7 @@ class PhoneLinkClient(
     fun stop(source: String = "unknown") {
         reconnectToken.incrementAndGet()
         execute(link.stop(source = source))
+        clearPendingReports()
         runCatching { capabilityDispatcher.close() }
         scheduler.shutdown()
     }
@@ -210,6 +286,7 @@ class PhoneLinkClient(
     fun shutdown(reason: String = "前台服务停止（非用户断开）") {
         reconnectToken.incrementAndGet()
         execute(link.abandon(reason))
+        clearPendingReports()
         // 先关聚合路由器（它的刷新线程池与目录缓存），再关调度器：
         // 反过来的话，在飞的结果会撞上一个已经不收任务的调度器。
         runCatching { capabilityDispatcher.close() }
@@ -368,8 +445,15 @@ class PhoneLinkClient(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (!isCurrent(epoch)) return
             // Gate 0.3 审计发现项 1：**不把 `t.message` 往下传**。
-            // 只按异常类名给一个闭集里的类别（见 SocketFailure.classify）。
-            execute(link.onSocketFailure(SocketFailure.classify(t.javaClass.simpleName), response?.code))
+            // 只按异常类名给一个闭集里的类别（见 SocketFailure.classify），
+            // 同时把类名本身作为结构化证据带上（上报前还会再收敛形状）。
+            execute(
+                link.onSocketFailure(
+                    category = SocketFailure.classify(t.javaClass.simpleName),
+                    httpStatus = response?.code,
+                    exceptionClass = t.javaClass.simpleName,
+                ),
+            )
         }
     }
 
@@ -379,6 +463,12 @@ class PhoneLinkClient(
 
         /** 调度器节拍：1 秒。 */
         private const val TICK_MS = 1_000L
+
+        /** 待上报诊断事件的上限；超出时丢弃最旧的（断线风暴不能无限占内存）。 */
+        const val REPORT_QUEUE_LIMIT: Int = 50
+
+        /** 超过这个时长的排队事件不再补发 —— 它们已经解释不了"刚刚"发生了什么。 */
+        const val REPORT_MAX_AGE_MS: Long = 15 * 60 * 1000L
 
         /** 界面状态的中文描述，同时用于日志。 */
         fun describeState(state: LinkState): String = when (state) {

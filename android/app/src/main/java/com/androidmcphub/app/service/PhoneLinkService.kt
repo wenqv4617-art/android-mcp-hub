@@ -19,6 +19,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -29,6 +31,8 @@ import com.androidmcphub.app.aggregation.McpHubRouter
 import com.androidmcphub.app.capability.BuiltInCapabilities
 import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.capability.CapabilityMetadata
+import com.androidmcphub.app.core.DeviceSnapshot
+import com.androidmcphub.app.core.DiagScreen
 import com.androidmcphub.app.core.HubLog
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.LinkEvent
@@ -36,11 +40,13 @@ import com.androidmcphub.app.core.LinkEventKind
 import com.androidmcphub.app.core.LogEntry
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.NetworkKind
+import com.androidmcphub.app.core.diagNetwork
 import com.androidmcphub.app.core.networkKind
 import com.androidmcphub.app.mcp.McpStores
 import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.hostOf
 import com.androidmcphub.app.net.PhoneLinkClient
+import com.androidmcphub.app.protocol.APP_VERSION
 import com.androidmcphub.app.protocol.LinkState
 import com.androidmcphub.app.protocol.PingOutcome
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -149,7 +155,9 @@ object LinkBus {
         _diagnostics.value = when (event.kind) {
             LinkEventKind.CONNECTED -> _diagnostics.value.copy(lastConnectedAtMs = event.atMs)
 
-            LinkEventKind.DISCONNECTED,
+            LinkEventKind.SERVER_CLOSED,
+            LinkEventKind.SOCKET_FAILURE,
+            LinkEventKind.HANDSHAKE_TIMEOUT,
             LinkEventKind.HEARTBEAT_TIMEOUT,
             LinkEventKind.AUTHENTICATION_FAILED,
             LinkEventKind.USER_DISCONNECTED,
@@ -158,6 +166,8 @@ object LinkBus {
                 lastDisconnectAtMs = event.atMs,
                 lastDisconnectReason = event.detail.ifBlank { event.kind.label },
                 lastDisconnectSource = disconnectSourceOf(event),
+                // 每次断开都覆盖：这一次没收到关闭帧就是 null，不能留着上一次的码。
+                lastDisconnectCloseCode = event.closeCode,
             )
 
             LinkEventKind.RECONNECTING ->
@@ -181,21 +191,15 @@ object LinkBus {
      * 现在来源单独成字段，且只允许下列前缀，界面不再需要从中文里猜。
      */
     private fun disconnectSourceOf(event: LinkEvent): String = when (event.kind) {
-        LinkEventKind.USER_DISCONNECTED ->
-            "user:" + event.detail.removePrefix("source=").ifBlank { "unknown" }
+        // V1.6.3：来源直接取结构化字段，不再从中文 detail 里 substring。
+        LinkEventKind.USER_DISCONNECTED -> "user:" + (event.source ?: "unknown")
 
         LinkEventKind.SERVICE_DESTROYED -> "service_destroyed"
         LinkEventKind.HEARTBEAT_TIMEOUT -> "heartbeat_timeout"
         LinkEventKind.AUTHENTICATION_FAILED -> "auth_failed"
-
-        LinkEventKind.DISCONNECTED -> when {
-            event.detail.startsWith("服务端关闭") -> "remote_close"
-            event.detail.startsWith("握手超时") -> "handshake_timeout"
-            event.detail.contains("category=") ->
-                "network:" + event.detail.substringAfter("category=").substringBefore(' ')
-
-            else -> "network_failure"
-        }
+        LinkEventKind.SERVER_CLOSED -> "remote_close"
+        LinkEventKind.HANDSHAKE_TIMEOUT -> "handshake_timeout"
+        LinkEventKind.SOCKET_FAILURE -> "network:" + (event.category ?: SocketFailure.UNKNOWN)
 
         else -> event.kind.name.lowercase()
     }
@@ -246,6 +250,13 @@ data class LinkDiagnostics(
      * 诊断页据此回答"用户到底有没有主动断开"。
      */
     val lastDisconnectSource: String? = null,
+    /**
+     * 最近一次断开时**实际收到**的 WebSocket 关闭码。
+     *
+     * null 表示没收到关闭帧（网络重置、心跳超时、握手超时等）。**不会**用
+     * 1006 或别的码去补 —— 没观察到就是没观察到。
+     */
+    val lastDisconnectCloseCode: Int? = null,
     val reconnectCount: Int = 0,
     val networkLabel: String = NetworkKind.NONE.label,
     /** 用户落盘的连接意图；与当前 socket 状态分开看。 */
@@ -324,6 +335,19 @@ class PhoneLinkService : Service() {
 
     /** 服务启动时刻，用于会话僵死看门狗（还没收到过任何服务端帧时的兜底起点）。 */
     private var startedAtMs: Long = 0L
+
+    /**
+     * 最近一次观察到的默认网络（V1.6.3 诊断上报用）。
+     *
+     * 单独存一份而非从 [LinkBus] 的展示文案反推：展示文案是中文标签，且只在
+     * 界面订阅时才需要；上报要的是线上闭集值（`wifi`/`cellular`/…）。
+     */
+    @Volatile
+    private var currentNetworkKind: NetworkKind = NetworkKind.NONE
+
+    /** 当前默认网络是否走 VPN。与"网络类型"分开：VPN 可能叠在 Wi-Fi 或蜂窝上。 */
+    @Volatile
+    private var currentVpn: Boolean = false
 
     /** 看门狗：没有任何服务端帧超过这个时长就主动停掉自己。 */
     private val watchdog = object : Runnable {
@@ -476,6 +500,9 @@ class PhoneLinkService : Service() {
             onEvent = { event -> LinkBus.recordEvent(event) },
             onHeartbeatAck = { atMs -> LinkBus.publishHeartbeatAck(atMs) },
             onHeartbeatSent = { atMs -> LinkBus.publishHeartbeatSent(atMs) },
+            // V1.6.3：每条诊断事件带上**事件发生那一刻**的本机上下文。
+            // 只读系统状态（网络类别、VPN、亮熄屏、PID、进程运行时长），不含任何用户数据。
+            deviceSnapshotProvider = { deviceSnapshot() },
             // Gate 2 工作包 D/E、Gate 2.5：能力分发层。
             //   · 白名单在这里、也**只**在这里建立：能被执行的能力由
             //     `capability/BuiltInCapabilities.kt` 那份唯一注册清单派生
@@ -662,6 +689,8 @@ class PhoneLinkService : Service() {
                 }
                 lastDefaultNetwork = null
                 lastAvailableNetwork = null
+                currentNetworkKind = NetworkKind.NONE
+                currentVpn = false
                 LinkBus.publishNetworkKind(NetworkKind.NONE)
                 LinkBus.log.warn("默认网络已断开")
                 LinkBus.recordEvent(LinkEventKind.NETWORK_CHANGED, "网络断开")
@@ -670,7 +699,10 @@ class PhoneLinkService : Service() {
 
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                 lastDefaultNetwork = network
-                LinkBus.publishNetworkKind(kindOf(capabilities))
+                val kind = kindOf(capabilities)
+                currentNetworkKind = kind
+                currentVpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                LinkBus.publishNetworkKind(kind)
             }
         }
         networkCallback = callback
@@ -686,7 +718,39 @@ class PhoneLinkService : Service() {
     private fun updateNetworkKind() {
         val cm = connectivity ?: return
         val capabilities = cm.getNetworkCapabilities(cm.activeNetwork)
-        LinkBus.publishNetworkKind(if (capabilities == null) NetworkKind.NONE else kindOf(capabilities))
+        val kind = if (capabilities == null) NetworkKind.NONE else kindOf(capabilities)
+        currentNetworkKind = kind
+        currentVpn = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        LinkBus.publishNetworkKind(kind)
+    }
+
+    /**
+     * 事件发生时的本机诊断快照（V1.6.3）。
+     *
+     * 只读系统状态，不读令牌、地址、偏好或任何用户数据。屏幕状态用
+     * `PowerManager.isInteractive` —— 它回答的是"屏幕是否亮着"，不是"是否解锁"，
+     * 后者属于更敏感的信息，诊断不需要。
+     */
+    private fun deviceSnapshot(): DeviceSnapshot {
+        val interactive = (getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive
+        val screen = when (interactive) {
+            true -> DiagScreen.ON
+            false -> DiagScreen.OFF
+            null -> DiagScreen.UNKNOWN
+        }
+        // Process.getStartElapsedRealtime() 返回进程启动时的 elapsedRealtime（API 24+）。
+        val processUptime = runCatching {
+            (SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime()).coerceAtLeast(0L)
+        }.getOrNull()
+        return DeviceSnapshot(
+            network = currentNetworkKind.diagNetwork(),
+            vpn = currentVpn,
+            screen = screen,
+            pid = Process.myPid(),
+            processUptimeMs = processUptime,
+            appVersion = APP_VERSION,
+            androidSdk = Build.VERSION.SDK_INT,
+        )
     }
 
     private fun kindOf(capabilities: NetworkCapabilities): NetworkKind = networkKind(

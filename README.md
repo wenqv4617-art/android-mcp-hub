@@ -48,11 +48,11 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | 项 | 结果 |
 | --- | --- |
 | Worker `npx tsc --noEmit` | 通过 |
-| Worker 测试 | **469 项 / 21 个文件全部通过**（`npx vitest run`） |
+| Worker 测试 | **500 项 / 22 个文件全部通过**（`npm run test`） |
 | 本地端到端 | **114 项全部通过**（真 HTTP + 真 WebSocket + 官方 MCP SDK） |
-| Android JVM 测试 | **788 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.2 新增 29 项后台连接可靠性用例） |
+| Android JVM 测试 | **835 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.3 新增 47 项双端诊断用例） |
 | Android Lint | 通过（`abortOnError = true`） |
-| Android 版本 | **V1.6.2**（versionCode 8）：服务停止不再冒充用户断开（`SERVICE_DESTROYED` + 保留连接意图）、回到前台自动恢复、迟到的旧网络回调不再误关连接、建连原子化、15 秒协议层 ping；诊断页新增断开来源/连接意图/服务停止原因/上次心跳发送 |
+| Android 版本 | **V1.6.3**（versionCode 9）：双端连接诊断与云端日志回传 —— 结构化 `diag_event`（含异常类名、关闭码、代次、网络/屏幕/VPN）、断网排队补发（50 条 / 15 分钟）、独立 HTTPS 查询 `GET /phone/diagnostics`、诊断页「本机 / 云端 / 合并」时间线与时钟差校正、脱敏导出；关闭码语义（4001 等）只来自服务端映射 |
 | 签名 Release APK | [构建运行 41194017762](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41194017762)（commit `37cfa3b`）：`1.6.2` (versionCode 8)，APK SHA-256 `bab04064…90841c`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0/1.6.1 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功（`versionCode=8` / `versionName=1.6.2`）。APK 在运行的 **Artifacts → `Android-MCP-Hub-release-apk`** 中下载 |
 | 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`，部署后公网冒烟 PASS（见 [运行 41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)） |
 | 真机 / 真实客户端验收 | **未执行**（本机无 adb 设备、无第三方客户端账号，见文末清单） |
@@ -238,3 +238,8 @@ https://<your-worker>.workers.dev/mcp
    期间若发生网络重置，应自动重连而不是停服。断网 30 秒或 Wi-Fi↔蜂窝切换后，诊断页事件应回到 `connected`。
    全程**没有点过「断开」**时，诊断页的「断开来源」不得显示 `user:…`；服务若被系统停掉，
    应显示「服务停止原因 = 系统停止前台服务」且「连接意图 = 是」，重新打开 App 后 2 秒内自动回到「已连接」。
+8. **双端诊断（V1.6.3）**：诊断页点「刷新云端」，应看到云端在线状态、连接代次与最近事件；
+   来源切到「合并」后，本机与云端事件按校正后的时间混排，行内同时显示「服务端时间 → 本机时间」；
+   若同时出现 4001 与 `connection_reset`，页面应给出「可能相关」而不是断言因果。
+   主动断开主连接（或飞行模式）后，只要 HTTPS 可达，仍能刷新并看到云端之前记录的事件；
+   刷新失败只显示失败原因，**不得**导致主连接重连。
