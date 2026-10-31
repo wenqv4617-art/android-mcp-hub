@@ -254,4 +254,83 @@ class LinkBusTest {
         assertEquals(LinkState.Connected(generation = 5), LinkBus.state.value)
         assertEquals("统计是「发生过什么」，清列表不该把它抹掉", 10_000L, LinkBus.diagnostics.value.lastConnectedAtMs)
     }
+
+    // ---- V1.6.2：断开来源必须能被诊断页区分 --------------------------------
+
+    @Test
+    fun `V162 服务销毁记为独立来源，绝不写成用户断开`() {
+        LinkBus.publishLinkDesired(true)
+
+        LinkBus.recordEvent(
+            LinkEventKind.SERVICE_DESTROYED,
+            detail = "系统停止前台服务（非用户操作，连接意图=true）",
+            atMs = 30_000L,
+        )
+
+        val d = LinkBus.diagnostics.value
+        assertEquals(30_000L, d.lastDisconnectAtMs)
+        assertEquals("service_destroyed", d.lastDisconnectSource)
+        assertTrue("断开原因要能解释为用户没点断开", d.lastDisconnectReason.orEmpty().contains("非用户操作"))
+        assertTrue("连接意图仍为 true —— 系统停止不是用户改主意", d.linkDesired)
+        assertFalse(
+            "服务销毁不得产生 USER_DISCONNECTED：${LinkBus.events.value.map { it.kind }}",
+            LinkBus.events.value.any { it.kind == LinkEventKind.USER_DISCONNECTED },
+        )
+    }
+
+    @Test
+    fun `V162 用户断开的事件细节带真实来源`() {
+        LinkBus.recordEvent(LinkEventKind.USER_DISCONNECTED, detail = "source=ui_button")
+
+        assertEquals("user:ui_button", LinkBus.diagnostics.value.lastDisconnectSource)
+    }
+
+    @Test
+    fun `V162 网络类失败按闭集类别落成来源标签`() {
+        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "连接失败 category=connection_reset")
+        assertEquals("network:connection_reset", LinkBus.diagnostics.value.lastDisconnectSource)
+
+        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "连接失败 category=dns_failure")
+        assertEquals("network:dns_failure", LinkBus.diagnostics.value.lastDisconnectSource)
+    }
+
+    @Test
+    fun `V162 服务端关闭、握手超时、心跳超时与认证失败各有独立来源`() {
+        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "服务端关闭 code=4000")
+        assertEquals("remote_close", LinkBus.diagnostics.value.lastDisconnectSource)
+
+        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "握手超时（21000ms）")
+        assertEquals("handshake_timeout", LinkBus.diagnostics.value.lastDisconnectSource)
+
+        LinkBus.recordEvent(LinkEventKind.HEARTBEAT_TIMEOUT, detail = "90000ms 无服务端帧")
+        assertEquals("heartbeat_timeout", LinkBus.diagnostics.value.lastDisconnectSource)
+
+        LinkBus.recordEvent(LinkEventKind.AUTHENTICATION_FAILED, detail = "HTTP 401，不自动重连")
+        assertEquals("auth_failed", LinkBus.diagnostics.value.lastDisconnectSource)
+    }
+
+    @Test
+    fun `V162 心跳发送时间单独记录，且 0 不显示成 1970`() {
+        LinkBus.publishHeartbeatSent(0L)
+        assertNull(LinkBus.diagnostics.value.lastHeartbeatSentAtMs)
+
+        LinkBus.publishHeartbeatSent(1_700_000_000_500L)
+
+        assertEquals(1_700_000_000_500L, LinkBus.diagnostics.value.lastHeartbeatSentAtMs)
+        assertNull("发送不等于是成功，两者不能互相顶替", LinkBus.diagnostics.value.lastHeartbeatAckAtMs)
+    }
+
+    @Test
+    fun `V162 连接意图与服务停止原因可以独立更新`() {
+        LinkBus.publishLinkDesired(true)
+        assertTrue(LinkBus.diagnostics.value.linkDesired)
+
+        LinkBus.publishServiceStop("前台服务启动失败（foreground_denied）")
+        assertEquals("前台服务启动失败（foreground_denied）", LinkBus.diagnostics.value.lastServiceStopReason)
+
+        // 服务重新启动时清空停止原因，但不得改动连接意图。
+        LinkBus.publishServiceStop(null)
+        assertNull(LinkBus.diagnostics.value.lastServiceStopReason)
+        assertTrue(LinkBus.diagnostics.value.linkDesired)
+    }
 }

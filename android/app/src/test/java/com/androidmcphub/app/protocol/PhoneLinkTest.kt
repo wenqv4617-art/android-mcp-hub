@@ -53,6 +53,7 @@ class PhoneLinkTest {
         val pings = mutableListOf<PingOutcome>()
         val events = mutableListOf<LinkEvent>()
         val heartbeatAcks = mutableListOf<Long>()
+        val heartbeatSends = mutableListOf<Long>()
 
         val link = PhoneLink(
             config = config,
@@ -67,6 +68,7 @@ class PhoneLinkTest {
             link.onPing = { pings += it }
             link.onEvent = { events += it }
             link.onHeartbeatAck = { heartbeatAcks += it }
+            link.onHeartbeatSent = { heartbeatSends += it }
         }
 
         fun kinds(): List<LinkEventKind> = events.map { it.kind }
@@ -770,6 +772,72 @@ class PhoneLinkTest {
 
         assertEquals(listOf(ack.now), ack.heartbeatAcks)
         assertEquals(ack.now, ack.link.lastHeartbeatAckAtMs)
+    }
+
+    // ---- V1.6.2：服务停止不得冒充用户断开 ----------------------------------
+
+    @Test
+    fun `V162 abandon 只停连接，不产生用户断开事件`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.abandon("前台服务销毁（origin=system）")
+
+        assertEquals(listOf(LinkAction.Close), actions)
+        assertEquals(LinkState.Idle, h.link.state)
+        assertTrue("abandon 之后同样禁止重连", h.link.userStopped)
+        assertFalse(
+            "服务被系统销毁不是用户断开：${h.kinds()}",
+            LinkEventKind.USER_DISCONNECTED in h.kinds(),
+        )
+        assertTrue("必须留下可诊断的服务停止日志", h.logTexts().contains("前台服务销毁"))
+    }
+
+    @Test
+    fun `V162 abandon 之后任何迟到回调都不会重连`() {
+        val h = Harness()
+        h.connect()
+        h.link.abandon("前台服务销毁（origin=system）")
+
+        assertEquals(emptyList<LinkAction>(), h.link.onSocketClosed(1006, "迟到的关闭"))
+        assertEquals(emptyList<LinkAction>(), h.link.onSocketFailure("connection_reset", null))
+        assertEquals(emptyList<LinkAction>(), h.link.onNetworkAvailable())
+        assertEquals(emptyList<LinkAction>(), h.link.onNetworkLost())
+        h.now += 600_000L
+        assertEquals(emptyList<LinkAction>(), h.link.onTick())
+        assertEquals(LinkState.Idle, h.link.state)
+    }
+
+    @Test
+    fun `V162 用户断开携带真实来源，重复 stop 不重复记录`() {
+        val h = Harness()
+        h.connect()
+
+        h.link.stop(source = "notification_action")
+        h.link.stop(source = "ui_button")
+
+        val user = h.events.filter { it.kind == LinkEventKind.USER_DISCONNECTED }
+        assertEquals("重复 stop 只能有一条用户断开", 1, user.size)
+        assertEquals("source=notification_action", user.single().detail)
+    }
+
+    @Test
+    fun `V162 心跳发送时间与回调只在真正发出一帧时刷新`() {
+        val h = Harness()
+        h.connect()
+
+        assertEquals("刚建连还没发过心跳", 0L, h.link.lastHeartbeatSentAtMs)
+        assertTrue("建连本身不得伪装成一次心跳发送", h.heartbeatSends.isEmpty())
+
+        h.now += 30_000L
+        val actions = h.link.onTick()
+
+        assertTrue(
+            "到点必须发心跳",
+            actions.any { it is LinkAction.Send && it.frame.contains("\"heartbeat\"") },
+        )
+        assertEquals(listOf(h.now), h.heartbeatSends)
+        assertEquals(h.now, h.link.lastHeartbeatSentAtMs)
     }
 
     // ---- 用户主动断开 -----------------------------------------------------

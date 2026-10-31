@@ -7,7 +7,7 @@ import org.json.JSONObject
 const val PROTOCOL_VERSION = "phone-link-v1"
 
 /** 应用版本，进入 hello 帧；与 build.gradle.kts 的 versionName 保持一致。 */
-const val APP_VERSION = "1.6.1"
+const val APP_VERSION = "1.6.2"
 
 /** 握手时上报的客户端标识：`android-mcp-hub/<version>`。 */
 const val CLIENT_VERSION = "android-mcp-hub/$APP_VERSION"

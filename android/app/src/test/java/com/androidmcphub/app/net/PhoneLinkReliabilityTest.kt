@@ -67,6 +67,7 @@ class PhoneLinkReliabilityTest {
     private val logs = CopyOnWriteArrayList<String>()
     private val events = CopyOnWriteArrayList<LinkEvent>()
     private val heartbeatAcks = CopyOnWriteArrayList<Long>()
+    private val heartbeatSends = CopyOnWriteArrayList<Long>()
 
     /** 给服务端用的"持续发帧"定时器，模拟一条活着的连接。 */
     private val timers: ScheduledExecutorService = Executors.newScheduledThreadPool(2) { r ->
@@ -165,6 +166,7 @@ class PhoneLinkReliabilityTest {
             onStateChanged = { states += it },
             onEvent = { events += it },
             onHeartbeatAck = { heartbeatAcks += it },
+            onHeartbeatSent = { heartbeatSends += it },
         )
     }
 
@@ -520,5 +522,81 @@ class PhoneLinkReliabilityTest {
             "当前连接的关闭必须触发重连 —— 否则上一条'状态不得再变化'是空断言：$states",
             awaitState(timeoutMs = 5_000L) { it is LinkState.Reconnecting },
         )
+    }
+
+    // ---- V1.6.2：服务停止 ≠ 用户断开 ----------------------------------------
+
+    @Test
+    fun `V162 服务销毁（shutdown）不得记录用户断开`() {
+        enqueueUpgrade { it.send(welcomeJson(1)) }
+        server.start()
+        config = configWith()
+        startClient()
+
+        client!!.start()
+        assertTrue(conns[0].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(awaitState { it is LinkState.Connected })
+
+        client!!.shutdown("前台服务销毁（origin=system）")
+
+        assertTrue(
+            "服务销毁之后必须回到已断开：$states",
+            awaitState(timeoutMs = 5_000L) { it is LinkState.Idle },
+        )
+        assertFalse(
+            "V1.6.1 的缺陷：onDestroy 复用 stop()，把系统停止写成用户断开。实际事件：${events.map { it.kind }}",
+            events.any { it.kind == LinkEventKind.USER_DISCONNECTED },
+        )
+
+        // 跨过整个退避窗口，迟到的关闭回调也不得把连接拉回来。
+        Thread.sleep(1_200)
+        assertEquals("服务销毁后不得再发起新连接", 1, server.requestCount)
+        assertEquals("最终状态必须停在已断开", LinkState.Idle, states.last())
+    }
+
+    @Test
+    fun `V162 用户断开必须带上真实来源`() {
+        enqueueUpgrade { it.send(welcomeJson(1)) }
+        server.start()
+        config = configWith()
+        startClient()
+
+        client!!.start()
+        assertTrue(conns[0].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(awaitState { it is LinkState.Connected })
+
+        client!!.stop(source = "notification_action")
+
+        assertTrue(
+            "用户断开必须留下事件：${events.map { it.kind }}",
+            waitUntil(3_000) { events.any { it.kind == LinkEventKind.USER_DISCONNECTED } },
+        )
+        assertEquals(
+            "事件细节里必须是真实来源，诊断页才能回答「是谁断开的」",
+            "source=notification_action",
+            events.first { it.kind == LinkEventKind.USER_DISCONNECTED }.detail,
+        )
+    }
+
+    @Test
+    fun `V162 应用层心跳发送时间会回传，且有独立于「心跳成功」的时间戳`() {
+        enqueueUpgrade {
+            it.send(welcomeJson(1))
+            keepAlive(it)
+        }
+        server.start()
+        // 心跳压到 300ms，静默阈值仍由 pingTimeoutMs(10s) 兜住，不会被误判超时。
+        config = configWith(heartbeatIntervalMs = 300L)
+        startClient()
+
+        client!!.start()
+        assertTrue(conns[0].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(awaitState { it is LinkState.Connected })
+
+        assertTrue(
+            "到点必须真的发出心跳并回调：$heartbeatSends",
+            waitUntil(5_000) { heartbeatSends.isNotEmpty() },
+        )
+        assertTrue("最近心跳发送时间必须可读", client!!.lastHeartbeatSentAtMs > 0L)
     }
 }

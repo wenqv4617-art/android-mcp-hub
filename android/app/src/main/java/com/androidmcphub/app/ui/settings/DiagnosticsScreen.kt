@@ -134,6 +134,10 @@ fun DiagnosticsScreen(
                     value = diagnostics.lastConnectedAtMs?.let(::formatDateTime) ?: "—",
                 )
                 InfoRow(
+                    label = "上次心跳发送",
+                    value = diagnostics.lastHeartbeatSentAtMs?.let(::formatDateTime) ?: "—",
+                )
+                InfoRow(
                     label = "上次心跳成功",
                     value = diagnostics.lastHeartbeatAckAtMs?.let(::formatDateTime) ?: "—",
                 )
@@ -145,8 +149,20 @@ fun DiagnosticsScreen(
                     label = "断开原因",
                     value = diagnostics.lastDisconnectReason ?: "—",
                 )
+                InfoRow(
+                    label = "断开来源",
+                    value = diagnostics.lastDisconnectSource?.let(::disconnectSourceLabel) ?: "—",
+                )
+                InfoRow(
+                    label = "连接意图",
+                    value = if (diagnostics.linkDesired) "保持连接（用户意愿）" else "已断开（用户意愿）",
+                )
                 InfoRow(label = "重连次数", value = diagnostics.reconnectCount.toString())
                 InfoRow(label = "下次重试", value = nextRetry)
+                InfoRow(
+                    label = "服务停止原因",
+                    value = diagnostics.lastServiceStopReason ?: "—",
+                )
                 Text(
                     text = "云端是否在线由服务端按心跳判定，本页没有查询云端状态的接口，" +
                         "因此只展示本机链路与心跳证据，不伪造「云端已确认在线」。",
@@ -269,8 +285,8 @@ fun DiagnosticsScreen(
                 EmptyState(
                     icon = Icons.Filled.Info,
                     title = "还没有连接事件",
-                    description = "连接成功、断开、重连、网络变化、心跳超时、认证失败与用户断开" +
-                        "都会出现在这里，按时间倒序排列。",
+                    description = "连接成功、断开、重连、网络变化、心跳超时、认证失败、用户断开" +
+                        "与服务停止都会出现在这里，按时间倒序排列。",
                     modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
                 )
             }
@@ -386,6 +402,27 @@ private fun EventRow(
  *
  * 个别 ROM 没有这个列表页时退回到应用详情页，不把"点不开"变成崩溃。
  */
+/**
+ * 把 [com.androidmcphub.app.service.LinkDiagnostics.lastDisconnectSource] 的闭集标签
+ * 翻成界面文案。未知标签原样显示，方便测试与排障时发现新增来源没有配套文案。
+ */
+private fun disconnectSourceLabel(source: String): String = when {
+    source.startsWith("user:") -> when (source.removePrefix("user:")) {
+        "ui_button" -> "用户点击界面按钮"
+        "notification_action" -> "用户点击通知栏按钮"
+        else -> "用户操作（来源未知）"
+    }
+
+    source == "service_destroyed" -> "系统停止前台服务（非用户）"
+    source == "remote_close" -> "服务端关闭连接"
+    source == "heartbeat_timeout" -> "心跳超时"
+    source == "handshake_timeout" -> "握手超时"
+    source == "auth_failed" -> "认证失败"
+    source.startsWith("network:") -> "网络错误（${source.removePrefix("network:")}）"
+    source == "network_failure" -> "网络错误"
+    else -> source
+}
+
 private fun openBatterySettings(context: Context) {
     val candidates = listOf(
         Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),

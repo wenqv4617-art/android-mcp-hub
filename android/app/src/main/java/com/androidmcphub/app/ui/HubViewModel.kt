@@ -121,7 +121,25 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
      */
     val batteryUnrestricted: StateFlow<Boolean> = _batteryUnrestricted.asStateFlow()
 
+    /** 最近一次请求恢复连接的时刻，避免 `init` 与 `onStart` 在几毫秒内各投递一次 CONNECT。 */
+    private var lastRestoreRequestAtMs: Long = 0L
+
     init {
+        LinkBus.publishLinkDesired(prefs.linkDesired())
+        restoreLinkIfDesired()
+    }
+
+    /**
+     * 应用回到前台时调用（`MainActivity.onStart`）。
+     *
+     * 为什么不能只在 ViewModel `init` 里恢复：进程还活着、只是前台服务被系统
+     * 停掉时，Activity 在后台被保留，ViewModel 不会重建，`init` 也不会再跑。
+     * 用户切回应用看到"已断开、服务未运行"，却不会自动恢复连接 —— 这正是
+     * V1.6.2 要补的一环。这里只读 `linkDesired`，不会替用户做断开决定。
+     */
+    fun onAppForegrounded() {
+        refreshBatteryStatus()
+        LinkBus.publishLinkDesired(prefs.linkDesired())
         restoreLinkIfDesired()
     }
 
@@ -277,6 +295,12 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
             tokenPresent = !token.isNullOrBlank(),
         )
         if (!shouldRestore) return
+        // 同一个 ViewModel 可能在 init 与 onStart 里各调一次；两次 CONNECT 会让
+        // 服务把刚建立的 socket 关掉再建一条。2 秒窗口足够覆盖启动序列，又不会
+        // 妨碍用户真正"断开后立刻重连"（那条路径不经过这里）。
+        val now = System.currentTimeMillis()
+        if (now - lastRestoreRequestAtMs < RESTORE_DEBOUNCE_MS) return
+        lastRestoreRequestAtMs = now
 
         LinkBus.log.info("检测到上次的连接意图，恢复前台连接")
         PhoneLinkService.connect(getApplication())
@@ -286,5 +310,9 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
         val app = getApplication<Application>()
         val pm = app.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
         return pm.isIgnoringBatteryOptimizations(app.packageName)
+    }
+
+    private companion object {
+        const val RESTORE_DEBOUNCE_MS = 2_000L
     }
 }

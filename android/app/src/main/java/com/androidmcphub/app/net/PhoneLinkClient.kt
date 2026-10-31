@@ -50,6 +50,7 @@ class PhoneLinkClient(
     private val onPing: (PingOutcome) -> Unit = {},
     private val onEvent: (LinkEvent) -> Unit = {},
     private val onHeartbeatAck: (Long) -> Unit = {},
+    private val onHeartbeatSent: (Long) -> Unit = {},
     private val random: Random = Random.Default,
     private val clock: () -> Long = System::currentTimeMillis,
     private val httpClient: OkHttpClient = defaultHttpClient(),
@@ -87,6 +88,7 @@ class PhoneLinkClient(
         }
         l.onEvent = { event -> onEvent(event) }
         l.onHeartbeatAck = { atMs -> onHeartbeatAck(atMs) }
+        l.onHeartbeatSent = { atMs -> onHeartbeatSent(atMs) }
         // 聚合命令的结果从工作线程回来：**不在这里碰 socket**，而是投回本类的
         // 单线程调度器，让"发帧"与其它动作（心跳、重连）排在同一条时间线上。
         l.onToolResultReady = { outcome ->
@@ -138,6 +140,9 @@ class PhoneLinkClient(
     /** 最近一次收到 heartbeat_ack 的时刻；0 表示本进程尚未收到过。 */
     val lastHeartbeatAckAtMs: Long get() = link.lastHeartbeatAckAtMs
 
+    /** 最近一次发出应用层心跳的时刻；0 表示本次连接里尚未发出过。 */
+    val lastHeartbeatSentAtMs: Long get() = link.lastHeartbeatSentAtMs
+
     /** 用户点「连接」。 */
     fun start() {
         val cfg = configProvider()
@@ -161,10 +166,18 @@ class PhoneLinkClient(
         execute(link.start())
     }
 
-    /** 用户点「断开」：置 userStopped，禁止任何自动重连。 */
-    fun stop() {
+    /**
+     * 用户点「断开」：置 userStopped，禁止任何自动重连。
+     *
+     * 与 [shutdown] 的区别只在事件语义：这里会产生一条 `USER_DISCONNECTED`（带真实来源），
+     * 而 [shutdown] 不会。两者都会释放线程与聚合线程池 —— 用户断开后服务随即销毁，
+     * 留着每秒一次的 tick 线程只会白耗电量。
+     */
+    fun stop(source: String = "unknown") {
         reconnectToken.incrementAndGet()
-        execute(link.stop())
+        execute(link.stop(source = source))
+        runCatching { capabilityDispatcher.close() }
+        scheduler.shutdown()
     }
 
     /** 网络恢复（由前台服务注册的 ConnectivityManager 回调驱动）。 */
@@ -186,9 +199,17 @@ class PhoneLinkClient(
         execute(link.onWatchdogTimeout(silentMs))
     }
 
-    /** 服务销毁时调用。 */
-    fun shutdown() {
-        stop()
+    /**
+     * 服务销毁时调用。
+     *
+     * V1.6.2：**不再复用 [stop]**。`stop()` 的默认原因是「用户主动断开」并会记一条
+     * `USER_DISCONNECTED`；服务销毁（包括系统回收、ColorOS 停止服务）复用它，
+     * 就会把系统行为写成用户行为。这里走 [PhoneLink.abandon]，只禁止重连、只记
+     * 服务停止原因，不产生用户事件。
+     */
+    fun shutdown(reason: String = "前台服务停止（非用户断开）") {
+        reconnectToken.incrementAndGet()
+        execute(link.abandon(reason))
         // 先关聚合路由器（它的刷新线程池与目录缓存），再关调度器：
         // 反过来的话，在飞的结果会撞上一个已经不收任务的调度器。
         runCatching { capabilityDispatcher.close() }
@@ -261,24 +282,29 @@ class PhoneLinkClient(
         }
         val token = (credential as TokenLoadResult.Present).token
 
-        closeSocket()
+        // V1.6.2：把「关旧 socket → 分配世代 → 建新 socket → 记下句柄」放在同一把锁里。
+        // 没有这一步时，网络恢复回调（主线程）和重连定时器（调度线程）可以同时进来：
+        // 两个 socket 都会被建出来，先建的那个在 onOpen 时才被 cancel，期间会多一条
+        // 无主的连接注册到服务端（服务端按代次替换，但手机侧会凭空多一次建连）。
+        synchronized(socketLock) {
+            closeSocket()
 
-        val request = Request.Builder()
-            .url(url)
-            // 令牌只放在请求头里，绝不写日志、绝不进 HubConfig
-            .header("Authorization", "Bearer $token")
-            .header("X-Device-Id", cfg.deviceId)
-            .header("X-Client-Version", CLIENT_VERSION)
-            .build()
+            val request = Request.Builder()
+                .url(url)
+                // 令牌只放在请求头里，绝不写日志、绝不进 HubConfig
+                .header("Authorization", "Bearer $token")
+                .header("X-Device-Id", cfg.deviceId)
+                .header("X-Client-Version", CLIENT_VERSION)
+                .build()
 
-        val myEpoch = epochCounter.incrementAndGet()
-        currentEpoch = myEpoch
-        // Gate 0.3 审计发现项 1：只记主机名。`$url` 里带着 path，而且用户从别处
-        // 复制来的地址可能带查询参数；主机名足够定位问题，且不承载任何凭据。
-        log(LogLevel.INFO, "发起 WebSocket 连接 host=${hostOf(url)} deviceId=${cfg.deviceId}")
+            val myEpoch = epochCounter.incrementAndGet()
+            currentEpoch = myEpoch
+            // Gate 0.3 审计发现项 1：只记主机名。`$url` 里带着 path，而且用户从别处
+            // 复制来的地址可能带查询参数；主机名足够定位问题，且不承载任何凭据。
+            log(LogLevel.INFO, "发起 WebSocket 连接 host=${hostOf(url)} deviceId=${cfg.deviceId}")
 
-        val ws = httpClient.newWebSocket(request, Listener(myEpoch))
-        synchronized(socketLock) { socket = ws }
+            socket = httpClient.newWebSocket(request, Listener(myEpoch))
+        }
     }
 
     private fun closeSocket() {
@@ -327,7 +353,10 @@ class PhoneLinkClient(
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            // 对端发起关闭：按协议回一个关闭帧，之后会收到 onClosed
+            // 对端发起关闭：按协议回一个关闭帧，之后会收到 onClosed。
+            // 过期世代的 socket 不再回应 —— 那可能是上一轮连接延迟送达的关闭帧，
+            // 回应它只会多一次无意义的写。
+            if (!isCurrent(epoch)) return
             webSocket.close(NORMAL_CLOSURE, null)
         }
 
@@ -363,15 +392,36 @@ class PhoneLinkClient(
         }
 
         /**
+         * WebSocket 协议层 ping 周期（秒）。
+         *
+         * V1.6.2：后台断线的实测形态是「连接建立约 30 秒后，等下一次应用层心跳期间
+         * 收到 TCP reset」，50–60 秒一个循环。应用层心跳 30 秒一次，两次心跳之间
+         * 链路完全静默；VPN/NAT 的闲置映射超时、以及半开连接，都会在这个静默窗口里
+         * 把 TCP 流掐掉。
+         *
+         * 这里用 OkHttp 的**协议层 ping**做保活：每 15 秒一个 ping 帧，收到 pong 即
+         * 证明链路双向可达；连续一个周期收不到 pong 就由 OkHttp 主动判死并触发既有
+         * 的重连，而不是等 60 秒应用层超时或操作系统的 TCP 重传超时。
+         *
+         * 为什么对 Cloudflare 安全：Workers/Durable Objects 运行时**自动**回应
+         * 协议层 ping，且不唤醒休眠中的 Durable Object（见 Cloudflare 文档
+         * "Automatic ping/pong handling"）。这是控制帧，不会进入 `webSocketMessage`，
+         * 也不影响服务端的应用层存活判定。
+         */
+        const val PING_INTERVAL_SECONDS: Long = 15L
+
+        /**
          * 默认 OkHttp 客户端。
          *
          * 读超时显式设为 0：WebSocket 是长连接，空闲是正常的，链路已死由应用层心跳
          * 超时（见 [PhoneLink.onTick]）来判定，不能让读超时把健康的空闲连接掐掉。
+         * 链路"是否还通"由上面的协议层 ping 更早发现。
          */
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(PING_INTERVAL_SECONDS, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }

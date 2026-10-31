@@ -7,8 +7,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.activity.viewModels
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.androidmcphub.app.hub.HubApp
 import com.androidmcphub.app.ui.HubViewModel
 import com.androidmcphub.app.ui.theme.AndroidMcpHubTheme
@@ -21,6 +21,15 @@ import com.androidmcphub.app.ui.theme.AndroidMcpHubTheme
  *  * 连接、保存、清令牌等动作由 [HubViewModel] 负责，Activity 只搭一层主题与容器。
  */
 class MainActivity : ComponentActivity() {
+
+    /**
+     * ViewModel 由 Activity 持有，`onStart` 才能主动检查一次"服务还在不在"。
+     *
+     * 这一步不发起连接、也不断开：它只调用 [HubViewModel.onAppForegrounded]，
+     * 后者仅在用户此前明确点过「连接」且服务确实没在跑时才恢复。Activity
+     * 进入后台时**没有任何**连接动作（本类不重写 onPause/onStop/onDestroy）。
+     */
+    private val viewModel: HubViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,9 +45,16 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    HubApp(viewModel = viewModel())
+                    HubApp(viewModel = viewModel)
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // 回到前台时补一次恢复检查：服务可能已被系统停掉，而 ViewModel 仍活着，
+        // init 不会重跑（见 HubViewModel.onAppForegrounded 的注释）。
+        viewModel.onAppForegrounded()
     }
 }

@@ -124,6 +124,16 @@ class PhoneLink(
     var lastHeartbeatAckAtMs: Long = 0L
         private set
 
+    /**
+     * 最近一次**发出**应用层心跳的时刻；0 表示本次连接里还没发过。
+     *
+     * V1.6.2：诊断页要能回答"心跳到底发出去了没有"。只显示"最近心跳成功"
+     * 时，如果之后再也没有成功过，用户无法区分"没发出去"和"发出去了但没回"。
+     */
+    @Volatile
+    var lastHeartbeatSentAtMs: Long = 0L
+        private set
+
     var onStateChanged: ((LinkState) -> Unit)? = null
 
     var onPing: ((PingOutcome) -> Unit)? = null
@@ -139,6 +149,9 @@ class PhoneLink(
 
     /** 收到 heartbeat_ack 时回调（诊断页的"最近心跳成功"）。 */
     var onHeartbeatAck: ((Long) -> Unit)? = null
+
+    /** 发出应用层心跳时回调（诊断页的"最近心跳发送"）。 */
+    var onHeartbeatSent: ((Long) -> Unit)? = null
 
     // ---- 内部计时 / 连接标志 ------------------------------------------------
 
@@ -162,7 +175,13 @@ class PhoneLink(
     /** 本次建连尝试的开始时刻，用于握手看门狗。 */
     private var attemptStartedAtMs: Long = 0L
 
-    private var lastHeartbeatSentAtMs: Long = 0L
+    /**
+     * 下一次应用层心跳的计时基准（socket 打开时刻，或上一次真正发心跳的时刻）。
+     *
+     * 必须与 [lastHeartbeatSentAtMs] 分开：后者是给诊断页看的"真的发过一帧心跳"，
+     * 而 socket 刚打开时还没发过。把两者合并会让诊断页显示一条并不存在的发送记录。
+     */
+    private var heartbeatBaselineMs: Long = 0L
 
     // ---- 输入事件 ----------------------------------------------------------
 
@@ -179,6 +198,7 @@ class PhoneLink(
         lastServerFrameAtMs = 0L
         lastHeartbeatSentAtMs = 0L
         lastHeartbeatAckAtMs = 0L
+        heartbeatBaselineMs = 0L
         attemptStartedAtMs = clock()
         // Gate 0.3 审计发现项 1：**不记完整 URL**。用户填的地址可能带查询参数
         // （`wss://host/phone/ws?token=…`），那是令牌最容易泄漏的位置。只记主机名。
@@ -187,17 +207,44 @@ class PhoneLink(
         listOf(LinkAction.Open)
     }
 
-    /** 用户点「断开」：置位 [userStopped]，之后任何意外断开都不会再触发重连。 */
-    fun stop(reason: String = "用户主动断开"): List<LinkAction> = synchronized(lock) {
+    /**
+     * 用户点「断开」：置位 [userStopped]，之后任何意外断开都不会再触发重连。
+     *
+     * [source] 必须标识**真实来源**（`ui_button` / `notification_action`）。
+     * 只有这条路会产生 [LinkEventKind.USER_DISCONNECTED] —— 服务销毁、启动失败、
+     * 系统回收都不得借用它，否则诊断页会把系统行为说成用户行为（V1.6.2 修复点）。
+     */
+    fun stop(
+        reason: String = "用户主动断开",
+        source: String = "unknown",
+    ): List<LinkAction> = synchronized(lock) {
         val wasStopped = userStopped
         userStopped = true
         reconnectScheduled = false
         attemptInFlight = false
         socketOpen = false
         consecutiveFailures = 0
+        log(LogLevel.INFO, "$reason（source=$source）")
+        // 重复调用（例如服务随后销毁）不该在诊断里留下第二条"用户断开"。
+        if (!wasStopped) emit(LinkEventKind.USER_DISCONNECTED, "source=$source")
+        setState(LinkState.Idle)
+        listOf(LinkAction.Close)
+    }
+
+    /**
+     * 非用户原因停止（服务被系统销毁、前台服务启动失败、无有效启动意图）。
+     *
+     * 语义与 [stop] 的区别只有一点，但很关键：**不产生 `USER_DISCONNECTED`**。
+     * 重连同样被禁止（服务都没了，重连没有意义），状态回到 [LinkState.Idle]，
+     * 但事件与日志会明确写成服务停止，而不是用户断开。
+     */
+    fun abandon(reason: String): List<LinkAction> = synchronized(lock) {
+        userStopped = true
+        reconnectScheduled = false
+        attemptInFlight = false
+        socketOpen = false
+        consecutiveFailures = 0
         log(LogLevel.INFO, reason)
-        // 重复调用（例如服务销毁时再 stop 一次）不该在诊断里留下第二条"用户断开"。
-        if (!wasStopped) emit(LinkEventKind.USER_DISCONNECTED, reason)
         setState(LinkState.Idle)
         listOf(LinkAction.Close)
     }
@@ -209,7 +256,8 @@ class PhoneLink(
         socketOpen = true
         val now = clock()
         lastServerFrameAtMs = now
-        lastHeartbeatSentAtMs = now
+        // 只是建连成功，还没发出心跳：计时基准从这里开始，但**不**伪造一条"已发送"。
+        heartbeatBaselineMs = now
         log(LogLevel.INFO, "WebSocket 已建立，发送 hello")
         listOf(LinkAction.Send(encodeHello(config.deviceId, androidSdk)))
     }
@@ -464,8 +512,10 @@ class PhoneLink(
             return@synchronized scheduleReconnect("心跳超时（${silent}ms 无任何服务端帧）")
         }
 
-        if (now - lastHeartbeatSentAtMs >= heartbeatIntervalMs) {
+        if (now - heartbeatBaselineMs >= heartbeatIntervalMs) {
+            heartbeatBaselineMs = now
             lastHeartbeatSentAtMs = now
+            onHeartbeatSent?.invoke(now)
             log(LogLevel.INFO, "发送应用层心跳")
             return@synchronized listOf(LinkAction.Send(encodeHeartbeat(now)))
         }

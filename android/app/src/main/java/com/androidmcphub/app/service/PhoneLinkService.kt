@@ -123,6 +123,22 @@ object LinkBus {
         _diagnostics.value = _diagnostics.value.copy(lastHeartbeatAckAtMs = atMs)
     }
 
+    /** 发出应用层心跳时刷新"最近心跳发送"。 */
+    fun publishHeartbeatSent(atMs: Long) {
+        if (atMs <= 0L) return
+        _diagnostics.value = _diagnostics.value.copy(lastHeartbeatSentAtMs = atMs)
+    }
+
+    /** 同步用户落盘的连接意图（`HubPrefs.linkDesired`），供诊断页判断"是不是还该连着"。 */
+    fun publishLinkDesired(desired: Boolean) {
+        _diagnostics.value = _diagnostics.value.copy(linkDesired = desired)
+    }
+
+    /** 记录一次前台服务停止的原因；服务重新启动时清空。 */
+    fun publishServiceStop(reason: String?) {
+        _diagnostics.value = _diagnostics.value.copy(lastServiceStopReason = reason)
+    }
+
     /** 当前默认网络类型（粗分类，不含 SSID/IP）。 */
     fun publishNetworkKind(kind: NetworkKind) {
         _diagnostics.value = _diagnostics.value.copy(networkLabel = kind.label)
@@ -132,13 +148,16 @@ object LinkBus {
         _events.value = (listOf(event) + _events.value).take(MAX_EVENTS)
         _diagnostics.value = when (event.kind) {
             LinkEventKind.CONNECTED -> _diagnostics.value.copy(lastConnectedAtMs = event.atMs)
+
             LinkEventKind.DISCONNECTED,
             LinkEventKind.HEARTBEAT_TIMEOUT,
             LinkEventKind.AUTHENTICATION_FAILED,
             LinkEventKind.USER_DISCONNECTED,
+            LinkEventKind.SERVICE_DESTROYED,
             -> _diagnostics.value.copy(
                 lastDisconnectAtMs = event.atMs,
                 lastDisconnectReason = event.detail.ifBlank { event.kind.label },
+                lastDisconnectSource = disconnectSourceOf(event),
             )
 
             LinkEventKind.RECONNECTING ->
@@ -152,6 +171,33 @@ object LinkBus {
 
     fun recordEvent(kind: LinkEventKind, detail: String = "", atMs: Long = System.currentTimeMillis()) {
         recordEvent(LinkEvent(kind = kind, atMs = atMs, detail = detail))
+    }
+
+    /**
+     * 把一条断开类事件收敛成"谁引发的"闭集标签。
+     *
+     * 诊断页曾经只有一句自由文本的 [LinkDiagnostics.lastDisconnectReason]，
+     * 而那句话在 V1.6.1 及以前由服务销毁路径写成了「用户主动断开」。
+     * 现在来源单独成字段，且只允许下列前缀，界面不再需要从中文里猜。
+     */
+    private fun disconnectSourceOf(event: LinkEvent): String = when (event.kind) {
+        LinkEventKind.USER_DISCONNECTED ->
+            "user:" + event.detail.removePrefix("source=").ifBlank { "unknown" }
+
+        LinkEventKind.SERVICE_DESTROYED -> "service_destroyed"
+        LinkEventKind.HEARTBEAT_TIMEOUT -> "heartbeat_timeout"
+        LinkEventKind.AUTHENTICATION_FAILED -> "auth_failed"
+
+        LinkEventKind.DISCONNECTED -> when {
+            event.detail.startsWith("服务端关闭") -> "remote_close"
+            event.detail.startsWith("握手超时") -> "handshake_timeout"
+            event.detail.contains("category=") ->
+                "network:" + event.detail.substringAfter("category=").substringBefore(' ')
+
+            else -> "network_failure"
+        }
+
+        else -> event.kind.name.lowercase()
     }
 
     /** 用户主动清空「最近一次错误」（界面上的「清空日志」顺带做这件事）。 */
@@ -187,11 +233,25 @@ object LinkBus {
  */
 data class LinkDiagnostics(
     val lastConnectedAtMs: Long? = null,
+    /** 最近一次**发出**应用层心跳；与 [lastHeartbeatAckAtMs] 一起用来区分"没发"与"没回"。 */
+    val lastHeartbeatSentAtMs: Long? = null,
     val lastHeartbeatAckAtMs: Long? = null,
     val lastDisconnectAtMs: Long? = null,
     val lastDisconnectReason: String? = null,
+    /**
+     * 断开是谁引发的（V1.6.2）。
+     *
+     * 取值来自闭集：`user:ui_button`、`user:notification_action`、`remote_close`、
+     * `network_reset`、`heartbeat_timeout`、`auth_failed`、`service_destroyed`。
+     * 诊断页据此回答"用户到底有没有主动断开"。
+     */
+    val lastDisconnectSource: String? = null,
     val reconnectCount: Int = 0,
     val networkLabel: String = NetworkKind.NONE.label,
+    /** 用户落盘的连接意图；与当前 socket 状态分开看。 */
+    val linkDesired: Boolean = false,
+    /** 最近一次前台服务被停止的原因（用户断开 / 系统停止 / 启动失败 / 无启动意图）。 */
+    val lastServiceStopReason: String? = null,
 )
 
 /**
@@ -209,6 +269,22 @@ class PhoneLinkService : Service() {
     private var client: PhoneLinkClient? = null
     private var connectivity: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** 最近一次默认网络；用来过滤"旧网络"迟到的 onLost，见 [registerNetworkCallback]。 */
+    private var lastDefaultNetwork: Network? = null
+
+    /** 同一个网络短时间内重复上报 onAvailable 的抑制窗口。 */
+    private var lastAvailableNetwork: Network? = null
+    private var lastAvailableAtMs: Long = 0L
+
+    /**
+     * 本次服务实例**为什么**要停止（仅在本机主动 `stopSelf()` 前写入）。
+     *
+     * `null` 表示停止不是本服务的任何一条主动路径发出的 —— `onDestroy()` 会把它
+     * 判为"系统停止前台服务"，并记录 [LinkEventKind.SERVICE_DESTROYED]，
+     * **绝不**记成用户断开。这是 V1.6.2 对"用户没点断开却显示用户主动断开"的修复核心。
+     */
+    private var stopInProgress: String? = null
 
     /**
      * 连接期间持有的一把**非引用计数**的部分唤醒锁。
@@ -267,6 +343,8 @@ class PhoneLinkService : Service() {
         registerNetworkCallback()
         updateNetworkKind()
         LinkBus.publishServiceRunning(true)
+        LinkBus.publishLinkDesired(prefs.linkDesired())
+        LinkBus.publishServiceStop(null)
         handler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         LinkBus.log.info("前台服务已创建")
     }
@@ -275,6 +353,8 @@ class PhoneLinkService : Service() {
         val desired = prefs.linkDesired()
         when (ServiceStartPolicy.decide(intent?.action, desired)) {
             ServiceStartDecision.CONNECT -> {
+                stopInProgress = null
+                pendingUserDisconnectSource = null
                 if (intent?.action == null) {
                     // 系统在进程被杀后重建服务：这是用户看不见的恢复路径，必须有日志与事件。
                     LinkBus.log.info("系统重建前台服务，按用户此前的连接意图恢复")
@@ -285,10 +365,17 @@ class PhoneLinkService : Service() {
                 }
             }
 
-            ServiceStartDecision.DISCONNECT -> handleDisconnect()
+            ServiceStartDecision.DISCONNECT -> {
+                // V1.6.2：断开来源必须跟着 Intent 走。只有真实用户动作（界面按钮 /
+                // 通知栏按钮）会发出 ACTION_DISCONNECT；没有来源的旧版 PendingIntent
+                // 也按 unknown 记录，绝不冒充其它原因。
+                val source = intent?.getStringExtra(EXTRA_DISCONNECT_SOURCE) ?: SOURCE_UNKNOWN
+                handleDisconnect(source)
+            }
 
             ServiceStartDecision.IGNORE -> {
                 // 用户已断开或收到未知 action：不建连，也不让服务空转。
+                stopInProgress = "no_actionable_intent"
                 LinkBus.log.warn("收到无可执行意图的启动请求（action=${intent?.action ?: "null"}），停止服务")
                 stopForegroundService()
             }
@@ -312,12 +399,31 @@ class PhoneLinkService : Service() {
         handler.removeCallbacks(watchdog)
         unregisterNetworkCallback()
         releaseWakeLock()
-        client?.shutdown()
+
+        val origin = stopInProgress ?: pendingUserDisconnectSource?.let { "user:$it" }
+        pendingUserDisconnectSource = null
+        val desired = prefs.linkDesired()
+        if (origin == null) {
+            // V1.6.2 核心修复：服务被销毁，但本服务没有任何一条主动停止路径被调用。
+            // 这不可能是"用户主动断开" —— 记录成独立事件，并保留用户的连接意图。
+            val detail = "系统停止前台服务（非用户操作，连接意图=$desired）"
+            LinkBus.log.warn(detail)
+            LinkBus.recordEvent(LinkEventKind.SERVICE_DESTROYED, detail)
+            LinkBus.publishServiceStop(detail)
+        } else {
+            LinkBus.log.info("前台服务停止（origin=$origin）")
+            if (!origin.startsWith("user:")) LinkBus.publishServiceStop(origin)
+        }
+
+        // 只禁止重连、只关 socket；用户断开事件在 handleDisconnect 里已经记过，
+        // 系统停止则刚刚记成 SERVICE_DESTROYED。这里绝不再产生 USER_DISCONNECTED。
+        client?.shutdown("前台服务销毁（origin=${origin ?: "system"}）")
         client = null
         // 在工作线程上的聚合命令会各自跑到自己的超时后退出；这里不等待它们，
         // 只保证不会再有新的任务被提交进来。
         hubWorkers?.shutdown()
         hubWorkers = null
+        LinkBus.publishLinkDesired(desired)
         LinkBus.publishServiceRunning(false)
         LinkBus.resetLink()
         LinkBus.log.info("前台服务已销毁")
@@ -332,6 +438,9 @@ class PhoneLinkService : Service() {
         //   代码继续往下走建了 WebSocket —— 那是系统已经拒绝的路径。
         //   顺序约束本身由 ConnectGateTest 在 JVM 上验证。
         prefs.setLinkDesired(true)
+        LinkBus.publishLinkDesired(true)
+        LinkBus.publishServiceStop(null)
+        stopInProgress = null
         LinkBus.log.info(trigger)
         ConnectStartupSequence(
             enterForeground = { goForeground(buildNotification(LinkState.Connecting)) },
@@ -366,6 +475,7 @@ class PhoneLinkService : Service() {
             onPing = { outcome -> if (!outcome.duplicate) LinkBus.publishPing(outcome) },
             onEvent = { event -> LinkBus.recordEvent(event) },
             onHeartbeatAck = { atMs -> LinkBus.publishHeartbeatAck(atMs) },
+            onHeartbeatSent = { atMs -> LinkBus.publishHeartbeatSent(atMs) },
             // Gate 2 工作包 D/E、Gate 2.5：能力分发层。
             //   · 白名单在这里、也**只**在这里建立：能被执行的能力由
             //     `capability/BuiltInCapabilities.kt` 那份唯一注册清单派生
@@ -433,25 +543,44 @@ class PhoneLinkService : Service() {
      */
     private fun abortStartup(category: String) {
         LinkBus.log.error("前台服务启动失败，已取消连接（errorCode=$category）")
-        // 系统的拒绝不会因为重试而改变：清掉连接意图，避免下次打开应用/系统重建
-        // 服务时又静默地走同一条失败路径。恢复路径仍是用户在前台再点一次「连接」。
-        prefs.setLinkDesired(false)
+        // V1.6.2：**不**清除连接意图。系统的拒绝不是用户改主意 —— 只有真实用户动作
+        // 可以清除 `linkDesired`。保留意图后，用户下次打开应用会再次尝试，并能看到
+        // 这条错误；清掉意图反而会让"用户明明点过连接"变成"应用忘了"。
+        stopInProgress = "startup_failed:$category"
+        LinkBus.publishServiceStop("前台服务启动失败（$category）")
+        LinkBus.publishLinkDesired(prefs.linkDesired())
         releaseWakeLock()
-        client?.shutdown()
+        client?.shutdown("前台服务启动失败（$category）")
         client = null
         LinkBus.publishState(LinkState.Error(getString(ForegroundFailure.userMessageRes(category))))
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun handleDisconnect() {
-        LinkBus.log.info("用户点击「断开」，停止自动重连")
+    /**
+     * 真实用户断开。`source` 只允许来自界面按钮或通知栏按钮。
+     *
+     * V1.6.2：这是**唯一**允许清除 `linkDesired` 的路径。来源同时进日志、事件与
+     * 诊断页，回答"到底是谁断开的"。
+     */
+    private fun handleDisconnect(source: String) {
+        val label = disconnectSourceLabel(source)
+        LinkBus.log.info("用户主动断开（source=$source，$label），停止自动重连")
         // 先落盘"用户不要连接了"：即使下一行关闭立刻失败，系统重建服务也不会偷偷再连。
         prefs.setLinkDesired(false)
-        client?.stop()
+        LinkBus.publishLinkDesired(false)
+        stopInProgress = "user:$source"
+        LinkBus.publishServiceStop("用户主动断开（$label）")
+        client?.stop(source = source)
         client = null
         releaseWakeLock()
         stopForegroundService()
+    }
+
+    private fun disconnectSourceLabel(source: String): String = when (source) {
+        SOURCE_UI_BUTTON -> "界面按钮"
+        SOURCE_NOTIFICATION_ACTION -> "通知栏按钮"
+        else -> "来源未知"
     }
 
     private fun stopForegroundService() {
@@ -499,6 +628,20 @@ class PhoneLinkService : Service() {
         connectivity = cm
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                val now = System.currentTimeMillis()
+                if (!NetworkCallbackPolicy.shouldProcessAvailable(
+                        network = network,
+                        lastAvailable = lastAvailableNetwork,
+                        lastAvailableAtMs = lastAvailableAtMs,
+                        nowMs = now,
+                    )
+                ) {
+                    LinkBus.log.info("忽略同一默认网络的重复可用回调")
+                    return
+                }
+                lastAvailableNetwork = network
+                lastAvailableAtMs = now
+                lastDefaultNetwork = network
                 updateNetworkKind()
                 LinkBus.log.info("默认网络可用")
                 LinkBus.recordEvent(LinkEventKind.NETWORK_CHANGED, "网络可用")
@@ -506,6 +649,19 @@ class PhoneLinkService : Service() {
             }
 
             override fun onLost(network: Network) {
+                // V1.6.2：旧网络迟到的 onLost 不得关掉已经建立在新网络上的连接。
+                val active = connectivity?.activeNetwork
+                if (!NetworkCallbackPolicy.shouldProcessLost(
+                        lost = network,
+                        lastDefault = lastDefaultNetwork,
+                        active = active,
+                    )
+                ) {
+                    LinkBus.log.info("忽略非当前默认网络的断开回调")
+                    return
+                }
+                lastDefaultNetwork = null
+                lastAvailableNetwork = null
                 LinkBus.publishNetworkKind(NetworkKind.NONE)
                 LinkBus.log.warn("默认网络已断开")
                 LinkBus.recordEvent(LinkEventKind.NETWORK_CHANGED, "网络断开")
@@ -513,6 +669,7 @@ class PhoneLinkService : Service() {
             }
 
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                lastDefaultNetwork = network
                 LinkBus.publishNetworkKind(kindOf(capabilities))
             }
         }
@@ -665,7 +822,9 @@ class PhoneLinkService : Service() {
         val disconnectIntent = PendingIntent.getService(
             this,
             1,
-            Intent(this, PhoneLinkService::class.java).setAction(ACTION_DISCONNECT),
+            Intent(this, PhoneLinkService::class.java)
+                .setAction(ACTION_DISCONNECT)
+                .putExtra(EXTRA_DISCONNECT_SOURCE, SOURCE_NOTIFICATION_ACTION),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
@@ -714,6 +873,29 @@ class PhoneLinkService : Service() {
         const val ACTION_DISCONNECT = "com.androidmcphub.app.action.DISCONNECT"
 
         /**
+         * 断开来源（V1.6.2）。
+         *
+         * 只有真实用户动作会带这个 extra：界面上的「断开」按钮，或通知栏的断开按钮。
+         * 服务在 `handleDisconnect` 里把它写进日志/事件/诊断页，回答"是谁断开的"。
+         */
+        const val EXTRA_DISCONNECT_SOURCE = "com.androidmcphub.app.extra.DISCONNECT_SOURCE"
+        const val SOURCE_UI_BUTTON = "ui_button"
+        const val SOURCE_NOTIFICATION_ACTION = "notification_action"
+
+        /** 升级前残留的 PendingIntent 不会带 extra；如实记为未知，不冒充任何一种用户动作。 */
+        const val SOURCE_UNKNOWN = "unknown"
+
+        /**
+         * 用户点「断开」的旁路记录。
+         *
+         * 正常路径是 `startService(ACTION_DISCONNECT)`，来源随 Intent 进服务；但投递失败时
+         * 会直接 `stopService`，服务实例拿不到 Intent。这里留下来源，`onDestroy` 才能
+         * 如实写成"用户断开"而不是"系统停止"。只在 CONNECT 时清除。
+         */
+        @Volatile
+        private var pendingUserDisconnectSource: String? = null
+
+        /**
          * 由界面调用：进入前台服务并开始连接。
          *
          * **先落盘用户意图再启动服务**：进程可能在 `onStartCommand` 之前就被系统回收，
@@ -722,7 +904,9 @@ class PhoneLinkService : Service() {
          */
         fun connect(context: Context) {
             val app = context.applicationContext
+            pendingUserDisconnectSource = null
             HubPrefs(app).setLinkDesired(true)
+            LinkBus.publishLinkDesired(true)
             val intent = Intent(context, PhoneLinkService::class.java).setAction(ACTION_CONNECT)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -731,9 +915,11 @@ class PhoneLinkService : Service() {
                     context.startService(intent)
                 }
             }.onFailure {
-                HubPrefs(app).setLinkDesired(false)
+                // V1.6.2：启动失败不清除连接意图（只有真实用户动作可以清除）。
+                // 意图留在磁盘上，用户下次打开应用会重试并看到失败原因。
                 LinkBus.log.warn(
-                    "启动前台服务失败 category=${SocketFailure.classify(it.javaClass.simpleName)}",
+                    "启动前台服务失败 category=${SocketFailure.classify(it.javaClass.simpleName)}" +
+                        "；保留此前的连接意图",
                 )
             }
         }
@@ -744,10 +930,14 @@ class PhoneLinkService : Service() {
          * 同样先落盘 "false"：即使断开指令投递失败，系统重建服务也不会偷偷再连。
          * 投递失败时直接 `stopService` 兜底，别让前台通知与连接一起挂着。
          */
-        fun disconnect(context: Context) {
+        fun disconnect(context: Context, source: String = SOURCE_UI_BUTTON) {
             val app = context.applicationContext
             HubPrefs(app).setLinkDesired(false)
-            val intent = Intent(context, PhoneLinkService::class.java).setAction(ACTION_DISCONNECT)
+            LinkBus.publishLinkDesired(false)
+            pendingUserDisconnectSource = source
+            val intent = Intent(context, PhoneLinkService::class.java)
+                .setAction(ACTION_DISCONNECT)
+                .putExtra(EXTRA_DISCONNECT_SOURCE, source)
             runCatching { context.startService(intent) }
                 .onFailure {
                     runCatching { context.stopService(Intent(context, PhoneLinkService::class.java)) }
