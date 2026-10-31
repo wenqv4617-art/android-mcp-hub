@@ -200,6 +200,10 @@ describe("Gate 2 协议 / 闭集与归一化", () => {
       "tool_failed",
       "tool_unavailable",
       "not_permitted",
+      // Phase 3：权限缺失与"缺少确认"是两种不同的可恢复失败，
+      // 模型需要据此决定是去开权限、还是补上 confirm=true 重试。
+      "permission_denied",
+      "confirmation_required",
     ]);
   });
 

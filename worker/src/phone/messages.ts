@@ -142,6 +142,10 @@ export const TOOL_RESULT_ERROR_CODES = [
   "tool_unavailable",
   /** 本地授权策略拒绝执行该能力。 */
   "not_permitted",
+  /** 系统运行期权限未授予（使用情况访问、日历读写等）。 */
+  "permission_denied",
+  /** 高影响操作缺少 `confirm=true` 明确确认。 */
+  "confirmation_required",
 ] as const;
 export type ToolResultErrorCode = (typeof TOOL_RESULT_ERROR_CODES)[number];
 

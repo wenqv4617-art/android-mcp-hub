@@ -15,6 +15,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest";
+import { EXPECTED_TOOL_NAMES } from "./tool-fixture";
 import { dispatchToolCall, toolOutcomeToResult } from "../src/mcp/tools";
 import type { ToolOutcome } from "../src/phone/phone-session";
 import { loadConfig } from "../src/config";
@@ -186,15 +187,7 @@ describe("工具层 / Gate 2 通用分发", () => {
     expect(dispatched.result).toBeUndefined();
     expect(dispatched.protocolError?.code).toBe(-32602);
     const data = dispatched.protocolError?.data as Record<string, unknown>;
-    expect(data["known_tools"]).toEqual([
-      "phone_ping",
-      "battery_get_status",
-      "device_get_network",
-      "device_get_storage",
-      "hub_list_tools",
-      "hub_call_tool",
-      "hub_get_tool_schema",
-    ]);
+    expect(data["known_tools"]).toEqual([...EXPECTED_TOOL_NAMES]);
   });
 
   it("★ 未知参数被拒绝：battery_get_status 只认 device_id / timeout_ms / echo", async () => {

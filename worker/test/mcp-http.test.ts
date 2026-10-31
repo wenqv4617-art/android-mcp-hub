@@ -22,6 +22,7 @@
 import { describe, expect, it } from "vitest";
 import { handleMcpRequest, MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER } from "../src/mcp/http";
 import { toolNames } from "../src/mcp/tools";
+import { DESTRUCTIVE_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "./tool-fixture";
 import {
   connectMockPhone,
   makeRig,
@@ -213,26 +214,30 @@ describe("MCP / tools/list", () => {
     // 一个没被审过的新工具出现在 tools/list 里必须让测试变红。
     expect(tools.map((t) => t["name"])).toEqual(toolNames());
 
-    // 哪些工具是"只读且非破坏性"：本机四个能力 + hub_list_tools。
+    // 哪些工具是"只读且非破坏性"：见测试侧 fixture。
     // hub_call_tool 故意**不**在这张表里 —— 它会执行第三方工具，正确性要求它
-    // 标注 readOnlyHint:false，所以下面单独断言。
-    const readOnlyToolNames = [
-      "phone_ping",
-      "battery_get_status",
-      "device_get_network",
-      "device_get_storage",
-      "hub_list_tools",
-      "hub_get_tool_schema",
-    ];
+    // 标注 readOnlyHint:false。
     for (const tool of tools) {
       expect(typeof tool["description"]).toBe("string");
+      const name = tool["name"] as string;
       const annotations = tool["annotations"] as Record<string, unknown>;
-      // destructiveHint 一律不该出现：连 hub_call_tool 也不自称"破坏性"。
-      expect(annotations["destructiveHint"]).toBeUndefined();
-      if (readOnlyToolNames.includes(tool["name"] as string)) {
+      const destructiveHint = annotations["destructiveHint"];
+
+      if (READ_ONLY_TOOL_NAMES.includes(name as never)) {
         expect(annotations["readOnlyHint"]).toBe(true);
+        // 只读工具绝不能同时声称"破坏性"。
+        if (destructiveHint !== undefined) expect(destructiveHint).toBe(false);
       } else {
         expect(annotations["readOnlyHint"]).toBe(false);
+      }
+
+      if (DESTRUCTIVE_TOOL_NAMES.includes(name as never)) {
+        // 删除类工具必须明确告诉客户端"不可随意重试"。
+        expect(destructiveHint).toBe(true);
+      } else if (destructiveHint !== undefined) {
+        // 其余声明了 destructiveHint 的工具（Phase 3 的非删除写操作）必须是 false：
+        // 默认值在 MCP 规范里是 true，省略会被客户端误读成可破坏性操作。
+        expect(destructiveHint).toBe(false);
       }
     }
 

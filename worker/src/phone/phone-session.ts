@@ -74,6 +74,8 @@ export type PhoneErrorCode =
   | "tool_failed"
   | "tool_unavailable"
   | "not_permitted"
+  | "permission_denied"
+  | "confirmation_required"
   | "internal_error";
 
 export interface PingSuccess {

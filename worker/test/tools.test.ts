@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest";
+import { EXPECTED_TOOL_NAMES } from "./tool-fixture";
 import {
   BATTERY_GET_STATUS_TOOL,
   DEVICE_GET_NETWORK_TOOL,
@@ -46,22 +47,14 @@ const failOutcome: PingOutcome = {
 };
 
 describe("工具层 / 注册表", () => {
-  it("注册表是显式白名单：Gate 3.1 之后是本机四工具 + 三个聚合入口，一个不多", () => {
+  it("注册表是显式白名单：前七项顺序稳定，Phase 3 的二十九个本机能力追加在后", () => {
     // 这条断言刻意用 `toEqual` 整表比对而不是 `toContain`：
     // "多了一个没人审过的工具"必须让测试变红，而不是悄悄通过。
+    // 期望值来自测试侧 fixture，不跟注册表一起派生（见 tool-fixture.ts）。
     // Gate 1 时期这里是 `["phone_ping"]`；Gate 2 加了 battery_get_status；
     // Gate 2.5A+B 加了 device_get_network 与 device_get_storage；
     // Gate 3 在**末尾**追加两个聚合入口（前四个的顺序保持不变）。
-    expect(toolNames()).toEqual([
-      "phone_ping",
-      "battery_get_status",
-      "device_get_network",
-      "device_get_storage",
-      "hub_list_tools",
-      "hub_call_tool",
-      // Gate 3.1：按需取单个工具的 input_schema（同样放末尾）。
-      "hub_get_tool_schema",
-    ]);
+    expect(toolNames()).toEqual([...EXPECTED_TOOL_NAMES]);
     expect(PHONE_PING_TOOL.name).toBe("phone_ping");
     expect(BATTERY_GET_STATUS_TOOL.name).toBe("battery_get_status");
     expect(DEVICE_GET_NETWORK_TOOL.name).toBe("device_get_network");

@@ -15,6 +15,7 @@
 
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
+import { EXPECTED_TOOL_NAMES } from "./tool-fixture";
 import type { Env } from "../src/env";
 import {
   makeRig,
@@ -57,15 +58,8 @@ describe("Worker / 路由", () => {
     // Gate 2.5：这份自述从 tools.ts 的注册表派生，所以断言跟着注册表走；
     // 少写一个工具就等于对外宣称了错误的能力清单。
     // Gate 3：末尾追加两个聚合入口（hub_list_tools / hub_call_tool）。
-    expect(capabilities["tools"]).toEqual([
-      "phone_ping",
-      "battery_get_status",
-      "device_get_network",
-      "device_get_storage",
-      "hub_list_tools",
-      "hub_call_tool",
-      "hub_get_tool_schema",
-    ]);
+    // Phase 3：再追加 29 个本机能力（顺序见测试侧 fixture）。
+    expect(capabilities["tools"]).toEqual([...EXPECTED_TOOL_NAMES]);
     expect(capabilities["server_initiated_notifications"]).toBe(false);
     // 默认 rig 不配置 OAUTH_OWNER_SECRET ⇒ OAuth 面整体不可用（回 404）。
     expect(capabilities["oauth_authorization_server"]).toBe(false);

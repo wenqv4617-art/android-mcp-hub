@@ -37,38 +37,14 @@ import {
   validateHubArguments,
 } from "./hub";
 import { RPC_ERRORS } from "./jsonrpc";
+import { NATIVE_TOOLS } from "./native-tools";
+import { COMMON_ARG_KEYS, DEVICE_ID_SCHEMA, TIMEOUT_SCHEMA } from "./tool-schema";
+import type { ArgumentRule, ToolDefinition, ToolTransport } from "./tool-schema";
 
-/**
- * 工具走哪条通道。
- *
- * `"ping"` 是 Gate 1 遗留的专用通道（请求与响应都是一个专用帧类型）；
- * `"tool"` 是 Gate 2 的通用通道。新增工具**默认应该用 `"tool"`** ——
- * `"ping"` 上不再添任何工具，它只是为了让旧手机继续能 ping。
- *
- * Gate 3 追加三条**聚合**通道（`"hub_catalog"` / `"hub_schema"` / `"hub_tool"`）：
- * 它们同样走 `tool_request` / `tool_result`，只是发给手机的命令名是三个保留名
- * （见 [HUB_PHONE_LIST_COMMAND] / [HUB_PHONE_SCHEMA_COMMAND] / [HUB_PHONE_CALL_COMMAND]），
- * 由手机侧的聚合路由抢先识别。第三方工具的名字只出现在 `arguments.tool_name` 里，
- * **永远不会落到命令名字段上**，所以它进不了本机能力白名单。
- */
-export type ToolTransport = "ping" | "tool" | "hub_catalog" | "hub_schema" | "hub_tool";
-
-export interface ToolDefinition {
-  name: string;
-  title: string;
-  description: string;
-  transport: ToolTransport;
-  /**
-   * `arguments` 里**允许出现**的键（除公共键 `device_id` / `timeout_ms` 之外）。
-   *
-   * 白名单而不是黑名单：黑名单漏一个键就是"一个新字段悄悄透传到手机上"，
-   * 而白名单漏一个键只会让某个功能用不了 —— 后者是可诊断的。
-   */
-  allowedArgs: readonly string[];
-  inputSchema: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
-  annotations?: Record<string, unknown>;
-}
+// 工具定义的类型与公共 schema 在 tool-schema.ts（与 native-tools.ts 共用，
+// 避免二十多个本机工具各自复制一份公共字段）。这里转出类型以保持既有 import 不变。
+export type { ArgumentRule, ToolDefinition, ToolTransport };
+export { COMMON_ARG_KEYS, DEVICE_ID_SCHEMA, TIMEOUT_SCHEMA };
 
 export interface ToolTextContent {
   type: "text";
@@ -80,23 +56,6 @@ export interface ToolCallResult {
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
-
-/** 所有工具都有的两个参数。 */
-const COMMON_ARG_KEYS = ["device_id", "timeout_ms"] as const;
-
-const DEVICE_ID_SCHEMA = {
-  type: "string",
-  maxLength: 128,
-  description:
-    "目标设备 ID。省略时使用服务端 DEFAULT_DEVICE_ID；若服务端只有一台**有效**设备则自动选中；否则报 ambiguous_device。凭据已被撤销的设备一律报 device_revoked。",
-} as const;
-
-const TIMEOUT_SCHEMA = {
-  type: "integer",
-  minimum: 50,
-  maximum: 60000,
-  description: "本次等待手机响应的超时（毫秒）。省略时用服务端 PHONE_PING_TIMEOUT_MS（默认 10000）。",
-} as const;
 
 export const PHONE_PING_TOOL: ToolDefinition = {
   name: "phone_ping",
@@ -572,6 +531,9 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
   HUB_CALL_TOOL_TOOL,
   // Gate 3.1：按需取单个工具的 input_schema。同样放末尾，前六项顺序不变。
   HUB_GET_TOOL_SCHEMA_TOOL,
+  // Phase 3：Android 本机能力。整体追加在末尾，前面七项的顺序对旧客户端保持不变；
+  // 这二十九项自身按名字排序，与手机侧注册表逐项对应（见 BuiltInCapabilities）。
+  ...NATIVE_TOOLS,
 ];
 
 export function findTool(name: string): ToolDefinition | undefined {
@@ -582,6 +544,114 @@ export class ToolArgumentError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ToolArgumentError";
+  }
+}
+
+/**
+ * 校验一个要透传给手机的能力参数。
+ *
+ * 有规则时按规则校验；没有规则时沿用通用通道最初的默认规则
+ * （字符串 ≤512、数字有限、布尔/null 原样）—— 这样新增工具可以逐个收紧，
+ * 不会因为"没写规则"而比旧工具更宽松。
+ *
+ * 显式 `null` 一律放行并原样转发：Android 侧的参数解析把 JSON null 当作"没提供"，
+ * 在服务端提前拒绝只会让同一个请求在两层的语义不一致。
+ */
+function parseArgumentValue(
+  toolName: string,
+  key: string,
+  value: unknown,
+  rule: ArgumentRule | undefined,
+): unknown {
+  const where = `${toolName}.${key}`;
+  if (value === null) return null;
+
+  if (rule === undefined) {
+    if (typeof value === "string") {
+      if (value.length > 512) throw new ToolArgumentError(`${where} 过长（>512）`);
+      return value;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw new ToolArgumentError(`${where} 必须是有限数字`);
+      return value;
+    }
+    if (typeof value === "boolean") return value;
+    throw new ToolArgumentError(`${where} 只允许字符串、数字、布尔或 null`);
+  }
+
+  switch (rule.kind) {
+    case "string": {
+      if (typeof value !== "string") throw new ToolArgumentError(`${where} 必须是字符串`);
+      const maxLength = rule.maxLength ?? 512;
+      if (value.length > maxLength) throw new ToolArgumentError(`${where} 过长（>${maxLength}）`);
+      if (rule.enum !== undefined && !rule.enum.includes(value)) {
+        throw new ToolArgumentError(`${where} 只能是：${rule.enum.join(", ")}`);
+      }
+      return value;
+    }
+    case "integer": {
+      if (typeof value !== "number" || !Number.isInteger(value)) {
+        throw new ToolArgumentError(`${where} 必须是整数`);
+      }
+      if (rule.min !== undefined && value < rule.min) {
+        throw new ToolArgumentError(`${where} 不能小于 ${rule.min}`);
+      }
+      if (rule.max !== undefined && value > rule.max) {
+        throw new ToolArgumentError(`${where} 不能大于 ${rule.max}`);
+      }
+      if (rule.enum !== undefined && !rule.enum.includes(value)) {
+        throw new ToolArgumentError(`${where} 只能是：${rule.enum.join(", ")}`);
+      }
+      return value;
+    }
+    case "boolean": {
+      if (typeof value !== "boolean") throw new ToolArgumentError(`${where} 必须是布尔值`);
+      return value;
+    }
+    case "id": {
+      // 日历 ID 在 Android 侧同时接受数字与数字字符串；这里保持同样的宽容度，
+      // 但拒绝负数、小数与非数字字符串。
+      const maxLength = rule.maxLength ?? 18;
+      if (typeof value === "number") {
+        if (!Number.isSafeInteger(value) || value < 0) {
+          throw new ToolArgumentError(`${where} 必须是非负整数或纯数字字符串`);
+        }
+        return value;
+      }
+      if (typeof value === "string" && /^[0-9]{1,18}$/.test(value) && value.length <= maxLength) {
+        return value;
+      }
+      throw new ToolArgumentError(`${where} 必须是非负整数或不超过 ${maxLength} 位的纯数字字符串`);
+    }
+    case "integer_array": {
+      if (!Array.isArray(value)) throw new ToolArgumentError(`${where} 必须是整数数组`);
+      if (value.length > rule.maxItems) throw new ToolArgumentError(`${where} 最多 ${rule.maxItems} 项`);
+      return value.map((item) => {
+        if (typeof item !== "number" || !Number.isInteger(item)) {
+          throw new ToolArgumentError(`${where} 的每一项都必须是整数`);
+        }
+        if (rule.min !== undefined && item < rule.min) {
+          throw new ToolArgumentError(`${where} 的每一项都不能小于 ${rule.min}`);
+        }
+        if (rule.max !== undefined && item > rule.max) {
+          throw new ToolArgumentError(`${where} 的每一项都不能大于 ${rule.max}`);
+        }
+        return item;
+      });
+    }
+    case "string_array": {
+      if (!Array.isArray(value)) throw new ToolArgumentError(`${where} 必须是字符串数组`);
+      if (value.length > rule.maxItems) throw new ToolArgumentError(`${where} 最多 ${rule.maxItems} 项`);
+      const maxLength = rule.maxLength ?? 512;
+      return value.map((item) => {
+        if (typeof item !== "string") throw new ToolArgumentError(`${where} 的每一项都必须是字符串`);
+        if (item.length > maxLength) throw new ToolArgumentError(`${where} 的每一项都不能超过 ${maxLength} 个字符`);
+        if (rule.enum !== undefined && !rule.enum.includes(item)) {
+          throw new ToolArgumentError(`${where} 的每一项只能是：${rule.enum.join(", ")}`);
+        }
+        return item;
+      });
+    }
   }
 }
 
@@ -717,19 +787,9 @@ export function parseToolArguments(tool: ToolDefinition, raw: unknown): ParsedTo
     if (key === "echo") continue;
     const value = obj[key];
     if (value === undefined) continue;
-    // 透传参数只允许**标量**。对象/数组会让手机侧的解析面变大很多，
-    // 而当前没有任何能力需要它 —— 真需要时再加，并且那时候要一起加测试。
-    if (typeof value === "string") {
-      if (value.length > 512) throw new ToolArgumentError(`${tool.name}.${key} 过长（>512）`);
-      out.toolArguments[key] = value;
-    } else if (typeof value === "number") {
-      if (!Number.isFinite(value)) throw new ToolArgumentError(`${tool.name}.${key} 必须是有限数字`);
-      out.toolArguments[key] = value;
-    } else if (typeof value === "boolean" || value === null) {
-      out.toolArguments[key] = value;
-    } else {
-      throw new ToolArgumentError(`${tool.name}.${key} 只允许字符串、数字、布尔或 null`);
-    }
+    // 默认只允许**标量**；只有工具在 `argRules` 里显式声明了数组规则时才放行数组
+    // （目前只有 alarm_create.repeat_days 与日历的 reminder_minutes）。
+    out.toolArguments[key] = parseArgumentValue(tool.name, key, value, tool.argRules?.[key]);
   }
 
   return out;
