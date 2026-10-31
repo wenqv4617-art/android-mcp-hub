@@ -1604,7 +1604,12 @@ npm run e2e
 
 ### 14.6 交付 APK
 
-见本节末更新（CI 完成后填写运行号、SHA-256、证书一致性）。
+- 运行：[41194017762](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41194017762)，commit `37cfa3b`
+- 版本：`1.6.2` / versionCode `8`（模拟器 `dumpsys` 两次安装均为 `versionCode=8 versionName=1.6.2`）
+- APK SHA-256：`bab04064bad226149a17b752ec95d76597d07f0374183ab9c348c6f6c290841c`
+- 证书 SHA-256：`88aab710faac4be855f93d7fb9fbd7d854861e8f7a1930d2625f4a00344ffc4c`（与 1.6.0/1.6.1 相同）
+- 两次独立构建证书一致；模拟器上先装 build1、再 `adb install -r build2.apk` 覆盖成功
+- APK 下载：该运行页面 **Artifacts → `Android-MCP-Hub-release-apk`**
 
 ### 14.7 ⛔ NOT RUN：ColorOS / Android 16 真机验收
 

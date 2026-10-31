@@ -53,7 +53,7 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | Android JVM 测试 | **788 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.2 新增 29 项后台连接可靠性用例） |
 | Android Lint | 通过（`abortOnError = true`） |
 | Android 版本 | **V1.6.2**（versionCode 8）：服务停止不再冒充用户断开（`SERVICE_DESTROYED` + 保留连接意图）、回到前台自动恢复、迟到的旧网络回调不再误关连接、建连原子化、15 秒协议层 ping；诊断页新增断开来源/连接意图/服务停止原因/上次心跳发送 |
-| 签名 Release APK | [构建运行 41184178802](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41184178802)（commit `4277af4`）：`1.6.1` (versionCode 7)，APK SHA-256 `b7cc104e…fada50`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功 |
+| 签名 Release APK | [构建运行 41194017762](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41194017762)（commit `37cfa3b`）：`1.6.2` (versionCode 8)，APK SHA-256 `bab04064…90841c`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0/1.6.1 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功（`versionCode=8` / `versionName=1.6.2`）。APK 在运行的 **Artifacts → `Android-MCP-Hub-release-apk`** 中下载 |
 | 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`，部署后公网冒烟 PASS（见 [运行 41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)） |
 | 真机 / 真实客户端验收 | **未执行**（本机无 adb 设备、无第三方客户端账号，见文末清单） |
 
