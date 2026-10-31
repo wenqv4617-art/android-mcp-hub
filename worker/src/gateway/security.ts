@@ -8,6 +8,46 @@ export class GatewayError extends Error {
   constructor(readonly code: string, readonly status = 400) { super(code); }
 }
 
+/**
+ * 访问令牌的作用范围。
+ *
+ *  `read`  —— 只允许直接调用「已审核只读」的 grant（mode=read）；
+ *  `write` —— 另外允许调用「需确认」的 grant（mode=confirm，仍需一次性票据）。
+ *
+ * `write` 隐含 `read`：一个能走"需确认"流程的令牌，不必再额外勾一个只读权限。
+ * grant 本身仍然是硬闸门 —— scope 只能**收窄**一个令牌能碰的 grant，不能扩大。
+ */
+export type TokenScope = "read" | "write";
+
+/** 严格解析管理面传入的 scope；缺省表示完整访问（旧客户端保持原行为）。 */
+export function parseScopes(value: unknown): TokenScope[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 2) throw new GatewayError("invalid_scopes");
+  const scopes = [...new Set(value)];
+  if (!scopes.every((s): s is TokenScope => s === "read" || s === "write")) throw new GatewayError("invalid_scopes");
+  return scopes.sort();
+}
+
+/**
+ * 宽松读取存储里返回的 scope。
+ *
+ * 用于 Worker 侧解析 DO 的鉴权结果：认不出的值一律**丢弃**，全部丢弃后就是
+ * 空数组 —— 空数组不允许任何 grant（失败关闭）。只有字段整个缺失才表示
+ * "完整访问"，那是旧版 `/auth` 的响应形状。
+ */
+export function readScopes(value: unknown): TokenScope[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((s): s is TokenScope => s === "read" || s === "write"))].sort();
+}
+
+/** 某个 scope 组合能否使用这种模式的 grant。 */
+export function scopeAllows(scopes: TokenScope[] | undefined, mode: "read" | "confirm"): boolean {
+  if (scopes === undefined) return true;
+  if (scopes.includes("write")) return true;
+  return mode === "read" && scopes.includes("read");
+}
+
 /** Bounded reads apply to chunked bodies too; Content-Length is never trusted. */
 export async function boundedText(body: ReadableStream<Uint8Array> | null, limit: number): Promise<string> {
   if (!body) return "";

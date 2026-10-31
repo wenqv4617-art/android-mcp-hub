@@ -24,7 +24,7 @@
 // ============================================================================
 
 import { gatewayEnabled, gatewayJson, gatewayPrincipal } from "../gateway/http";
-import { boundedText, GatewayError, REQUEST_LIMIT } from "../gateway/security";
+import { boundedText, GatewayError, REQUEST_LIMIT, type TokenScope } from "../gateway/security";
 import { loadConfig, type AppConfig } from "../config";
 import { ROUTE_PING, ROUTE_REVOKE, ROUTE_TOOL } from "../phone/phone-session";
 import type { Env, McpSessionNamespace, PhoneSessionNamespace } from "../env";
@@ -62,6 +62,12 @@ const INSTRUCTIONS =
   "device_* 系列是手机能力查询，经 Durable Object 转发到已连上的手机，" +
   "由手机上的显式白名单执行；手机侧关掉能力总开关时会明确拒绝（not_permitted）。" +
   "手机没有连接时工具会以 isError=true 明确失败，不会伪造成功，也不会自动重放。";
+
+/** 网关客户端（`client:*`）的能力自述：只讲它真正能看到的那部分。 */
+const CLIENT_INSTRUCTIONS =
+  "本 Hub 按最小权限运行：你只能看到并调用服务端已授权给你的 ext_* 工具。" +
+  "没有授权的工具不会出现在工具列表里，直接调用也会被拒绝。" +
+  "每次调用的结果来自上游 MCP 服务本身；失败时 isError=true，不会重试、不会伪造成功。";
 
 type RpcPayload = JsonRpcSuccess | JsonRpcError;
 
@@ -243,7 +249,7 @@ export async function handleMcpRequest(request: Request, env: Env, deps: McpHttp
 
   switch (method) {
     case "POST":
-      return handlePost(request, env, config, deps, auth.principal);
+      return handlePost(request, env, config, deps, auth.principal, auth.scopes);
     case "GET":
       // 明确不支持服务端主动通知流。见文件头说明。
       return methodNotAllowed("POST, DELETE");
@@ -276,7 +282,7 @@ async function verifyMcpAuth(
   request: Request,
   env: Env,
   config: AppConfig,
-): Promise<{ ok: true; principal: string } | { ok: false; response: Response }> {
+): Promise<{ ok: true; principal: string; scopes?: TokenScope[] } | { ok: false; response: Response }> {
   if (!config.hasMcpAccessToken && !config.oauth.enabled && !gatewayEnabled(env)) {
     // 失败关闭：既没有静态令牌、也没有 OAuth，任何人都不许进。
     return {
@@ -305,8 +311,8 @@ async function verifyMcpAuth(
     if (timingSafeEqual(presented, expected)) return { ok: true, principal: "legacy:owner" };
   }
 
-  const principal = await gatewayPrincipal(env, presented);
-  if (principal) return { ok: true, principal };
+  const gateway = await gatewayPrincipal(env, presented);
+  if (gateway) return { ok: true, principal: gateway.principal, scopes: gateway.scopes };
 
   // 路径 2：OAuth 访问令牌。令牌只以 SHA-256 摘要存在 OAuthStore 里，
   // 所以这里必须真的去问一次存储 —— 这是刻意的：没有"本地自校验 JWT"，
@@ -362,6 +368,7 @@ async function handlePost(
   config: AppConfig,
   deps: McpHttpDeps,
   principal: string,
+  scopes?: TokenScope[],
 ): Promise<Response> {
   const accept = request.headers.get("Accept") ?? "";
   if (!accept.includes("application/json") && !accept.includes("text/event-stream")) {
@@ -453,7 +460,7 @@ async function handlePost(
   }
 
   // ---- 真正的请求分发 -----------------------------------------------------
-  const outcome = await dispatchRpc(rpc.method, rpc.id ?? null, rpc.params, env, config, deps, principal);
+  const outcome = await dispatchRpc(rpc.method, rpc.id ?? null, rpc.params, env, config, deps, principal, scopes);
   return rpcResponse(outcome.payload, outcome.status, accept, outcome.sessionId ?? sessionIdHeader);
 }
 
@@ -463,9 +470,14 @@ interface DispatchedRpc {
   sessionId?: string | null;
 }
 
-async function listGatewayTools(env: Env, principal: string): Promise<unknown[]> {
-  try { return (await gatewayJson<{ tools: unknown[] }>(env, "list", { principal })).tools; }
-  catch { logEvent("warn", "gateway.list_failed", { errorCode: "internal_error" }); return []; }
+async function listGatewayTools(env: Env, principal: string, scopes?: TokenScope[]): Promise<unknown[]> {
+  try {
+    return (await gatewayJson<{ tools: unknown[] }>(env, "list", {
+      principal,
+      // scopes 由**服务端鉴权结果**决定，永远不来自请求体。
+      ...(scopes !== undefined ? { scopes } : {}),
+    })).tools;
+  } catch { logEvent("warn", "gateway.list_failed", { errorCode: "internal_error" }); return []; }
 }
 
 async function dispatchRpc(
@@ -476,6 +488,7 @@ async function dispatchRpc(
   config: AppConfig,
   deps: McpHttpDeps,
   principal: string,
+  scopes?: TokenScope[],
 ): Promise<DispatchedRpc> {
   switch (method) {
     case "initialize":
@@ -494,7 +507,7 @@ async function dispatchRpc(
             inputSchema: t.inputSchema,
             ...(t.outputSchema !== undefined ? { outputSchema: t.outputSchema } : {}),
             ...(t.annotations !== undefined ? { annotations: t.annotations } : {}),
-          }))), ...(gatewayEnabled(env) ? await listGatewayTools(env, principal) : [])],
+          }))), ...(gatewayEnabled(env) ? await listGatewayTools(env, principal, scopes) : [])],
         }),
         status: 200,
       };
@@ -510,7 +523,13 @@ async function dispatchRpc(
       }
       if (name.startsWith("ext_")) {
         try {
-          const result = await gatewayJson(env, "call", { principal, name, arguments: p["arguments"], confirmation: (p["_meta"] as Record<string, unknown> | undefined)?.["hub/confirmation"] });
+          const result = await gatewayJson(env, "call", {
+            principal,
+            name,
+            arguments: p["arguments"],
+            confirmation: (p["_meta"] as Record<string, unknown> | undefined)?.["hub/confirmation"],
+            ...(scopes !== undefined ? { scopes } : {}),
+          });
           return { payload: success(id, result), status: 200 };
         } catch (e) {
           const code = e instanceof GatewayError ? e.code : "gateway_failure";
@@ -604,7 +623,9 @@ async function handleInitialize(
         tools: { listChanged: false },
       },
       serverInfo: { name: SERVER_NAME, title: SERVER_TITLE, version: SERVER_VERSION },
-      instructions: INSTRUCTIONS,
+      // 网关客户端只看得到自己被授权的 ext_* 工具；不要把本机工具清单
+      // （连同设备编号要求）告诉一个根本调用不了它们的身份。
+      instructions: principal.startsWith("client:") ? CLIENT_INSTRUCTIONS : INSTRUCTIONS,
     }),
     status: 200,
     sessionId,

@@ -97,7 +97,8 @@ describe("android pairing and scoped gateway management", () => {
 
   it("issues scoped tokens that are not the global admin token and stores only digests", async () => {
     expect(managementToken).toMatch(/^hub_admin_[a-f0-9]{64}$/);
-    expect(clientToken).toMatch(/^hub_client_[a-f0-9]{64}$/);
+    // 客户端令牌内嵌 8 位 id：撤销与展示只需要它，不必碰摘要。
+    expect(clientToken).toMatch(/^hub_client_[a-f0-9]{8}_[a-f0-9]{64}$/);
     expect(managementToken).not.toBe(adminToken);
     expect(managementToken).not.toBe(clientToken);
     expect(ownerId).toMatch(/^android-[a-f0-9]{12}$/);
@@ -106,7 +107,10 @@ describe("android pairing and scoped gateway management", () => {
     // 直接看 DO 存储：两枚令牌都只以 SHA-256 摘要落盘。
     const raw = await ns.stateFor("gateway-v1").storage.get("gateway-v1") as any;
     expect(raw.androidAdmins[0].tokenSha256).toBe(await sha256Hex(managementToken));
-    expect(raw.clients.find((c: any) => c.id === clientId).tokenSha256).toBe(await sha256Hex(clientToken));
+    const stored = raw.clients.find((c: any) => c.id === clientId);
+    expect(stored.tokenSha256).toBeUndefined();
+    expect(stored.tokens).toHaveLength(1);
+    expect(stored.tokens[0].digest).toBe(await sha256Hex(clientToken));
     expect(JSON.stringify(raw)).not.toContain(managementToken);
     expect(JSON.stringify(raw)).not.toContain(clientToken);
 
@@ -185,7 +189,7 @@ describe("android pairing and scoped gateway management", () => {
     const old = await sdk(clientToken);
     const rotated = await android({ action: "rotate-client-token" });
     expect(rotated.status).toBe(200);
-    expect(rotated.body.clientToken).toMatch(/^hub_client_[a-f0-9]{64}$/);
+    expect(rotated.body.clientToken).toMatch(/^hub_client_[a-f0-9]{8}_[a-f0-9]{64}$/);
     await expect(old.listTools()).rejects.toThrow();
     await old.close();
     clientToken = rotated.body.clientToken;

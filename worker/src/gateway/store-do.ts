@@ -2,11 +2,53 @@ import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validatio
 import type { Env } from "../env";
 import { randomHex, sha256Hex, timingSafeEqual } from "../util/crypto";
 import { jsonResponse } from "../util/http";
-import { boundedText, canonical, fingerprint, GatewayError, REQUEST_LIMIT, RESPONSE_LIMIT, validId, validateTarget } from "./security";
+import {
+  boundedText,
+  canonical,
+  fingerprint,
+  GatewayError,
+  parseScopes,
+  REQUEST_LIMIT,
+  RESPONSE_LIMIT,
+  scopeAllows,
+  validId,
+  validateTarget,
+  type TokenScope,
+} from "./security";
 import { assertNoCredentials, discover, discoverOnClient, upstream, type DiscoveredTool, type Service } from "./upstream";
 
 interface Grant { serviceId: string; tool: string; fingerprint: string; revision: string; mode: "read" | "confirm" }
-interface ClientRecord { id: string; userId: string; charId: string; tokenSha256?: string; enabled: boolean; grants: Grant[] }
+
+/**
+ * 一条客户端访问令牌。
+ *
+ * 只存 SHA-256 摘要：明文在签发响应里出现一次，之后任何管理接口（包括 DO 内部
+ * 的 list）都不会再返回它。`id` 是令牌明文里可以见到的 8 位十六进制标识，用来
+ * 在界面上区分"哪一条"，以及让撤销操作不必碰摘要。
+ */
+interface AccessToken {
+  id: string;
+  label: string;
+  digest: string;
+  scopes: TokenScope[];
+  /** pair = 设备配对自动签发（轮换配对令牌时整组替换）；issued = 管理员显式签发。 */
+  source: "pair" | "issued";
+  createdAt: number;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+interface ClientRecord {
+  id: string;
+  userId: string;
+  charId: string;
+  enabled: boolean;
+  grants: Grant[];
+  tokens: AccessToken[];
+  /** 旧版单令牌字段：只用于读取历史状态，写入时不再出现。 */
+  tokenSha256?: string;
+}
 interface RegisteredService extends Service { revision: string; tools: DiscoveredTool[]; lastError: string | null; lastTestAt: number | null }
 interface Ticket { principal: string; name: string; argsHash: string; expires: number }
 interface Audit { id: string; time: number; principal: string; serviceId: string; tool: string; outcome: string }
@@ -31,15 +73,64 @@ interface AndroidAdmin {
 interface State { services: RegisteredService[]; clients: ClientRecord[]; tickets: Record<string, Ticket>; audit: Audit[]; androidAdmins: AndroidAdmin[] }
 const empty = (): State => ({ services: [], clients: [], tickets: {}, audit: [], androidAdmins: [] });
 
-/** 旧对象里没有 androidAdmins；读取时补默认值，避免升级后把整份注册表读成空。 */
+/**
+ * 旧对象里没有 androidAdmins / tokens；读取时补默认值，避免升级后把整份注册表
+ * 读成空。旧版的单令牌字段会在**读取时**合成为一条新式令牌记录，写回后自然消失。
+ */
 function normalize(raw: Partial<State> | undefined): State {
   return {
     services: raw?.services ?? [],
-    clients: raw?.clients ?? [],
+    clients: (raw?.clients ?? []).map((client) => ({
+      id: client.id,
+      userId: client.userId,
+      charId: client.charId,
+      enabled: client.enabled,
+      grants: client.grants ?? [],
+      tokens: client.tokens ?? (client.tokenSha256
+        ? [{
+            id: legacyTokenId(client.tokenSha256),
+            label: "旧版客户端令牌",
+            digest: client.tokenSha256,
+            scopes: ["read", "write"] as TokenScope[],
+            source: "issued" as const,
+            createdAt: 0,
+            expiresAt: null,
+            lastUsedAt: null,
+            revokedAt: null,
+          }]
+        : []),
+    })),
     tickets: raw?.tickets ?? {},
     audit: raw?.audit ?? [],
     androidAdmins: raw?.androidAdmins ?? [],
   };
+}
+
+/** 新式令牌明文：`hub_client_<8 位 id>_<64 位 secret>`。id 用来快速定位记录。 */
+const TOKEN_PATTERN = /^hub_client_([a-f0-9]{8})_[a-f0-9]{64}$/;
+const TOKEN_ID_PATTERN = /^[a-f0-9]{8}$/;
+
+function newTokenId(): string {
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** 旧版令牌（`hub_client_` + 64 hex）没有内嵌 id；用摘要前缀合成一个稳定的展示 id。 */
+function legacyTokenId(digest: string): string {
+  return digest.slice(0, 8);
+}
+
+function mintToken(id: string): string {
+  return `hub_client_${id}_${randomHex(32)}`;
+}
+
+function tokenIdFrom(plain: string): string | null {
+  return TOKEN_PATTERN.exec(plain)?.[1] ?? null;
+}
+
+function activeToken(token: AccessToken, now: number): boolean {
+  return token.revokedAt === null && (token.expiresAt === null || token.expiresAt > now);
 }
 
 export const gatewayName = async (serviceId: string, tool: string): Promise<string> => `ext_${serviceId}_${(await sha256Hex(tool)).slice(0, 24)}`;
@@ -80,11 +171,7 @@ export class GatewayStore {
         }
         return jsonResponse(await this.androidAdmin(admin, inner as Record<string, any>));
       }
-      if (action === "/auth") {
-        const state = await this.read();
-        const c = state.clients.find(c => c.enabled && c.tokenSha256 && typeof p.digest === "string" && timingSafeEqual(c.tokenSha256, p.digest));
-        return jsonResponse({ principal: c?.id ?? null });
-      }
+      if (action === "/auth") return jsonResponse(await this.authenticate(p.digest));
       if (action === "/admin") {
         if (p.action !== "test") return jsonResponse(await this.admin(p));
         if (this.inFlight >= 8) throw new GatewayError("concurrency_limit", 429);
@@ -93,11 +180,12 @@ export class GatewayStore {
       }
       if (action !== "/list" && action !== "/call") throw new GatewayError("not_found", 404);
       const principal = typeof p.principal === "string" ? p.principal : "";
+      const scopes = parseScopes(p.scopes);
       if (this.inFlight >= 8 || (this.perClient.get(principal) ?? 0) >= 2) throw new GatewayError("concurrency_limit", 429);
       this.inFlight++; this.perClient.set(principal, (this.perClient.get(principal) ?? 0) + 1);
       try {
-        if (action === "/list") return jsonResponse({ tools: await this.list(principal) });
-        return jsonResponse(await this.call(principal, p));
+        if (action === "/list") return jsonResponse({ tools: await this.list(principal, scopes) });
+        return jsonResponse(await this.call(principal, p, scopes));
       } finally {
         this.inFlight--;
         const remaining = (this.perClient.get(principal) ?? 1) - 1;
@@ -140,7 +228,8 @@ export class GatewayStore {
     const adminId = `android-${suffix}`;
     const clientId = `client:android-${suffix}`;
     const managementToken = `hub_admin_${randomHex(32)}`;
-    const clientToken = `hub_client_${randomHex(32)}`;
+    const tokenId = newTokenId();
+    const clientToken = mintToken(tokenId);
     const managementDigest = await sha256Hex(managementToken);
     const clientDigest = await sha256Hex(clientToken);
 
@@ -165,13 +254,62 @@ export class GatewayStore {
         id: clientId,
         userId: ownerId,
         charId: "android",
-        tokenSha256: clientDigest,
         enabled: true,
         grants: oldClient?.grants ?? [],
+        // 重新配对会换一枚新令牌；旧令牌随整条记录一起消失，立即失效。
+        tokens: [{
+          id: tokenId,
+          label: "设备配对令牌",
+          digest: clientDigest,
+          scopes: ["read", "write"],
+          source: "pair",
+          createdAt: now,
+          expiresAt: null,
+          lastUsedAt: null,
+          revokedAt: null,
+        }],
       }];
     });
 
-    return { managementToken, clientToken, ownerId, clientId, deviceId, pairedAt: now };
+    return { managementToken, clientToken, tokenId, ownerId, clientId, deviceId, pairedAt: now };
+  }
+
+  /**
+   * 令牌鉴权。返回 principal + 该令牌的作用范围；令牌记录里没有任何明文
+   * 可以反推出来，唯一能被验证的就是"摘要一致"。
+   *
+   * 新式令牌内嵌 id，先按 id 收缩候选；旧式令牌没有 id，只能逐条比较摘要
+   * （最多 64 条，每条一次常数时间比较，不构成放大）。
+   */
+  private async authenticate(digest: unknown): Promise<{ principal: string | null; scopes?: TokenScope[] }> {
+    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) return { principal: null };
+    const state = await this.read();
+    const now = Date.now();
+    for (const client of state.clients) {
+      if (!client.enabled) continue;
+      for (const token of client.tokens) {
+        if (!activeToken(token, now) || !timingSafeEqual(token.digest, digest)) continue;
+        // 使用时间按分钟粒度落盘：鉴权路径不能每来一个请求就写一次注册表。
+        if (token.lastUsedAt === null || now - token.lastUsedAt > 60_000) {
+          await this.touch(client.id, token.id);
+        }
+        return { principal: client.id, scopes: token.scopes };
+      }
+    }
+    return { principal: null };
+  }
+
+  /** 尽力而为：记录最近使用时间。失败不影响本次鉴权结果。 */
+  private async touch(clientId: string, tokenId: string): Promise<void> {
+    try {
+      await this.update((s) => {
+        const token = s.clients.find((c) => c.id === clientId)?.tokens.find((t) => t.id === tokenId);
+        const now = Date.now();
+        if (token && (token.lastUsedAt === null || now - token.lastUsedAt > 60_000)) token.lastUsedAt = now;
+      });
+    } catch {
+      // 使用统计不是鉴权条件；存储失败只丢一次统计。
+    }
   }
 
   private async androidPrincipal(digest: unknown): Promise<AndroidAdmin | null> {
@@ -230,22 +368,38 @@ export class GatewayStore {
       return this.admin(p);
     }
     if (action === "rotate-client-token") {
-      const clientToken = `hub_client_${randomHex(32)}`;
+      const id = newTokenId();
+      const clientToken = mintToken(id);
       const digest = await sha256Hex(clientToken);
+      const now = Date.now();
       await this.update(s => {
         const c = s.clients.find(c => c.id === admin.clientId && c.userId === admin.ownerId);
         if (!c) throw new GatewayError("not_found", 404);
-        c.tokenSha256 = digest;
+        // 只轮换配对令牌：管理员额外签发的令牌（可能有独立标签/过期/范围）保持原样。
+        c.tokens = c.tokens.map(t => t.source === "pair" && t.revokedAt === null ? { ...t, revokedAt: now } : t);
+        c.tokens.push({
+          id, label: "设备配对令牌", digest, scopes: ["read", "write"], source: "pair",
+          createdAt: now, expiresAt: null, lastUsedAt: null, revokedAt: null,
+        });
         c.enabled = true;
       });
-      return { clientToken };
+      return { clientToken, tokenId: id };
+    }
+    if (action === "issue-client-token" || action === "revoke-client-token") {
+      // 受限身份只能操作自己的客户端；同名参数一律覆盖，不接受调用方指定别人的 clientId。
+      p.clientId = admin.clientId;
+      return this.admin(p);
     }
     if (action === "unpair") {
       await this.update(s => {
         const a = s.androidAdmins.find(a => a.id === admin.id);
         if (a) a.revokedAt = Date.now();
         const c = s.clients.find(c => c.id === admin.clientId);
-        if (c) c.enabled = false;
+        if (c) {
+          c.enabled = false;
+          const now = Date.now();
+          for (const t of c.tokens) if (t.revokedAt === null) t.revokedAt = now;
+        }
       });
       return { ok: true };
     }
@@ -273,7 +427,16 @@ export class GatewayStore {
   private async admin(p: Record<string, any>): Promise<unknown> {
     if (p.action === "list") {
       const s = await this.read();
-      return { services: await Promise.all(s.services.map(async service => ({ ...service, toolMap: await Promise.all(service.tools.map(async tool => ({ original: tool.name, name: await gatewayName(service.id, tool.name), fingerprint: await fingerprint(tool) }))) }))), clients: s.clients.map(({ tokenSha256, ...c }) => c), audit: s.audit, androidAdmins: s.androidAdmins.map(({ tokenSha256, ...a }) => a) };
+      return {
+        services: await Promise.all(s.services.map(async service => ({ ...service, toolMap: await Promise.all(service.tools.map(async tool => ({ original: tool.name, name: await gatewayName(service.id, tool.name), fingerprint: await fingerprint(tool) }))) }))),
+        // 令牌只出现在这里，且**只**有元数据：摘要永远不出 DO。
+        clients: s.clients.map(({ tokenSha256: _legacy, tokens, ...c }) => ({
+          ...c,
+          tokens: tokens.map(({ digest: _digest, ...t }) => t),
+        })),
+        audit: s.audit,
+        androidAdmins: s.androidAdmins.map(({ tokenSha256, ...a }) => a),
+      };
     }
     if (p.action === "put-service") {
       if (!validId(p.id) || !validId(p.ownerId) || typeof p.name !== "string" || p.name.length > 80 || typeof p.url !== "string" ||
@@ -312,7 +475,10 @@ export class GatewayStore {
         if (!admin) throw new GatewayError("not_found", 404);
         admin.revokedAt = Date.now();
         const client = s.clients.find(c => c.id === admin.clientId);
-        if (client) client.enabled = false;
+        if (client) {
+          client.enabled = false;
+          for (const token of client.tokens) if (token.revokedAt === null) token.revokedAt = Date.now();
+        }
       });
       return { ok: true };
     }
@@ -329,27 +495,67 @@ export class GatewayStore {
     if (p.action === "put-client") {
       if (typeof p.id !== "string" || !/^(legacy:owner|oauth:.{1,200}|client:[a-z][a-z0-9-]{0,31})$/.test(p.id) ||
         !validId(p.userId) || !validId(p.charId) || (p.tokenSha256 !== undefined && !/^[a-f0-9]{64}$/.test(p.tokenSha256))) throw new GatewayError("invalid_client");
+      const providedDigest = typeof p.tokenSha256 === "string" ? p.tokenSha256 : undefined;
       await this.update(s => {
         const old = s.clients.find(c => c.id === p.id);
         if (old && (old.userId !== p.userId || old.charId !== p.charId)) throw new GatewayError("immutable_identity");
         if (!old && s.clients.length >= 128) throw new GatewayError("client_limit");
-        if (p.tokenSha256 && s.clients.some(c => c.id !== p.id && c.tokenSha256 === p.tokenSha256)) throw new GatewayError("duplicate_token");
-        if (!p.id.startsWith("client:") && p.tokenSha256) throw new GatewayError("invalid_client");
+        if (providedDigest && s.clients.some(c => c.id !== p.id && c.tokens.some(t => t.digest === providedDigest))) throw new GatewayError("duplicate_token");
+        if (!p.id.startsWith("client:") && providedDigest) throw new GatewayError("invalid_client");
+        const tokens = providedDigest
+          ? [{
+              id: newTokenId(),
+              label: "静态客户端令牌",
+              digest: providedDigest,
+              scopes: ["read", "write"] as TokenScope[],
+              source: "issued" as const,
+              createdAt: Date.now(),
+              expiresAt: null,
+              lastUsedAt: null,
+              revokedAt: null,
+            }]
+          : old?.tokens ?? [];
         s.clients = [...s.clients.filter(c => c.id !== p.id), { id: p.id, userId: p.userId, charId: p.charId,
-          enabled: p.enabled === true, tokenSha256: p.tokenSha256 ?? old?.tokenSha256, grants: old?.grants ?? [] }];
+          enabled: p.enabled === true, grants: old?.grants ?? [], tokens }];
       });
       return { ok: true };
     }
     if (p.action === "issue-client-token") {
-      const bytes = new Uint8Array(32); crypto.getRandomValues(bytes);
-      const token = "hub_client_" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+      const id = newTokenId();
+      const token = mintToken(id);
       const digest = await sha256Hex(token);
+      const label = (typeof p.label === "string" ? p.label.trim() : "").slice(0, 64) || "访问令牌";
+      // 默认 90 天：签发一个永不过期的凭据应该是显式选择，不是默认值。
+      const days = p.expiresInDays === undefined ? 90 : Number(p.expiresInDays);
+      if (!Number.isInteger(days) || days < 0 || days > 3650) throw new GatewayError("invalid_token_options");
+      const scopes = parseScopes(p.scopes ?? ["read", "write"])!;
+      const now = Date.now();
+      const expiresAt = days === 0 ? null : now + days * 86_400_000;
       await this.update(s => {
         const c = s.clients.find(c => c.id === p.clientId && c.id.startsWith("client:"));
         if (!c) throw new GatewayError("not_found", 404);
-        c.tokenSha256 = digest;
+        // 失效超过 7 天的记录不再保留（界面上已经没有人会去点它）。
+        c.tokens = c.tokens.filter(t => activeToken(t, now) ||
+          (t.revokedAt !== null && t.revokedAt > now - 7 * 86_400_000) ||
+          (t.expiresAt !== null && t.expiresAt > now - 7 * 86_400_000));
+        if (c.tokens.filter(t => activeToken(t, now)).length >= 8) throw new GatewayError("token_limit");
+        const total = s.clients.reduce((n, x) => n + x.tokens.filter(t => activeToken(t, now)).length, 0);
+        if (total >= 64) throw new GatewayError("token_limit");
+        c.tokens.push({ id, label, digest, scopes, source: "issued", createdAt: now, expiresAt, lastUsedAt: null, revokedAt: null });
       });
-      return { token };
+      return { token, tokenId: id, label, scopes, expiresAt };
+    }
+    if (p.action === "revoke-client-token") {
+      if (typeof p.clientId !== "string" || typeof p.tokenId !== "string" || !TOKEN_ID_PATTERN.test(p.tokenId)) {
+        throw new GatewayError("invalid_request");
+      }
+      await this.update(s => {
+        const c = s.clients.find(c => c.id === p.clientId);
+        const token = c?.tokens.find(t => t.id === p.tokenId);
+        if (!c || !token) throw new GatewayError("not_found", 404);
+        if (token.revokedAt === null) token.revokedAt = Date.now();
+      });
+      return { ok: true };
     }
     if (p.action === "grant" || p.action === "revoke") {
       await this.update(async s => {
@@ -384,7 +590,7 @@ export class GatewayStore {
       if (svc) { svc.tools = tools; svc.lastError = error; svc.lastTestAt = Date.now(); }
     });
   }
-  private async list(principal: string): Promise<DiscoveredTool[]> {
+  private async list(principal: string, scopes?: TokenScope[]): Promise<DiscoveredTool[]> {
     const state = await this.read();
     const client = state.clients.find(c => c.id === principal && c.enabled);
     if (!client) return [];
@@ -392,19 +598,21 @@ export class GatewayStore {
     for (const service of state.services.filter(s => s.enabled && s.ownerId === client.userId)) {
       for (const tool of service.tools) {
         const fp = await fingerprint(tool);
-        if (client.grants.some(g => g.serviceId === service.id && g.tool === tool.name && g.revision === service.revision && g.fingerprint === fp)) output.push({ ...tool, name: await gatewayName(service.id, tool.name) });
+        if (client.grants.some(g => g.serviceId === service.id && g.tool === tool.name && g.revision === service.revision && g.fingerprint === fp && scopeAllows(scopes, g.mode))) output.push({ ...tool, name: await gatewayName(service.id, tool.name) });
       }
     }
     if (new TextEncoder().encode(JSON.stringify(output)).byteLength > RESPONSE_LIMIT) throw new GatewayError("catalog_limit", 502);
     return output;
   }
-  private async call(principal: string, p: Record<string, any>): Promise<unknown> {
+  private async call(principal: string, p: Record<string, any>, scopes?: TokenScope[]): Promise<unknown> {
     const state = await this.read();
     const client = state.clients.find(c => c.id === principal && c.enabled);
     const args = p.arguments ?? {};
     if (!client || typeof args !== "object" || args === null || Array.isArray(args)) throw new GatewayError("permission_denied", 403);
     let selected: { service: RegisteredService; grant: Grant } | undefined;
     for (const grant of client.grants) {
+      // scope 只能收窄 grant：一个只读令牌即使 grant 是 confirm 模式也选不中。
+      if (!scopeAllows(scopes, grant.mode)) continue;
       const service = state.services.find(s => s.id === grant.serviceId && s.enabled && s.ownerId === client.userId && s.revision === grant.revision);
       if (service && await gatewayName(service.id, grant.tool) === p.name) {
         if (selected) throw new GatewayError("mapping_collision", 503);

@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { sha256Hex, timingSafeEqual } from "../util/crypto";
 import { jsonResponse } from "../util/http";
-import { boundedText, GatewayError, REQUEST_LIMIT } from "./security";
+import { boundedText, GatewayError, readScopes, REQUEST_LIMIT, type TokenScope } from "./security";
 
 export const gatewayEnabled = (env: Env): boolean => env.GATEWAY_ENABLED === "true" && !!env.GATEWAY_STORE;
 export async function gatewayRequest(env: Env, action: string, body: unknown): Promise<Response> {
@@ -17,9 +17,21 @@ export async function gatewayJson<T>(env: Env, action: string, body: unknown): P
   if (!response.ok) throw new GatewayError(data.error ?? "gateway_failure", response.status);
   return data;
 }
-export async function gatewayPrincipal(env: Env, token: string): Promise<string | null> {
+/**
+ * 客户端令牌鉴权。
+ *
+ * 返回值**必须**带上令牌的作用范围：`undefined` 表示完整访问（旧版 `/auth`
+ * 响应或非网关身份），空数组表示什么都不许。这里对认不出的 scope 采取
+ * 失败关闭 —— 不能因为存储里多了一个未知字符串就把权限放大。
+ */
+export async function gatewayPrincipal(
+  env: Env,
+  token: string,
+): Promise<{ principal: string; scopes?: TokenScope[] } | null> {
   if (!gatewayEnabled(env) || !token.startsWith("hub_client_")) return null;
-  return (await gatewayJson<{ principal: string | null }>(env, "auth", { digest: await sha256Hex(token) })).principal;
+  const verdict = await gatewayJson<{ principal: string | null; scopes?: unknown }>(env, "auth", { digest: await sha256Hex(token) });
+  if (!verdict.principal) return null;
+  return { principal: verdict.principal, scopes: readScopes(verdict.scopes) };
 }
 /**
  * Android 配对入口。

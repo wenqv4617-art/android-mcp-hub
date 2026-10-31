@@ -7,6 +7,7 @@ import { GatewayStore, gatewayName } from "../src/gateway/store-do";
 import { sha256Hex } from "../src/util/crypto";
 import { publicAddress, validateTarget, checkDns, boundedText } from "../src/gateway/security";
 import { createUpstream, serveWorker, close } from "./gateway-fixture";
+import { EXPECTED_TOOL_NAMES } from "./tool-fixture";
 import type { Env } from "../src/env";
 
 describe("universal gateway: real HTTP + official SDK through Worker", () => {
@@ -210,11 +211,16 @@ describe("universal gateway: real HTTP + official SDK through Worker", () => {
     const js = await (await fetch(`${hub.url}/gateway/ui.js`)).text();
     expect(js).not.toContain("innerHTML"); expect(js).not.toContain("localStorage");
   });
-  it("rotates generated tokens and revokes the old bearer immediately", async () => {
-    const issued = await admin({ action: "issue-client-token", clientId: "client:other-char" });
-    expect(issued.body.token).toMatch(/^hub_client_[a-f0-9]{64}$/);
-    await expect(sdk("hub_client_otherchar")).rejects.toThrow();
+  it("issues additional tokens and revokes one bearer without affecting the other", async () => {
+    const issued = await admin({ action: "issue-client-token", clientId: "client:other-char", label: "integration" });
+    expect(issued.body.token).toMatch(/^hub_client_[a-f0-9]{8}_[a-f0-9]{64}$/);
     const c = await sdk(issued.body.token); expect((await c.listTools()).tools).toEqual([]);
+    // 签发第二枚不会连带作废第一枚；撤销是逐条、显式的。
+    const listed = (await admin({ action: "list" })).body.clients.find((x: any) => x.id === "client:other-char");
+    const staticToken = listed.tokens.find((t: any) => t.label === "静态客户端令牌");
+    expect(staticToken.id).toBeTruthy();
+    expect((await admin({ action: "revoke-client-token", clientId: "client:other-char", tokenId: staticToken.id })).status).toBe(200);
+    await expect(sdk("hub_client_otherchar")).rejects.toThrow();
   });
   it("preserves Android discovery when the optional gateway store fails", async () => {
     const owner = await sdk(TEST_MCP_TOKEN), previous = rig.env.GATEWAY_STORE;
@@ -227,7 +233,9 @@ describe("universal gateway: real HTTP + official SDK through Worker", () => {
     try {
       expect((await fetch(`${hub.url}/gateway`)).status).toBe(404);
       expect((await admin({ action: "list" })).status).toBe(404);
-      const owner = await sdk(TEST_MCP_TOKEN); expect((await owner.listTools()).tools).toHaveLength(7);
+      const owner = await sdk(TEST_MCP_TOKEN);
+      // 关闭聚合网关不应把本机能力一起藏起来：模型仍然能看到并调用它们。
+      expect((await owner.listTools()).tools).toHaveLength(EXPECTED_TOOL_NAMES.length);
       expect((await owner.callTool({ name: await gatewayName("alpha", "status"), arguments: {} })).isError).toBe(true);
     } finally { rig.env.GATEWAY_ENABLED = "true"; }
   });
