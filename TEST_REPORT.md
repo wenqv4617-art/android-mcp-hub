@@ -1690,7 +1690,18 @@ App 内直接查看两端合并时间线。
 - **未验证**：使用真实生产设备令牌的授权查询路径。本机没有生产设备凭据，
   且凭据不得输出；授权路径由 Worker 测试中的真实令牌夹具覆盖（含设备 A/B 隔离）。
 
-### 15.6 本机 Wrangler 权限边界（重要）
+### 15.6 交付 APK
+
+- 工作流：[41201708253](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41201708253)，
+  commit `59fc1e8`，`gate0`
+- 版本：`1.6.3` / versionCode `9`（模拟器 `dumpsys` 两次安装均为 `versionCode=9 versionName=1.6.3`）
+- APK SHA-256：`40bb7ed73bd85482e5847ab6f0f66b9fa262c6171a1c103dab488595eb2e1f54`
+- 证书 SHA-256：`88aab710faac4be855f93d7fb9fbd7d854861e8f7a1930d2625f4a00344ffc4c`
+  （与 1.6.0/1.6.1/1.6.2 相同）
+- 两次独立构建证书一致；模拟器上先装 build1、再 `adb install -r build2.apk` 覆盖成功
+- APK 下载：该运行页面 **Artifacts → `Android-MCP-Hub-release-apk`**
+
+### 15.7 本机 Wrangler 权限边界（重要）
 
 本机 `npx wrangler whoami` **未登录**，`wrangler tail` 不可用。因此：
 
@@ -1698,7 +1709,7 @@ App 内直接查看两端合并时间线。
 - 不能据此推断"旧事件没有发生过"—— 只是本机没有读取权限；
 - 部署通过 GitHub Actions 完成，部署结果与公网探针如上，均在权限范围内。
 
-### 15.7 现场问题能回答到什么程度
+### 15.8 现场问题能回答到什么程度
 
 - **4001 是什么**：代码语义明确 —— 同一设备来了**更新的连接**，服务端用 4001
   关闭旧连接（`replaced_by_newer_connection`）。它不是"设备离线"或"心跳超时"。
@@ -1711,7 +1722,7 @@ App 内直接查看两端合并时间线。
 - **是否与 VPN/网络切换有关**：每条事件都带 `network`/`vpn`，并可对照 `network_changed`；
   在拿到真机事件前不下结论。
 
-### 15.8 ⛔ NOT RUN：真机验收
+### 15.9 ⛔ NOT RUN：真机验收
 
 本环境无 adb 设备、无生产设备令牌、无法读取 Cloudflare 实时日志。以下必须由用户执行，
 **完成之前不得宣称 V1.6.3 真机验收通过**：

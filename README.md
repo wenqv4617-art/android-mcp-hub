@@ -53,8 +53,8 @@ Android App（本仓库 android/）           前台服务 + Kotlin/Compose
 | Android JVM 测试 | **835 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`，V1.6.3 新增 47 项双端诊断用例） |
 | Android Lint | 通过（`abortOnError = true`） |
 | Android 版本 | **V1.6.3**（versionCode 9）：双端连接诊断与云端日志回传 —— 结构化 `diag_event`（含异常类名、关闭码、代次、网络/屏幕/VPN）、断网排队补发（50 条 / 15 分钟）、独立 HTTPS 查询 `GET /phone/diagnostics`、诊断页「本机 / 云端 / 合并」时间线与时钟差校正、脱敏导出；关闭码语义（4001 等）只来自服务端映射 |
-| 签名 Release APK | [构建运行 41194017762](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41194017762)（commit `37cfa3b`）：`1.6.2` (versionCode 8)，APK SHA-256 `bab04064…90841c`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0/1.6.1 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功（`versionCode=8` / `versionName=1.6.2`）。APK 在运行的 **Artifacts → `Android-MCP-Hub-release-apk`** 中下载 |
-| 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `978bb1d5-7830-429a-8caa-0b07c9b3e1f5`，部署后公网冒烟 PASS（见 [运行 41180717786](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41180717786)） |
+| 签名 Release APK | [构建运行 41201708253](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41201708253)（commit `59fc1e8`）：`1.6.3` (versionCode 9)，APK SHA-256 `40bb7ed7…eb2e1f54`，证书 SHA-256 `88aab710…44ffc4c`（与 1.6.0/1.6.1/1.6.2 同一把交付密钥，可直接覆盖升级）；两次独立构建证书一致，模拟器上 `adb install -r` 覆盖安装成功（`versionCode=9` / `versionName=1.6.3`）。APK 在运行的 **Artifacts → `Android-MCP-Hub-release-apk`** 中下载 |
+| 真实 Cloudflare 部署 | **已执行（2026-10-31）**：`https://android-mcp-hub.causticrry.workers.dev`，版本 `8eadbdf7-58b5-4884-9927-9cd1a4f70e31`，部署后在线验收 PASS（见 [运行 41201688844](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41201688844)）；公网探针：`GET /phone/diagnostics` 无凭据/伪造凭据均 401，`GET /logs` 404 |
 | 真机 / 真实客户端验收 | **未执行**（本机无 adb 设备、无第三方客户端账号，见文末清单） |
 
 详细历史见 [TEST_REPORT.md](TEST_REPORT.md)、[docs/GATEWAY_V1.md](docs/GATEWAY_V1.md)、
