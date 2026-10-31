@@ -25,6 +25,7 @@ import com.androidmcphub.app.R
 import com.androidmcphub.app.aggregation.McpHubRouter
 import com.androidmcphub.app.capability.BuiltInCapabilities
 import com.androidmcphub.app.capability.CapabilityDispatcher
+import com.androidmcphub.app.capability.CapabilityMetadata
 import com.androidmcphub.app.core.HubLog
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.LogEntry
@@ -131,6 +132,16 @@ class PhoneLinkService : Service() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     /**
+     * 能力元数据按工具名索引：授权策略需要知道"这一条是不是写入类"。
+     *
+     * 数据源仍然是 `BuiltInCapabilities` 那份唯一注册清单 —— 这里只是建索引，
+     * 不是第二份清单。查不到的名字按"未知"处理，策略里会保守地按只读放行，
+     * 但分发器第 3 步的白名单查找会先把它拦下，所以这条分支实际不可达。
+     */
+    private val capabilityMetadataByName: Map<String, CapabilityMetadata> =
+        BuiltInCapabilities.metadata.associateBy { it.name }
+
+    /**
      * 聚合命令（第三方 MCP 工具）的工作线程池。
      *
      * 为什么要单独一组线程：`tool_request` 是在 **WebSocket 读线程**上被处理的
@@ -232,7 +243,22 @@ class PhoneLinkService : Service() {
             //     **不需要重连**就生效。
             capabilityDispatcher = CapabilityDispatcher(
                 capabilities = BuiltInCapabilities.androidCapabilities(this),
-                policy = { prefs.capabilitiesEnabled() },
+                // 三道闸门，每次调用都重读设置（用户改完不需要重连）：
+                //   1. 总开关（只读/写共用）；
+                //   2. 写入类能力还要写入总开关（默认关）；
+                //   3. 每一条工具自己的开关（默认开，写入类默认关 —— 见 metadata.readOnly）。
+                // 运行期系统权限（日历、使用情况访问）不在这里判：那由能力自己在
+                // execute 里检查并回 permission_denied，界面负责告诉用户去哪开。
+                policy = { toolName ->
+                    val meta = capabilityMetadataByName[toolName]
+                    prefs.capabilitiesEnabled() &&
+                        prefs.isCapabilityToolEnabled(toolName) &&
+                        when {
+                            meta == null -> true
+                            meta.readOnly -> true
+                            else -> prefs.writeCapabilitiesEnabled() && prefs.isWriteCapabilityEnabled(toolName)
+                        }
+                },
                 // Gate 3：聚合入口。保留命令名（hub_list_tools / hub_get_tool_schema / hub_call_tool）
                 // 由这里接走，**不进**上面那份本机能力白名单 —— 第三方工具不是本机能力，
                 // 它的参数校验、授权判定、执行都在 McpHubRouter 里自己完成。

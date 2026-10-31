@@ -146,7 +146,31 @@ object ToolResultErrorCode {
     /** 本地授权策略拒绝（用户没打开这个能力）。 */
     const val NOT_PERMITTED = "not_permitted"
 
-    val ALL: Set<String> = setOf(UNSUPPORTED_TOOL, INVALID_ARGUMENTS, TOOL_FAILED, TOOL_UNAVAILABLE, NOT_PERMITTED)
+    /**
+     * 系统运行期权限没有授予（例如使用情况访问、日历读写）。
+     *
+     * 与 [NOT_PERMITTED] 刻意分开：后者是**用户在本应用里**关掉了开关，
+     * 前者是 Android 系统层面的授权缺失 —— 两者的修复路径完全不同，
+     * 界面与服务端给出的下一步指引也不应该一样。
+     */
+    const val PERMISSION_DENIED = "permission_denied"
+
+    /**
+     * 高影响操作缺少明确确认（调用方没有传 `confirm=true`）。
+     *
+     * 这不是错误用法：模型应当先看到这个结果，再决定是否真的执行删除。
+     */
+    const val CONFIRMATION_REQUIRED = "confirmation_required"
+
+    val ALL: Set<String> = setOf(
+        UNSUPPORTED_TOOL,
+        INVALID_ARGUMENTS,
+        TOOL_FAILED,
+        TOOL_UNAVAILABLE,
+        NOT_PERMITTED,
+        PERMISSION_DENIED,
+        CONFIRMATION_REQUIRED,
+    )
 }
 
 /** [IncomingFrame.Unknown.reason] 的取值。 */

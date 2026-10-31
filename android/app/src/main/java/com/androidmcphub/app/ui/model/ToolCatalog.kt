@@ -87,7 +87,9 @@ internal fun CapabilityMetadata.toToolDescriptor(): ToolDescriptor = ToolDescrip
         .takeIf { requiresRuntimePermission }
         ?.joinToString("、") { it.substringAfterLast('.') }
         ?.ifEmpty { null },
+    permissionHint = permissionHint,
     readOnly = readOnly,
+    requiresConfirmation = destructive,
     declaredPermissions = declaredPermissions,
 )
 
@@ -96,5 +98,9 @@ internal fun CapabilityCategory.toToolCategory(): ToolCategory = when (this) {
     CapabilityCategory.Device -> ToolCategory.Device
     CapabilityCategory.Network -> ToolCategory.Network
     CapabilityCategory.Storage -> ToolCategory.Storage
+    CapabilityCategory.Media -> ToolCategory.Media
+    CapabilityCategory.Notification -> ToolCategory.Notification
+    CapabilityCategory.Calendar -> ToolCategory.Calendar
+    CapabilityCategory.Productivity -> ToolCategory.Productivity
     CapabilityCategory.Other -> ToolCategory.Other
 }

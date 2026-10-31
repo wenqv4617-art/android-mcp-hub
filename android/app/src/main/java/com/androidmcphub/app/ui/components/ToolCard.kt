@@ -134,6 +134,7 @@ fun availabilityColor(availability: ToolAvailability): Color {
     return when (availability) {
         ToolAvailability.Enabled -> palette.connected
         ToolAvailability.SwitchOff -> palette.idle
+        ToolAvailability.Disabled -> palette.idle
         ToolAvailability.NeedsPermission -> palette.reconnecting
         ToolAvailability.ComingSoon -> palette.idle
     }

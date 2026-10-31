@@ -48,10 +48,13 @@ fun SettingsScreen(
     onOpenAdvancedSettings: () -> Unit,
     onOpenTokenSettings: () -> Unit,
     onOpenDiagnostics: () -> Unit,
+    onOpenTools: () -> Unit,
 ) {
     val spacing = MaterialTheme.spacing
     val draft by viewModel.draft.collectAsStateWithLifecycle()
     val capabilitiesEnabled by viewModel.capabilitiesEnabled.collectAsStateWithLifecycle()
+    val writeCapabilitiesEnabled by viewModel.writeCapabilitiesEnabled.collectAsStateWithLifecycle()
+    val enabledWriteTools by viewModel.enabledWriteCapabilities.collectAsStateWithLifecycle()
 
     LazyColumn(
         contentPadding = PaddingValues(bottom = spacing.xxl),
@@ -106,11 +109,27 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     title = "允许服务端调用本机只读能力",
                     description = "关掉之后，手机对任何工具请求都回 not_permitted，且不执行任何能力。" +
-                        "当前已启用的能力只有 battery_get_status（电池状态，只读、不需要任何权限）。" +
-                        "开关立即生效，不需要重新连接。首次安装默认关闭（需要你在这里主动打开），" +
-                        "以及 phone_ping 这类连通性探测不受这个开关影响。",
+                        "打开后，每一条只读工具还要在「工具」页里单独保持开启（默认开）。" +
+                        "开关立即生效，不需要重新连接。首次安装默认关闭，" +
+                        "而 phone_ping 这类连通性探测不受这个开关影响。",
                     checked = capabilitiesEnabled,
                     onCheckedChange = viewModel::setCapabilitiesEnabled,
+                )
+                SettingSwitchRow(
+                    title = "允许服务端修改本机数据",
+                    description = "写入总开关，默认关闭。打开它只表示「我知道这个应用可以改数据」；" +
+                        "闹钟、提醒、备忘、待办、日历、音量、手电筒、打开应用等每一条写入类工具，" +
+                        "仍然需要在「工具」页里逐条打开。删除类工具还会额外要求调用方传 confirm=true。" +
+                        "现在是：${if (writeCapabilitiesEnabled) "已允许，逐条打开 ${enabledWriteTools.size} 条" else "已禁止全部写入"}。",
+                    checked = writeCapabilitiesEnabled,
+                    onCheckedChange = viewModel::setWriteCapabilitiesEnabled,
+                )
+                NavRow(
+                    icon = Icons.Filled.Build,
+                    title = "逐条管理本机能力",
+                    subtitle = "查看每个工具的权限状态、单独开关，以及去系统设置授权",
+                    onClick = onOpenTools,
+                    showDivider = false,
                 )
             }
         }
@@ -154,8 +173,9 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    text = "本应用只在本机执行用户已授权的只读能力；" +
-                        "不发送短信、不读取通讯录、不修改系统设置。",
+                    text = "本应用只在本机执行用户逐条授权的工具。" +
+                        "默认只开放只读能力；写入能力需要总开关 + 逐条授权，删除类还要调用方显式确认。" +
+                        "不发送短信、不读取通讯录、不代用户静默修改系统设置。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = spacing.xs),

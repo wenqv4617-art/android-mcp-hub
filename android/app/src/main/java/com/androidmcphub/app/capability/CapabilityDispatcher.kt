@@ -78,6 +78,18 @@ interface Capability {
      */
     fun validate(arguments: JSONObject): String? = null
 
+    /**
+     * 高影响操作的**明确确认**检查（删除/覆盖已有数据）。
+     *
+     * 返回非 null 时分发器回 `confirmation_required`，并且**不执行**这个能力。
+     * 默认 null = 不需要确认。约定：实现方要求调用方在参数里传 `confirm=true`
+     * （由各能力的 [allowedArguments] 显式列入白名单）。
+     *
+     * 这不能替代用户在设置里逐工具授权：确认只是让"这一次"有明确意图，
+     * 工具本身仍必须先被用户打开。
+     */
+    fun confirmationProblem(arguments: JSONObject): String? = null
+
     /** 执行。[arguments] 只包含通过校验的、白名单里的键。 */
     fun execute(arguments: JSONObject): CapabilityResult
 }
@@ -322,7 +334,7 @@ class CapabilityDispatcher(
                     requestId = requestId,
                     toolName = capability.name,
                     code = ToolResultErrorCode.NOT_PERMITTED,
-                    message = "本机已关闭只读能力调用（用户设置）",
+                    message = "本机已关闭该能力的调用（用户设置）",
                     startedAt = startedAt,
                 )
             }
@@ -337,6 +349,23 @@ class CapabilityDispatcher(
                     code = ToolResultErrorCode.INVALID_ARGUMENTS,
                     message = "参数不合法：多出 ${extraKeys.size} 个不支持的字段" +
                         allowedSuffix(capability),
+                    startedAt = startedAt,
+                )
+            }
+
+            // 5.5 高影响操作的明确确认。排在参数取值校验之前：调用方连"要删东西"
+            //     这件事都还没确认，不该先因为别的参数细节拿到一个无关的错误。
+            val confirmation = try {
+                capability.confirmationProblem(arguments)
+            } catch (t: Throwable) {
+                "确认检查失败（${t.javaClass.simpleName}）"
+            }
+            if (confirmation != null) {
+                return@synchronized failure(
+                    requestId = requestId,
+                    toolName = capability.name,
+                    code = ToolResultErrorCode.CONFIRMATION_REQUIRED,
+                    message = confirmation,
                     startedAt = startedAt,
                 )
             }

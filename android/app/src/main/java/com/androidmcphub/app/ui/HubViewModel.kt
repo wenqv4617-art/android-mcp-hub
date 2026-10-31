@@ -60,6 +60,21 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
      */
     val capabilitiesEnabled: StateFlow<Boolean> = _capabilitiesEnabled.asStateFlow()
 
+    private val _writeCapabilitiesEnabled = MutableStateFlow(prefs.writeCapabilitiesEnabled())
+
+    /** 是否允许执行**会修改数据**的能力（写入总开关，默认关）。 */
+    val writeCapabilitiesEnabled: StateFlow<Boolean> = _writeCapabilitiesEnabled.asStateFlow()
+
+    private val _disabledCapabilities = MutableStateFlow(prefs.disabledCapabilities())
+
+    /** 被用户单独关掉的工具名集合。 */
+    val disabledCapabilities: StateFlow<Set<String>> = _disabledCapabilities.asStateFlow()
+
+    private val _enabledWriteCapabilities = MutableStateFlow(prefs.enabledWriteCapabilities())
+
+    /** 被用户逐条打开的写入类工具名集合（写入类默认关）。 */
+    val enabledWriteCapabilities: StateFlow<Set<String>> = _enabledWriteCapabilities.asStateFlow()
+
     private val _message = MutableStateFlow(
         (initialCredential as? TokenLoadResult.Unreadable)
             ?.let { "设备令牌无法解密（${it.reason}），请重新填写并保存" },
@@ -109,6 +124,38 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
             "已允许服务端调用本机只读能力"
         } else {
             "已关闭只读能力调用，本机不再执行任何能力请求"
+        }
+    }
+
+    /**
+     * 切换**写入**总开关。与只读总开关分开：打开它只表示"我知道这个应用可以改数据"，
+     * 每一条写入类工具还要单独打开（默认关）。
+     */
+    fun setWriteCapabilitiesEnabled(enabled: Boolean) {
+        prefs.saveWriteCapabilitiesEnabled(enabled)
+        _writeCapabilitiesEnabled.value = enabled
+        _message.value = if (enabled) {
+            "已允许修改数据。写入类工具仍需逐条打开才会执行"
+        } else {
+            "已关闭数据修改，所有写入/删除类工具都不再执行"
+        }
+    }
+
+    /** 单独开关一条只读工具（写入类用 [setWriteToolEnabled]）。 */
+    fun setToolEnabled(toolName: String, enabled: Boolean) {
+        prefs.setCapabilityToolEnabled(toolName, enabled)
+        _disabledCapabilities.value = prefs.disabledCapabilities()
+        _message.value = if (enabled) "已启用 $toolName" else "已关闭 $toolName"
+    }
+
+    /** 单独开关一条写入类工具。关闭写入总开关时这里只记录偏好，不会绕过总开关。 */
+    fun setWriteToolEnabled(toolName: String, enabled: Boolean) {
+        prefs.setWriteCapabilityEnabled(toolName, enabled)
+        _enabledWriteCapabilities.value = prefs.enabledWriteCapabilities()
+        _message.value = if (enabled) {
+            "已允许 $toolName（仍受写入总开关约束）"
+        } else {
+            "已禁止 $toolName"
         }
     }
 

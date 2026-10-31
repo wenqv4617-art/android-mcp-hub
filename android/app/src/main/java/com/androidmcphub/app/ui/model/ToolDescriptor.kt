@@ -13,6 +13,8 @@ enum class ToolCategory(val label: String) {
     File("文件"),
     Media("媒体"),
     Notification("通知"),
+    Calendar("日历"),
+    Productivity("效率"),
     Other("其他"),
 }
 
@@ -46,7 +48,10 @@ enum class ToolAvailability(val label: String) {
     /** 总开关关闭：能力仍然注册着（协议上认得），但一条都不会被执行。 */
     SwitchOff("总开关已关闭"),
 
-    /** 需要授权：标了权限要求、而权限尚未满足（本轮没有这种工具，留作将来）。 */
+    /** 用户在工具详情里单独关掉了这一条（总开关仍然是开的）。 */
+    Disabled("已单独关闭"),
+
+    /** 需要授权：标了权限要求、而权限尚未满足。 */
     NeedsPermission("需要授权"),
 
     /** 未开放：这个版本里还没有实现（不伪造入口）。 */
@@ -87,8 +92,12 @@ data class ToolDescriptor(
     val requiresPermission: Boolean = false,
     /** 权限说明（例如"通知权限"）；[requiresPermission] 为 true 时不该为空。 */
     val permissionLabel: String? = null,
+    /** 授予权限的具体步骤（给人看）。 */
+    val permissionHint: String? = null,
     /** 是否只读、无副作用。 */
     val readOnly: Boolean = true,
+    /** 调用时必须显式传 `confirm=true`（删除/覆盖已有数据）。 */
+    val requiresConfirmation: Boolean = false,
     /**
      * 这个工具声明需要的系统权限（完整权限名，例如
      * `android.permission.ACCESS_NETWORK_STATE`）。
@@ -100,11 +109,29 @@ data class ToolDescriptor(
     val declaredPermissions: List<String> = emptyList(),
 ) {
 
-    /** 结合"用户此刻的授权总开关"推导出的可用性。 */
-    fun availability(capabilitiesEnabled: Boolean): ToolAvailability = when {
+    /**
+     * 结合"用户此刻的授权状态"推导出的可用性。
+     *
+     * 判定顺序是刻意的：先看"这个版本有没有"、再看"权限给没给"，
+     * 最后才看开关 —— 一个需要授权的工具，即使总开关开着也不该显示成可用。
+     *
+     * @param capabilitiesEnabled 总开关。
+     * @param writeCapabilitiesEnabled 写入类能力的总开关（只读工具不看它）。
+     * @param toolEnabled 这一条是否被用户单独关掉。
+     * @param permissionGranted 运行时/特殊权限是否已授予；`null` 表示"界面还不知道"，
+     *        此时按"未授予"处理（宁可显示需要授权，也不虚报可用）。
+     */
+    fun availability(
+        capabilitiesEnabled: Boolean,
+        writeCapabilitiesEnabled: Boolean = true,
+        toolEnabled: Boolean = true,
+        permissionGranted: Boolean? = null,
+    ): ToolAvailability = when {
         !availableFromBuild -> ToolAvailability.ComingSoon
+        requiresPermission && permissionGranted != true -> ToolAvailability.NeedsPermission
+        !toolEnabled -> ToolAvailability.Disabled
+        !readOnly && !writeCapabilitiesEnabled -> ToolAvailability.SwitchOff
         !capabilitiesEnabled -> ToolAvailability.SwitchOff
-        requiresPermission -> ToolAvailability.NeedsPermission
         else -> ToolAvailability.Enabled
     }
 

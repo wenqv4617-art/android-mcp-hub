@@ -94,11 +94,22 @@ class ToolCatalogTest {
     }
 
     @Test
-    fun `三个本机工具都在目录里`() {
-        assertEquals(
-            listOf("battery_get_status", "device_get_network", "device_get_storage"),
-            ToolCatalog.localNames,
-        )
+    fun `各批次的本机工具都在目录里`() {
+        assertEquals(32, ToolCatalog.local.size)
+        listOf(
+            "battery_get_status",
+            "device_get_usage_stats",
+            "device_get_status",
+            "alarm_create",
+            "reminder_create",
+            "memo_create",
+            "todo_create",
+            "calendar_create_event",
+            "device_set_volume",
+            "device_post_notification",
+        ).forEach { name ->
+            assertTrue("目录里缺少 $name", ToolCatalog.localNames.contains(name))
+        }
     }
 
     @Test
@@ -136,11 +147,60 @@ class ToolCatalogTest {
     }
 
     @Test
-    fun `可用性由能力总开关决定`() {
-        ToolCatalog.local.forEach { tool ->
-            assertEquals(ToolAvailability.Enabled, tool.availability(capabilitiesEnabled = true))
-            assertEquals(ToolAvailability.SwitchOff, tool.availability(capabilitiesEnabled = false))
+    fun `可用性由两级总开关、逐工具开关与系统权限共同决定`() {
+        // 只读且不需要系统权限：只看只读总开关与这一条的开关。
+        val battery = ToolCatalog.byId("battery_get_status")!!
+        assertEquals(ToolAvailability.Enabled, battery.availability(capabilitiesEnabled = true))
+        assertEquals(ToolAvailability.SwitchOff, battery.availability(capabilitiesEnabled = false))
+        assertEquals(
+            ToolAvailability.Disabled,
+            battery.availability(capabilitiesEnabled = true, toolEnabled = false),
+        )
+
+        // 写入类：写入总开关关闭时一律 SwitchOff，即使逐工具有开关也不行。
+        val memo = ToolCatalog.byId("memo_create")!!
+        assertFalse(memo.readOnly)
+        assertEquals(
+            ToolAvailability.Enabled,
+            memo.availability(capabilitiesEnabled = true, writeCapabilitiesEnabled = true),
+        )
+        assertEquals(
+            ToolAvailability.SwitchOff,
+            memo.availability(capabilitiesEnabled = true, writeCapabilitiesEnabled = false),
+        )
+        assertEquals(
+            ToolAvailability.Disabled,
+            memo.availability(
+                capabilitiesEnabled = true,
+                writeCapabilitiesEnabled = true,
+                toolEnabled = false,
+            ),
+        )
+
+        // 需要系统权限：权限未授予时压过"开关都开着"，不能显示成可用。
+        val usage = ToolCatalog.byId("device_get_usage_stats")!!
+        assertTrue(usage.requiresPermission)
+        assertEquals(
+            ToolAvailability.NeedsPermission,
+            usage.availability(capabilitiesEnabled = true, permissionGranted = false),
+        )
+        assertEquals(
+            ToolAvailability.Enabled,
+            usage.availability(capabilitiesEnabled = true, permissionGranted = true),
+        )
+    }
+
+    @Test
+    fun `删除类工具在目录里标出需要确认`() {
+        ToolCatalog.byId("memo_delete")!!.let {
+            assertFalse(it.readOnly)
+            assertTrue(it.requiresConfirmation)
         }
+        ToolCatalog.byId("calendar_delete_event")!!.let {
+            assertTrue(it.requiresConfirmation)
+        }
+        // 普通只读工具不应被误标成需要确认。
+        assertFalse(ToolCatalog.byId("battery_get_status")!!.requiresConfirmation)
     }
 
     @Test
@@ -163,19 +223,31 @@ class ToolCatalogTest {
     }
 
     @Test
-    fun `分类筛选设备命中而其他分类为空`() {
+    fun `分类筛选命中对应批次的能力`() {
         val tools = ToolCatalog.local
-        assertEquals(1, filterTools(tools, query = "", category = ToolCategory.Device).size)
+        assertEquals(8, filterTools(tools, query = "", category = ToolCategory.Device).size)
         assertEquals(1, filterTools(tools, query = "", category = ToolCategory.Network).size)
         assertEquals(1, filterTools(tools, query = "", category = ToolCategory.Storage).size)
-        assertEquals(0, filterTools(tools, query = "", category = ToolCategory.Media).size)
-        assertEquals(0, filterTools(tools, query = "", category = ToolCategory.Notification).size)
+        assertEquals(1, filterTools(tools, query = "", category = ToolCategory.Media).size)
+        assertEquals(1, filterTools(tools, query = "", category = ToolCategory.Notification).size)
+        assertEquals(5, filterTools(tools, query = "", category = ToolCategory.Calendar).size)
+        assertEquals(15, filterTools(tools, query = "", category = ToolCategory.Productivity).size)
+        assertEquals(0, filterTools(tools, query = "", category = ToolCategory.File).size)
+        assertEquals(0, filterTools(tools, query = "", category = ToolCategory.Other).size)
     }
 
     @Test
     fun `筛选条只画有工具的分类`() {
         assertEquals(
-            listOf(ToolCategory.Device, ToolCategory.Network, ToolCategory.Storage),
+            listOf(
+                ToolCategory.Device,
+                ToolCategory.Network,
+                ToolCategory.Storage,
+                ToolCategory.Media,
+                ToolCategory.Notification,
+                ToolCategory.Calendar,
+                ToolCategory.Productivity,
+            ),
             ToolCatalog.categoriesInUse(),
         )
     }

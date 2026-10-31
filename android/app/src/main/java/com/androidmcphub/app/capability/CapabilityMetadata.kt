@@ -12,6 +12,10 @@ enum class CapabilityCategory(val label: String) {
     Device("设备"),
     Network("网络"),
     Storage("存储"),
+    Media("媒体"),
+    Notification("通知"),
+    Calendar("日历"),
+    Productivity("效率"),
     Other("其他"),
 }
 
@@ -73,8 +77,17 @@ data class CapabilityMetadata(
     /**
      * 是否需要用户在运行期单独授权（危险权限 / 特殊权限）。
      *
-     * 当前三个能力都是 false：它们只用正常权限或不申请权限。
+     * 当前三个只读能力都是 false：它们只用正常权限或不申请权限。
      * 为 true 时，UI 不会把它显示成"已启用"，而是"需要授权"。
      */
     val requiresRuntimePermission: Boolean = false,
+    /** 用户该怎么授予这个权限（给人看的一步一步说明）。 */
+    val permissionHint: String? = null,
+    /**
+     * 这个工具会**删除/覆盖已有数据**。
+     *
+     * UI 用它显示醒目标记；执行层用它要求调用方传 `confirm=true`
+     * （见 [com.androidmcphub.app.capability.Capability.confirmationProblem]）。
+     */
+    val destructive: Boolean = false,
 )

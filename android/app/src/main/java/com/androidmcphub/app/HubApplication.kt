@@ -1,6 +1,7 @@
 package com.androidmcphub.app
 
 import android.app.Application
+import com.androidmcphub.app.capability.ReminderRescheduler
 import com.androidmcphub.app.protocol.APP_VERSION
 import com.androidmcphub.app.service.LinkBus
 
@@ -8,8 +9,11 @@ import com.androidmcphub.app.service.LinkBus
  * 应用级入口。
  *
  * 这里**不**做任何「开机自动连接」之类的事：本应用连不连、什么时候连，
- * 全部由用户在前台点「连接」决定。这个类目前只做一件小事 ——
- * 记一条启动日志，方便用户回看这次运行是从什么时候开始的。
+ * 全部由用户在前台点「连接」决定。这个类只做两件小事：
+ *  1. 记一条启动日志，方便用户回看这次运行是从什么时候开始的；
+ *  2. 把还没响过的本地提醒重新排程（见 [ReminderRescheduler]）——
+ *     设备重启会清空 AlarmManager，而本应用不申请开机广播权限，
+ *     所以只能在用户打开应用时补排一次。
  *
  * ⚠ 包名必须与 AndroidManifest.xml 里的 `android:name=".HubApplication"` 解析结果一致。
  * Gate 0.1 的 APK 在这里声明成了 `package com.androidmcphub.app.ui`（文件却在 app/ 目录下），
@@ -24,5 +28,12 @@ class HubApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         LinkBus.log.info("应用进程已启动（版本 $APP_VERSION）")
+        // 提醒补排不能把应用启动搞崩：排不上就只留一条日志，用户仍能在列表里看到提醒。
+        try {
+            val rearmed = ReminderRescheduler.reschedule(this)
+            if (rearmed > 0) LinkBus.log.info("已重新排程 $rearmed 条提醒")
+        } catch (t: Throwable) {
+            LinkBus.log.warn("提醒补排失败（${t.javaClass.simpleName}）")
+        }
     }
 }

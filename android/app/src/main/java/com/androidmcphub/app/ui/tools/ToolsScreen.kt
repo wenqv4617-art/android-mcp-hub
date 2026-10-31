@@ -2,6 +2,7 @@ package com.androidmcphub.app.ui.tools
 
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,12 +17,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.androidmcphub.app.ui.components.EmptyState
 import com.androidmcphub.app.ui.components.HubTextField
 import com.androidmcphub.app.ui.components.PageHeader
@@ -48,6 +56,9 @@ import com.androidmcphub.app.ui.theme.statusPalette
 @Composable
 fun ToolsScreen(
     capabilitiesEnabled: Boolean,
+    writeCapabilitiesEnabled: Boolean,
+    disabledTools: Set<String>,
+    enabledWriteTools: Set<String>,
     onOpenTool: (String) -> Unit,
     onOpenHelp: () -> Unit,
 ) {
@@ -58,10 +69,46 @@ fun ToolsScreen(
     }
 
     val spacing = MaterialTheme.spacing
+    val context = LocalContext.current
     val tools = filterTools(ToolCatalog.local, query, category)
-    val enabledCount = ToolCatalog.local.count {
-        it.availability(capabilitiesEnabled) == ToolAvailability.Enabled
+
+    // 系统权限状态可能在用户离开本页去设置后改变：回到前台时重新查一遍，
+    // 不是"进页面时查一次就永远用那个值"。
+    var permissionTick by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+
+    // 权限查询结果按 tick 缓存：一次组合里对 30+ 个工具各查一次系统就够，
+    // 不在每次重组时重新查。
+    val grantedByTool: Map<String, Boolean> = remember(permissionTick) {
+        ToolCatalog.local
+            .filter { it.requiresPermission }
+            .associate { it.name to ToolPermissions.isGranted(context, it) }
+    }
+
+    fun availabilityOf(tool: com.androidmcphub.app.ui.model.ToolDescriptor): ToolAvailability {
+        val perToolEnabled = if (tool.readOnly) {
+            tool.name !in disabledTools
+        } else {
+            tool.name in enabledWriteTools
+        }
+        return tool.availability(
+            capabilitiesEnabled = capabilitiesEnabled,
+            writeCapabilitiesEnabled = writeCapabilitiesEnabled,
+            toolEnabled = perToolEnabled,
+            permissionGranted = if (tool.requiresPermission) grantedByTool[tool.name] == true else null,
+        )
+    }
+
+    val enabledCount = ToolCatalog.local.count { availabilityOf(it) == ToolAvailability.Enabled }
+    val writeTools = ToolCatalog.local.filter { !it.readOnly }
+    val writeEnabled = writeTools.count { availabilityOf(it) == ToolAvailability.Enabled }
 
     LazyColumn(
         contentPadding = PaddingValues(bottom = spacing.xxl),
@@ -120,21 +167,30 @@ fun ToolsScreen(
                     .padding(horizontal = spacing.screenHorizontal),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "本机能力 ${ToolCatalog.local.size} 个 · 当前可用 $enabledCount 个",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                StatusPill(
-                    text = if (capabilitiesEnabled) "授权已开启" else "授权已关闭",
-                    color = if (capabilitiesEnabled) {
-                        statusPalette.connected
-                    } else {
-                        statusPalette.idle
-                    },
-                    showDot = true,
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "本机能力 ${ToolCatalog.local.size} 个 · 当前可执行 $enabledCount 个",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "写入 ${writeTools.size} 个中已放行 $writeEnabled 个",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(spacing.xs)) {
+                    StatusPill(
+                        text = if (capabilitiesEnabled) "只读已开" else "只读已关",
+                        color = if (capabilitiesEnabled) statusPalette.connected else statusPalette.idle,
+                        showDot = true,
+                    )
+                    StatusPill(
+                        text = if (writeCapabilitiesEnabled) "写入已开" else "写入已关",
+                        color = if (writeCapabilitiesEnabled) statusPalette.reconnecting else statusPalette.idle,
+                        showDot = true,
+                    )
+                }
             }
         }
 
@@ -151,7 +207,7 @@ fun ToolsScreen(
             items(items = tools, key = { it.id }) { tool ->
                 ToolCard(
                     tool = tool,
-                    availability = tool.availability(capabilitiesEnabled),
+                    availability = availabilityOf(tool),
                     onClick = { onOpenTool(tool.id) },
                     modifier = Modifier.padding(horizontal = spacing.screenHorizontal),
                 )

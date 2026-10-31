@@ -72,6 +72,9 @@ fun HubApp(viewModel: HubViewModel) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentTab = hubTabOf(backStackEntry?.destination?.route)
     val capabilitiesEnabled by viewModel.capabilitiesEnabled.collectAsStateWithLifecycle()
+    val writeCapabilitiesEnabled by viewModel.writeCapabilitiesEnabled.collectAsStateWithLifecycle()
+    val disabledTools by viewModel.disabledCapabilities.collectAsStateWithLifecycle()
+    val enabledWriteTools by viewModel.enabledWriteCapabilities.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
     // MCP 服务器列表是**另一个** ViewModel：它管的是"用户配了哪些第三方服务器、
@@ -150,6 +153,9 @@ fun HubApp(viewModel: HubViewModel) {
             composable(HubTab.Tools.route) {
                 ToolsScreen(
                     capabilitiesEnabled = capabilitiesEnabled,
+                    writeCapabilitiesEnabled = writeCapabilitiesEnabled,
+                    disabledTools = disabledTools,
+                    enabledWriteTools = enabledWriteTools,
                     onOpenTool = { toolId -> navController.navigate(Routes.toolDetail(toolId)) },
                     onOpenHelp = { navController.navigate(Routes.TOOLS_HELP) },
                 )
@@ -162,6 +168,12 @@ fun HubApp(viewModel: HubViewModel) {
                 ToolDetailScreen(
                     toolId = entry.arguments?.getString(Routes.ARG_TOOL_ID).orEmpty(),
                     capabilitiesEnabled = capabilitiesEnabled,
+                    writeCapabilitiesEnabled = writeCapabilitiesEnabled,
+                    disabledTools = disabledTools,
+                    enabledWriteTools = enabledWriteTools,
+                    onToolEnabledChange = viewModel::setToolEnabled,
+                    onWriteToolEnabledChange = viewModel::setWriteToolEnabled,
+                    onOpenSettings = { navController.navigateToTopLevel(HubTab.Settings) },
                     onBack = { navController.popBackStack() },
                 )
             }
@@ -262,6 +274,7 @@ fun HubApp(viewModel: HubViewModel) {
                     onOpenAdvancedSettings = { navController.navigate(Routes.ADVANCED_SETTINGS) },
                     onOpenTokenSettings = { navController.navigate(Routes.TOKEN_SETTINGS) },
                     onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                    onOpenTools = { navController.navigateToTopLevel(HubTab.Tools) },
                 )
             }
 

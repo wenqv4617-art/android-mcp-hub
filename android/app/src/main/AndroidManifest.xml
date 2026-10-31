@@ -1,10 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  权限清单：只声明这条长连接真正需要的 5 个权限。
-  没有任何存储 / 位置 / 相机 / 通讯录 / 短信 / 电话 / QUERY_ALL_PACKAGES /
+  权限清单：每一条都对应一个**真实存在**的能力，没有"先声明再说"的权限。
+
+  仍然没有：存储 / 位置 / 通讯录 / 短信 / 电话 / QUERY_ALL_PACKAGES /
   RECEIVE_BOOT_COMPLETED / WAKE_LOCK / REQUEST_IGNORE_BATTERY_OPTIMIZATIONS。
+
+  本批次新增的权限全部是**按需授权**：安装后默认没有运行时权限，
+  用户在使用对应工具时才会看到系统授权弹窗（或需要到设置里手动开）：
+    · PACKAGE_USAGE_STATS：使用情况访问（特殊权限，系统设置里手动开）
+    · READ_CALENDAR / WRITE_CALENDAR：日历读取/写入
+    · CAMERA：只用于手电筒，且声明 required=false，不需要相机的设备也能安装
+    · SET_ALARM：把新建闹钟的请求交给系统闹钟应用
+  用户不开这些权限时，对应工具返回明确的 permission_denied，不影响其它能力的连接。
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 连接用户自己的 MCP 中继（wss://） -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -16,6 +26,47 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 前台服务类型 specialUse（诚实申报，见 README-ANDROID.md） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- 使用情况访问：特殊权限，不能弹窗申请，只能引导用户到系统设置 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- 日历读写：运行期危险权限 -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!--
+      把新建闹钟交给系统闹钟应用。
+      系统闹钟应用检查的是它自己声明的 com.android.alarm.permission.SET_ALARM
+      （AlarmClock.ACTION_SET_ALARM 文档里写明的那条）。写成 android.permission.SET_ALARM
+      不会报错，但请求不会真正拿到这条授权 —— 所以这里用完整名字。
+    -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- 手电筒：运行期危险权限，仅用于闪光灯 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 没有闪光灯/相机的设备也可以安装；手电筒工具会如实返回不可用 -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.flash"
+        android:required="false" />
+
+    <!--
+      包可见性（Android 11+）：只声明"有桌面入口的应用"与"能处理 package: URI 的应用"。
+      这不是 QUERY_ALL_PACKAGES —— 我们看不到没有启动入口的应用，
+      也就无法用 device_open_app 去探测/枚举用户安装了哪些后台应用。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="package" />
+        </intent>
+    </queries>
 
     <application
         android:name=".HubApplication"
@@ -67,6 +118,14 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Persistent user-initiated WebSocket command channel to the user's own Android MCP Hub relay; receives and answers keepalive/ping frames so a paired MCP client can reach this device. No location, media, or file access." />
         </service>
+
+        <!--
+          本地提醒到点后的通知接收器。
+          exported=false：只有本应用自己的 AlarmManager PendingIntent 能触发它。
+        -->
+        <receiver
+            android:name=".capability.ReminderReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

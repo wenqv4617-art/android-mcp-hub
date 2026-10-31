@@ -65,6 +65,62 @@ class HubPrefs(context: Context) {
         prefs.edit().putBoolean(KEY_CAPABILITIES_ENABLED, enabled).apply()
     }
 
+    /**
+     * 是否允许执行**会修改数据的**能力（新建/修改/删除闹钟、备忘、日历事件等）。
+     *
+     * 与只读总开关**分开**，默认同样是关：
+     *  - 只读开关打开只代表"可以看"，不代表"可以改"；把两者合成一个开关，
+     *    等于用户为了读电量就顺手交出了删除备忘的权限；
+     *  - 写操作还要再过一道**单条工具开关**（[isCapabilityToolEnabled]，写入类默认关），
+     *    两道闸门都打开才会执行；
+     *  - 删除/覆盖类工具还需要调用方显式传 `confirm=true`（执行层校验）。
+     */
+    fun writeCapabilitiesEnabled(): Boolean =
+        prefs.getBoolean(KEY_WRITE_CAPABILITIES_ENABLED, DEFAULT_WRITE_CAPABILITIES_ENABLED)
+
+    fun saveWriteCapabilitiesEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_WRITE_CAPABILITIES_ENABLED, enabled).apply()
+    }
+
+    /**
+     * 被用户**单独关掉**的能力名集合（存的是"关闭"而不是"开启"）。
+     *
+     * 存"关闭"是为了让将来新注册的能力默认可被总开关管理，而不是每次加能力
+     * 都要用户重新去开一遍。写入类能力的默认值不在这里体现 —— 它们由
+     * `CapabilityMetadata.readOnly == false` 在运行期判定（见 [PhoneLinkService]）。
+     */
+    fun disabledCapabilities(): Set<String> =
+        prefs.getStringSet(KEY_DISABLED_CAPABILITIES, emptySet())?.toSet() ?: emptySet()
+
+    /** 这一条工具是否被单独关掉。 */
+    fun isCapabilityToolEnabled(name: String): Boolean = name !in disabledCapabilities()
+
+    /** 单独开关一条工具；[enabled] 为 false 时记入关闭集合。 */
+    fun setCapabilityToolEnabled(name: String, enabled: Boolean) {
+        val next = disabledCapabilities().toMutableSet()
+        if (enabled) next.remove(name) else next.add(name)
+        // getStringSet 返回的可能是内部实例，必须新建集合并写回。
+        prefs.edit().putStringSet(KEY_DISABLED_CAPABILITIES, next).apply()
+    }
+
+    /**
+     * 被用户**逐条打开**的写入类能力。
+     *
+     * 与只读工具"默认开、可单独关"相反，写入类工具是"默认关、必须单独开"：
+     * 只打开写入总开关只表示"我知道这个应用可以改数据"，不等于"我同意它改**这一类**数据"。
+     * 删除类工具还会在执行层再要求 `confirm=true`。
+     */
+    fun enabledWriteCapabilities(): Set<String> =
+        prefs.getStringSet(KEY_ENABLED_WRITE_CAPABILITIES, emptySet())?.toSet() ?: emptySet()
+
+    fun isWriteCapabilityEnabled(name: String): Boolean = name in enabledWriteCapabilities()
+
+    fun setWriteCapabilityEnabled(name: String, enabled: Boolean) {
+        val next = enabledWriteCapabilities().toMutableSet()
+        if (enabled) next.add(name) else next.remove(name)
+        prefs.edit().putStringSet(KEY_ENABLED_WRITE_CAPABILITIES, next).apply()
+    }
+
     fun save(config: HubConfig) {
         val editor = prefs.edit()
         for ((key, value) in config.toMap()) {
@@ -161,6 +217,15 @@ class HubPrefs(context: Context) {
         /** 只读能力总开关（布尔）。它不是 [HubConfig] 的一部分，见 [capabilitiesEnabled]。 */
         const val KEY_CAPABILITIES_ENABLED = "capabilities_enabled"
 
+        /** 写入类能力总开关（布尔），见 [writeCapabilitiesEnabled]。 */
+        const val KEY_WRITE_CAPABILITIES_ENABLED = "write_capabilities_enabled"
+
+        /** 被单独关闭的能力名集合（StringSet），见 [disabledCapabilities]。 */
+        const val KEY_DISABLED_CAPABILITIES = "disabled_capabilities"
+
+        /** 被逐条打开的写入类能力名集合（StringSet），见 [enabledWriteCapabilities]。 */
+        const val KEY_ENABLED_WRITE_CAPABILITIES = "enabled_write_capabilities"
+
         /**
          * 总开关的**安全默认**：首次安装（键不存在）时为 `false`，即"未授权"。
          *
@@ -170,7 +235,19 @@ class HubPrefs(context: Context) {
          */
         const val DEFAULT_CAPABILITIES_ENABLED: Boolean = false
 
+        /**
+         * 写入类能力的**安全默认**：关。用户必须单独同意"可以改数据"，
+         * 并且写入类工具还要逐个打开（见 [HubPrefs.isCapabilityToolEnabled] 的注释）。
+         */
+        const val DEFAULT_WRITE_CAPABILITIES_ENABLED: Boolean = false
+
         /** [load] 时一律跳过的键：凭据与所有非 [HubConfig] 的开关。 */
-        val NON_CONFIG_KEYS: Set<String> = SECRET_KEYS + KEY_CAPABILITIES_ENABLED
+        val NON_CONFIG_KEYS: Set<String> =
+            SECRET_KEYS + setOf(
+                KEY_CAPABILITIES_ENABLED,
+                KEY_WRITE_CAPABILITIES_ENABLED,
+                KEY_DISABLED_CAPABILITIES,
+                KEY_ENABLED_WRITE_CAPABILITIES,
+            )
     }
 }

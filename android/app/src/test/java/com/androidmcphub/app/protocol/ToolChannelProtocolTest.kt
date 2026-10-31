@@ -186,7 +186,15 @@ class ToolChannelProtocolTest {
         // 与 worker/src/phone/messages.ts 的 TOOL_RESULT_ERROR_CODES 逐项相同。
         // 多一个或少一个都意味着两侧对"失败"的词汇表开始分叉。
         assertEquals(
-            setOf("unsupported_tool", "invalid_arguments", "tool_failed", "tool_unavailable", "not_permitted"),
+            setOf(
+                "unsupported_tool",
+                "invalid_arguments",
+                "tool_failed",
+                "tool_unavailable",
+                "not_permitted",
+                "permission_denied",
+                "confirmation_required",
+            ),
             ToolResultErrorCode.ALL,
         )
     }

@@ -37,9 +37,44 @@ class BuiltInCapabilitiesTest {
     )
 
     @Test
-    fun `注册清单就是三个内置工具（有序）`() {
+    fun `注册清单是完整且有序的内置工具集合`() {
+        // 这份清单与服务端 worker/src/mcp/tools.ts 的 TOOL_REGISTRY 必须逐字对应。
+        // 少一个 = 界面/协议说没有这个工具；多一个 = 执行层愿意执行一个服务端不认识的工具。
         assertEquals(
-            listOf("battery_get_status", "device_get_network", "device_get_storage"),
+            listOf(
+                "alarm_create",
+                "alarm_open_list",
+                "battery_get_status",
+                "calendar_create_event",
+                "calendar_delete_event",
+                "calendar_list_calendars",
+                "calendar_list_events",
+                "calendar_update_event",
+                "device_get_network",
+                "device_get_status",
+                "device_get_storage",
+                "device_get_usage_stats",
+                "device_open_app",
+                "device_open_settings",
+                "device_post_notification",
+                "device_set_flashlight",
+                "device_set_volume",
+                "memo_create",
+                "memo_delete",
+                "memo_get",
+                "memo_list",
+                "memo_update",
+                "reminder_complete",
+                "reminder_create",
+                "reminder_delete",
+                "reminder_list",
+                "reminder_update",
+                "todo_complete",
+                "todo_create",
+                "todo_delete",
+                "todo_list",
+                "todo_update",
+            ),
             BuiltInCapabilities.names,
         )
         assertEquals(
@@ -70,7 +105,10 @@ class BuiltInCapabilitiesTest {
         val dispatcher = CapabilityDispatcher(BuiltInCapabilities.create(sources))
 
         assertEquals(BuiltInCapabilities.names, dispatcher.names())
-        assertEquals(BuiltInCapabilities.metadata, dispatcher.catalog())
+        assertEquals(
+            BuiltInCapabilities.metadata.sortedBy { it.name },
+            dispatcher.catalog(),
+        )
     }
 
     @Test
@@ -99,29 +137,59 @@ class BuiltInCapabilitiesTest {
     }
 
     @Test
-    fun `每个内置能力都是只读、零参数`() {
+    fun `每条元数据都自洽`() {
+        val names = BuiltInCapabilities.metadata.map { it.name }
+        assertEquals("工具名不能重复", names.size, names.toSet().size)
         BuiltInCapabilities.metadata.forEach { metadata ->
-            assertTrue("${metadata.name} 必须是只读", metadata.readOnly)
-            assertTrue("${metadata.name} 不该有参数", metadata.arguments.isEmpty())
             assertTrue("${metadata.name} 说明不能为空", metadata.description.isNotBlank())
             assertTrue("${metadata.name} 显示名不能为空", metadata.displayName.isNotBlank())
+            if (metadata.destructive) {
+                assertFalse("${metadata.name} 是删除类，不能同时被标成只读", metadata.readOnly)
+            }
+            if (metadata.requiresRuntimePermission) {
+                assertTrue(
+                    "${metadata.name} 要求运行时权限，就必须声明至少一个权限",
+                    metadata.declaredPermissions.isNotEmpty(),
+                )
+                assertTrue(
+                    "${metadata.name} 要求运行时权限，就必须告诉用户去哪开",
+                    !metadata.permissionHint.isNullOrBlank(),
+                )
+            }
         }
     }
 
     @Test
-    fun `需要用户当场批准的运行时权限一个都没有`() {
-        // 本轮新增的两个能力都是普通权限或零权限：工具页不该出现"需要授权"的灰条目。
-        BuiltInCapabilities.metadata.forEach { metadata ->
-            assertFalse(metadata.name, metadata.requiresRuntimePermission)
-        }
+    fun `运行时权限只出现在确实需要它的工具上`() {
+        assertEquals(
+            setOf(
+                "calendar_create_event",
+                "calendar_delete_event",
+                "calendar_list_calendars",
+                "calendar_list_events",
+                "calendar_update_event",
+                "device_get_usage_stats",
+                "device_post_notification",
+                "device_set_flashlight",
+                "reminder_create",
+            ),
+            BuiltInCapabilities.metadata
+                .filter { it.requiresRuntimePermission }
+                .map { it.name }
+                .toSet(),
+        )
     }
 
     @Test
     fun `声明的权限都是完整权限名`() {
+        val namespaces = listOf("android.permission.", "com.android.alarm.permission.")
         BuiltInCapabilities.metadata
             .flatMap { it.declaredPermissions }
             .forEach { permission ->
-                assertTrue("权限名看起来不完整：$permission", permission.startsWith("android.permission."))
+                assertTrue(
+                    "权限名看起来不完整：$permission",
+                    namespaces.any { permission.startsWith(it) },
+                )
             }
     }
 }
