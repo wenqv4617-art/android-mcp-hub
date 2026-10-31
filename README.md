@@ -213,6 +213,11 @@ https://<your-worker>.workers.dev/mcp
 - **不允许任意 URL**：上游必须逐个加入 `GATEWAY_ALLOWED_URLS`，这是安全边界而非缺陷。
 - **没有 LICENSE 文件**：仓库尚未附开源许可证，对外发布前需由仓库所有者选定；
   第三方依赖的许可证情况见 [docs/OPEN_SOURCE_AUDIT.md](docs/OPEN_SOURCE_AUDIT.md)。
+- **Android 后台保活受系统约束（V1.6.1 已尽量处理，但不能保证永久在线）**：应用使用前台服务 +
+  通知 + 部分唤醒锁 + 连接意图落盘 + `START_STICKY` 重建 + 断线/换网自动重连；用户在系统设置里
+  强行停止应用后，Android 不允许任何应用自愈，只能重新打开 App。ColorOS 等 OEM 省电策略
+  仍可能冻结后台进程，诊断页提供电池策略说明与跳转入口。详见
+  [android/README-ANDROID.md](android/README-ANDROID.md) §2.5。
 
 ---
 

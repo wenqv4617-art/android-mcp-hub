@@ -2,6 +2,7 @@ package com.androidmcphub.app.net
 
 import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.core.HubConfig
+import com.androidmcphub.app.core.LinkEvent
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.core.hostOf
@@ -47,6 +48,8 @@ class PhoneLinkClient(
     private val log: (LogLevel, String) -> Unit = { _, _ -> },
     private val onStateChanged: (LinkState) -> Unit = {},
     private val onPing: (PingOutcome) -> Unit = {},
+    private val onEvent: (LinkEvent) -> Unit = {},
+    private val onHeartbeatAck: (Long) -> Unit = {},
     private val random: Random = Random.Default,
     private val clock: () -> Long = System::currentTimeMillis,
     private val httpClient: OkHttpClient = defaultHttpClient(),
@@ -82,6 +85,8 @@ class PhoneLinkClient(
             }
             onPing(outcome)
         }
+        l.onEvent = { event -> onEvent(event) }
+        l.onHeartbeatAck = { atMs -> onHeartbeatAck(atMs) }
         // 聚合命令的结果从工作线程回来：**不在这里碰 socket**，而是投回本类的
         // 单线程调度器，让"发帧"与其它动作（心跳、重连）排在同一条时间线上。
         l.onToolResultReady = { outcome ->
@@ -130,6 +135,9 @@ class PhoneLinkClient(
     /** 最近一次收到服务端任何帧的时刻，供服务超时看门狗判断会话是否已经僵死。 */
     val lastServerFrameAtMs: Long get() = link.lastServerFrameAtMs
 
+    /** 最近一次收到 heartbeat_ack 的时刻；0 表示本进程尚未收到过。 */
+    val lastHeartbeatAckAtMs: Long get() = link.lastHeartbeatAckAtMs
+
     /** 用户点「连接」。 */
     fun start() {
         val cfg = configProvider()
@@ -162,6 +170,20 @@ class PhoneLinkClient(
     /** 网络恢复（由前台服务注册的 ConnectivityManager 回调驱动）。 */
     fun onNetworkAvailable() {
         execute(link.onNetworkAvailable())
+    }
+
+    /** 默认网络断开：主动判死当前连接，等网络恢复后立即重连。 */
+    fun onNetworkLost() {
+        execute(link.onNetworkLost())
+    }
+
+    /**
+     * 前台服务看门狗：长时间没有任何服务端帧时强制重连。
+     *
+     * **不停止服务** —— 后台断网/系统冻结之后，用户仍然需要自动恢复的机会。
+     */
+    fun onWatchdogTimeout(silentMs: Long) {
+        execute(link.onWatchdogTimeout(silentMs))
     }
 
     /** 服务销毁时调用。 */

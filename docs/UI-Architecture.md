@@ -105,12 +105,13 @@ PhoneLinkService.LinkBus (StateFlow)          protocol/PhoneLink.kt LinkState
         │                                      AuthFailed/Revoked/Error）
         ▼
 ui/HubViewModel.kt  ── 原样转发 state/logs/lastPing/lastError/serviceRunning
+        │                + events/diagnostics/batteryUnrestricted（V1.6.1）
         │                + draft/tokenVisible/capabilitiesEnabled/message
         ▼
 ui/model/LinkStatusView.kt::toStatusView(serviceRunning)   ← 唯一的状态→文案/色调映射
         ▼
 ui/home/HomeCards.kt、ui/home/ConnectionDetailScreen.kt、
-ui/settings/DiagnosticsScreen.kt                           ← 只消费 LinkStatusView
+ui/settings/DiagnosticsScreen.kt                           ← LinkStatusView + 诊断统计/事件（V1.6.1）
 ```
 
 - `LinkStatusView(title, detail, tone: StatusTone, generation, retryAtMs, attempt)` 的映射

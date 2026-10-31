@@ -1,6 +1,8 @@
 package com.androidmcphub.app.net
 
 import com.androidmcphub.app.core.HubConfig
+import com.androidmcphub.app.core.LinkEvent
+import com.androidmcphub.app.core.LinkEventKind
 import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.protocol.LinkState
 import okhttp3.Response
@@ -63,6 +65,8 @@ class PhoneLinkReliabilityTest {
     private val conns = CopyOnWriteArrayList<Conn>()
     private val states = CopyOnWriteArrayList<LinkState>()
     private val logs = CopyOnWriteArrayList<String>()
+    private val events = CopyOnWriteArrayList<LinkEvent>()
+    private val heartbeatAcks = CopyOnWriteArrayList<Long>()
 
     /** 给服务端用的"持续发帧"定时器，模拟一条活着的连接。 */
     private val timers: ScheduledExecutorService = Executors.newScheduledThreadPool(2) { r ->
@@ -159,6 +163,8 @@ class PhoneLinkReliabilityTest {
             androidSdk = 35,
             log = { level, text -> logs += "$level $text" },
             onStateChanged = { states += it },
+            onEvent = { events += it },
+            onHeartbeatAck = { heartbeatAcks += it },
         )
     }
 
@@ -389,6 +395,111 @@ class PhoneLinkReliabilityTest {
             "新连接建立之后状态不得再变化（旧连接的迟到回调必须被丢弃）：$tail",
             tail.isEmpty(),
         )
+    }
+
+    // ---- V1.6.1：网络断开恢复与看门狗 --------------------------------------
+
+    @Test
+    fun `V161 默认网络断开后主动判死连接，网络恢复时立即重连`() {
+        enqueueUpgrade {
+            it.send(welcomeJson(1))
+            keepAlive(it)
+        }
+        enqueueUpgrade {
+            it.send(welcomeJson(2))
+            keepAlive(it)
+        }
+        server.start()
+        // 退避故意给到 5s：证明"网络恢复立即连回"是 onNetworkAvailable 驱动的，
+        // 不是刚好等到定时器到点。
+        config = configWith(reconnectDelayMs = 5_000L)
+        startClient()
+
+        client!!.start()
+        assertTrue("首条连接应当建立", conns[0].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(
+            "应当先进入已连接（代次 1）",
+            awaitState { it is LinkState.Connected && it.generation == 1L },
+        )
+
+        client!!.onNetworkLost()
+
+        assertTrue("网络断开必须立即进入重连等待：$states", awaitState { it is LinkState.Reconnecting })
+        assertTrue("被判死的旧连接必须被主动关掉", waitUntil(3_000) { conns[0].closed })
+
+        client!!.onNetworkAvailable()
+
+        assertTrue("网络恢复必须立即连回，而不是干等退避", conns[1].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(
+            "重连后应当进入已连接（代次 2）",
+            awaitState { it is LinkState.Connected && it.generation == 2L },
+        )
+        assertEquals("只允许两条连接：原来的 + 重连的", 2, server.requestCount)
+        assertTrue(
+            "事件里必须留下网络变化证据：${events.map { it.kind }}",
+            events.any { it.kind == LinkEventKind.NETWORK_CHANGED },
+        )
+    }
+
+    @Test
+    fun `V161 看门狗超时只强制重连，不得把连接当成用户断开`() {
+        // 第 1 条：握手成功、发完 welcome 就沉默，但 TCP 一直开着。
+        enqueueUpgrade { it.send(welcomeJson(1)) }
+        // 第 2 条：正常说话，证明重连后的连接是活的。
+        enqueueUpgrade {
+            it.send(welcomeJson(2))
+            keepAlive(it)
+        }
+        server.start()
+        // 心跳/静默阈值保持 30s/10s：确保这次重连只能由看门狗触发，
+        // 而不是被 onTick 的心跳超时抢先触发。
+        config = configWith(reconnectDelayMs = 300L)
+        startClient()
+
+        client!!.start()
+        assertTrue(conns[0].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(awaitState { it is LinkState.Connected && it.generation == 1L })
+
+        client!!.onWatchdogTimeout(600_000L)
+
+        assertTrue(
+            "看门狗必须强制重连：$states",
+            awaitState(timeoutMs = 15_000L) { it is LinkState.Connected && it.generation == 2L },
+        )
+        assertTrue(
+            "事件里必须留下心跳超时证据：${events.map { it.kind }}",
+            events.any { it.kind == LinkEventKind.HEARTBEAT_TIMEOUT },
+        )
+        assertFalse(
+            "看门狗不是用户断开，不得记录 USER_DISCONNECTED",
+            events.any { it.kind == LinkEventKind.USER_DISCONNECTED },
+        )
+        assertTrue(
+            "看门狗不得把连接拖回 Idle（旧实现会在这里停掉整个服务）：$states",
+            states.none { it is LinkState.Idle },
+        )
+        assertEquals("只允许两条连接：原来的 + 重连的", 2, server.requestCount)
+    }
+
+    @Test
+    fun `V161 心跳成功会回传时间戳供诊断页展示`() {
+        enqueueUpgrade { it.send(welcomeJson(1)) }
+        server.start()
+        config = configWith()
+        startClient()
+
+        client!!.start()
+        assertTrue(conns[0].opened.await(10, TimeUnit.SECONDS))
+        assertTrue(awaitState { it is LinkState.Connected })
+        conns[0].socket!!.send(
+            """{"type":"heartbeat_ack","server_time":${System.currentTimeMillis()}}""",
+        )
+
+        assertTrue(
+            "收到 heartbeat_ack 后必须刷新最近心跳时间：$heartbeatAcks",
+            waitUntil(5_000) { heartbeatAcks.isNotEmpty() },
+        )
+        assertTrue("最近心跳时间必须可读", client!!.lastHeartbeatAckAtMs > 0L)
     }
 
     @Test

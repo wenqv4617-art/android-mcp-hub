@@ -133,18 +133,23 @@ e: java.nio.file.InvalidPathException: Malformed input or input contains unmappa
 
 ## 2. 权限与前台服务
 
-### 2.1 只申请了 5 个权限
+### 2.1 只申请了 6 个权限
 
 | 权限 | 用途 |
 | --- | --- |
 | `INTERNET` | 建立 WebSocket 连接 |
-| `ACCESS_NETWORK_STATE` | 用 `registerDefaultNetworkCallback()` 感知网络恢复，立刻重连 |
+| `ACCESS_NETWORK_STATE` | 用 `registerDefaultNetworkCallback()` 感知断网/换网，立刻重连 |
 | `POST_NOTIFICATIONS` | Android 13+ 显示前台服务通知（**用户拒绝也照常连接**，只是看不到通知） |
 | `FOREGROUND_SERVICE` | 前台服务基础权限 |
 | `FOREGROUND_SERVICE_SPECIAL_USE` | 下面的 `specialUse` 类型 |
+| `WAKE_LOCK` | V1.6.1 新增：持有 **partial** 唤醒锁，让 30 秒心跳在熄屏/Doze 下仍能按时发出 |
+
+`WAKE_LOCK` 只用于**维持用户已经发起的那条连接**：锁在服务进入「连接中/重连中/已连接」时获取，
+在用户断开、终态（认证失败/凭据撤销/配置非法）或服务销毁时释放。它不会唤醒 CPU 去执行任何
+后台任务，也没有常驻定时器；应用的其它部分拿不到这把锁。
 
 没有存储、位置、相机、通讯录、短信、电话权限，没有 `QUERY_ALL_PACKAGES`，
-没有 `RECEIVE_BOOT_COMPLETED`、`WAKE_LOCK`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
+没有 `RECEIVE_BOOT_COMPLETED`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
 
 ### 2.2 为什么前台服务类型是 `specialUse`
 
@@ -179,8 +184,14 @@ e: java.nio.file.InvalidPathException: Malformed input or input contains unmappa
 
 ### 2.4 启动与停止
 
-**启动**：只有一种方式 —— 用户在前台点界面上的「连接」按钮，
+**启动**：用户在前台点界面上的「连接」按钮，
 由 `MainActivity` → `HubViewModel.connect()` → `PhoneLinkService.connect(context)` 触发 `startForegroundService`。
+`connect()` 会先把「用户希望保持连接」写进 `SharedPreferences`（`link_desired`），
+这个意图只由两个用户动作改写：点「连接」置 true，点「断开」置 false。
+
+> V1.6.1 起，系统**重建**服务（`onStartCommand` 收到 null intent）时会按这个意图恢复连接；
+> 这不算"应用自己偷偷启动"——服务重建是系统对**用户此前主动建立的**前台服务的恢复，
+> 而且用户随时可以点「断开」永久取消。详见 2.5。
 
 **进入前台失败就绝不建连**（Gate 0.1 审计 R3）。顺序被 [ConnectGate.kt](app/src/main/java/com/androidmcphub/app/service/ConnectGate.kt)
 的 `ConnectStartupSequence` 钉死：
@@ -198,10 +209,12 @@ enterForeground()  ──Started──▶  startLink()
   否则会变成"每退避一次就失败一次"的空转循环。
 
 - **不做**开机自启（没有 `RECEIVE_BOOT_COMPLETED`，也没有 `BootReceiver`）。
-- **不会**被系统在后台悄悄拉起：服务在 `onStartCommand` 里返回 `START_NOT_STICKY`，
-  进程被杀掉后系统不会重建它。
 - **不申请**电池优化白名单（没有 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）：
-  想让连接长时间保持，就把 App 放在最近任务里别划掉，这是用户可见、可撤销的选择。
+  诊断页会显示当前是否已被排除在电池优化之外，并提供跳转到系统设置的按钮，
+  但**不弹系统对话框逼用户改**。用户不改也能用，只是被 OEM 省电策略冻结的概率更高。
+- 服务在 `onStartCommand` 里的返回值由 [ServiceStartPolicy.kt](app/src/main/java/com/androidmcphub/app/service/ServiceStartPolicy.kt) 决定：
+  **用户希望连接时返回 `START_STICKY`**，否则 `START_NOT_STICKY`。V1.6.1 之前这里恒为
+  `START_NOT_STICKY`，进程被回收后系统不会重建服务，界面又不在前台，于是只能等用户重新打开应用。
 
 **停止**：用户点界面上的「断开」，或者下拉通知栏点通知上的「断开」动作按钮
 （`PendingIntent` 打到服务的 `ACTION_DISCONNECT`）：
@@ -210,13 +223,51 @@ enterForeground()  ──Started──▶  startLink()
 handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) + stopSelf()
 ```
 
-用户断开后 `PhoneLink` 会置位 `userStopped`，此后**任何**意外断开事件都不会再触发重连（单测有覆盖）。
+用户断开后 `PhoneLink` 会置位 `userStopped`，此后**任何**意外断开事件都不会再触发重连（单测有覆盖），
+`link_desired` 同时被置为 false，系统重建服务时也不会再连。
 
-此外还有两条自动停止的兜底：
+此外还有两条自动处理：
 
-- **会话看门狗**：连续 5 分钟没有收到任何服务端帧，就记日志、把状态置为「出错」并停止服务
-  （避免一个已经死掉的通道长期占着前台服务）。
-- **心跳超时**：连续 2 个心跳周期没收到任何服务端帧，判定链路已死并进入退避重连。
+- **心跳超时**：连续 `max(2 × 心跳周期, ping 超时) = 60 秒`（默认值）没收到任何服务端帧，
+  判定链路已死并进入退避重连。服务保持运行，通知不消失。
+- **会话看门狗**：同为静默判定，但时钟从服务启动算起，覆盖"建连卡住"的场景；
+  V1.6.1 起它也只强制重建 WebSocket，不再停服。
+
+### 2.5 V1.6.1：后台保活的实现与边界
+
+可靠性修复只改「连接的持有与恢复」，不新增任何原生工具。
+
+**连接的所有权**：WebSocket 由 [PhoneLinkService](app/src/main/java/com/androidmcphub/app/service/PhoneLinkService.kt)
+创建并持有，界面只读 `LinkBus` 的 `StateFlow`。`MainActivity` 不重写 `onPause/onStop/onDestroy`，
+`HubViewModel` 没有 `onCleared`，界面上没有任何"退到后台就断开"的路径 ——
+`ConnectionLifecycleOwnershipTest` 直接扫源码把这条约束钉死。
+
+**系统回收后的恢复**（三道，从内到外）：
+
+| 层 | 触发 | 行为 |
+| --- | --- | --- |
+| 服务自身 | `START_STICKY` 重建，`onStartCommand` 收到 null intent | `link_desired=true` 时重新建连；false 时安静退出 |
+| 界面 | 用户重新打开 App，`HubViewModel.init` | `LinkRestorePolicy` 判定（想连 + 服务没跑 + 配置合法 + 令牌可读）才投递 `CONNECT` |
+| 链路 | 心跳超时 / 看门狗 / 网络事件 | 见第 4 节，服务**保持运行**，只重建 WebSocket |
+
+**唤醒锁**：服务在「连接中/重连中/已连接」期间持有 `PARTIAL_WAKE_LOCK`
+（tag `AndroidMcpHub::PhoneLink`，非引用计数），保证心跳调度不会因熄屏被无限期挂起；
+进入终态、用户断开、`onDestroy` 时释放。代码里显式 `@SuppressLint("WakelockTimeout")`：
+这把锁的生命周期绑定的是"用户可见的连接"，不是某一次具体工作，固定超时反而会在用户仍希望在线时悄悄失效。
+
+**看门狗的语义改了**：V1.6.0 及以前，连续 5 分钟没有服务端帧会**停掉整个前台服务**并进入「出错」。
+这种"自证死亡"在后台场景下正好是最坏的选择——一次 Android 的调度抖动就能让连接永久下线。
+V1.6.1 起看门狗只**强制重建 WebSocket**，服务、通知与用户意图全部保留；真正的终止条件只剩
+用户断开与终态错误。
+
+**系统边界（必须如实说明）**：
+
+- 用户在系统设置里「强行停止」应用，或在厂商任务管理器里「结束」它，Android 不允许任何应用自愈。
+  此时只能等用户重新打开 App（界面恢复）或系统重建服务，**无法保证永久在线**。
+- ColorOS / Android 16 的省电策略可能冻结后台进程。V1.6.1 能做的都做了：前台服务 + 通知 +
+  部分唤醒锁 + 意图落盘 + 重建；剩下的部分需要用户在「电池 → 应用 → 无限制」里放行，
+  诊断页提供了跳转入口与说明。
+- Doze 深度休眠期间数据连接仍可能被短暂切断，此时心跳超时会触发退避重连；网络恢复后立即重连并重置退避。
 
 ---
 
@@ -230,7 +281,7 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 | --- | --- |
 | `Authorization` | `Bearer <用户在界面里填的设备令牌>` |
 | `X-Device-Id` | `<用户在界面里填的设备 ID>` |
-| `X-Client-Version` | `android-mcp-hub/0.1.0` |
+| `X-Client-Version` | `android-mcp-hub/<versionName>`（V1.6.1 为 `android-mcp-hub/1.6.1`） |
 
 服务端 → 手机：
 
@@ -246,7 +297,7 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 手机 → 服务端：
 
 ```json
-{"type":"hello","device_id":"…","protocol_version":"phone-link-v1","app_version":"0.1.0","android_sdk":35}
+{"type":"hello","device_id":"…","protocol_version":"phone-link-v1","app_version":"1.6.1","android_sdk":36}
 {"type":"phone_pong","request_id":"<与 ping 逐字符相同>","timestamp":1760000000155}
 {"type":"heartbeat","timestamp":1760000000500}
 ```
@@ -274,8 +325,15 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 - `401` / `403` → 判定**认证失败**，不自动重连（令牌错了重试没意义），等用户改令牌后手动重连。
 - 服务器地址无效 / 令牌为空 / 配置非法 → 直接进「出错」状态，也不重连。
 - 网络恢复（`onAvailable`）→ 如果正处于「用户已连接但没连上」，立刻重连并**重置退避**。
+- 网络断开（`onLost`）→ V1.6.1 新增：立刻关掉旧 socket 并进入退避，**同一段断网只安排一次重连**
+  （`onLost` 可能连续来多次，重复回调不会叠加重连任务）。
+- 网络切换（Wi-Fi ↔ 蜂窝 ↔ VPN）→ 走 `onAvailable` 的同一条路径：旧连接不可能在旧网络上自愈，
+  所以直接重建，而不是等心跳超时。
 - 建连看门狗：发出 Open 后 20 秒内既没握上手也没报错，就当成失败进入退避（避免挂在「连接中」不动）。
-- 所有状态变化写进环形日志，最多 200 条，最新的在最上面。
+- 看门狗（静默超时）→ 只强制重建 WebSocket，不停服、不置终态（见 2.5）。
+- **代次隔离**：每次重建都有一个自增的 `reconnectToken` 与连接代次，旧连接的迟到回调
+  （onFailure/onClosed/onMessage）会被丢弃，不会覆盖新连接的状态，也不会在重连窗口里多开一条 WSS。
+- 所有状态变化写进环形日志，最多 200 条，最新的在最上面；另有 50 条结构化连接事件供诊断页展示。
 
 ---
 
@@ -323,7 +381,7 @@ handleDisconnect() → client.stop() → stopForeground(STOP_FOREGROUND_REMOVE) 
 | **工具** `ui/tools/ToolsScreen.kt` | 本机能力目录（搜索 + 分类筛选 + 可用状态），点击进工具详情；第三方 / 本地 HTTP MCP 来源显示为「未开放」占位 |
 | **服务** `ui/services/ServicesScreen.kt` | 第三方 MCP 服务的容器与空状态（「尚未添加 MCP 服务」）；**不**放 phone-link / Cloudflare 的连接诊断 |
 | **设置** `ui/settings/SettingsScreen.kt` | 连接配置（服务器 URL、设备 ID、设备令牌：密码框 + 显示/隐藏 + 清除）、超时与重连（7 个数值）、能力总开关、保存配置、诊断入口 |
-| **连接诊断** `ui/settings/DiagnosticsScreen.kt` | 当前状态、最近一次 ping 明细（`request_id` 等宽字体、**长按复制**；RTT / 单向延迟 / 服务端时间戳 / 本机收到时刻）、最近一次错误（可清除）、连接日志（最多 200 条，可清空） |
+| **连接诊断** `ui/settings/DiagnosticsScreen.kt` | 当前状态、当前网络类型、最近一次 ping 明细（`request_id` 等宽字体、**长按复制**；RTT / 单向延迟 / 服务端时间戳 / 本机收到时刻）、最近一次错误（可清除）、**连接时序**（最近成功连接 / 最近心跳确认 / 最近断开时间与原因 / 重连次数 / 下次重试）、**后台保活**（电池优化状态 + 跳转按钮 + 系统限制说明）、**最近连接事件**（最多 50 条，可按类型配色，可清空）、连接日志（最多 200 条，可清空） |
 
 三处需要留意的既有设计：
 * 「最近一次错误」独立于当前状态 —— 状态会被断开/服务销毁复位成「已断开」，
@@ -390,6 +448,8 @@ app/src/main/java/com/androidmcphub/app/
 │   ├── DeviceTokenStore.kt      # 令牌三态读取 / 编解码 / 失败不吞（纯逻辑）
 │   ├── Backoff.kt               # 指数退避 + 抖动（纯函数，注入 Random）
 │   ├── HubLog.kt                # 200 条环形日志
+│   ├── LinkEvent.kt             # 结构化连接事件（connected / disconnected / …，最多 50 条）
+│   ├── NetworkKind.kt           # 网络类型映射（VPN > 以太网 > Wi-Fi > 蜂窝）
 │   └── WsUrl.kt                 # ws/wss → http/https 规范化
 ├── protocol/
 │   ├── PhoneLinkProtocol.kt     # 帧解析与编码（org.json）
@@ -397,8 +457,10 @@ app/src/main/java/com/androidmcphub/app/
 │   └── PhoneLink.kt             # 连接状态机（纯逻辑，输出 LinkAction 让网络层执行）
 ├── net/PhoneLinkClient.kt       # OkHttp WebSocket 封装，把 LinkAction 落到真实 socket
 ├── service/
-│   ├── PhoneLinkService.kt      # 前台服务 + 通知 + 网络回调 + 看门狗（LinkBus 做进程内状态总线）
-│   └── ConnectGate.kt           # 「进入前台成功才允许建连」的顺序约束（纯逻辑）
+│   ├── PhoneLinkService.kt      # 前台服务 + 通知 + 网络回调 + 看门狗 + 唤醒锁（LinkBus 做进程内状态总线）
+│   ├── ConnectGate.kt           # 「进入前台成功才允许建连」的顺序约束（纯逻辑）
+│   ├── ServiceStartPolicy.kt    # onStartCommand 的意图判定与 START_STICKY 返回值（纯逻辑）
+│   └── LinkRestorePolicy.kt     # 打开应用时是否恢复上次连接的判定（纯逻辑）
 ├── hub/
 │   ├── HubApp.kt                # 唯一的 Composable 入口：Scaffold + 底部导航 + NavHost + Snackbar + 通知权限
 │   └── Destinations.kt          # 路由常量（四个 tab + 三个子页），只有路由定义
@@ -442,9 +504,23 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 - `SocketFailureTest`（**9 条，Gate 0.3**）：`SocketFailure` 的类别闭集恰好 10 个且值形状固定、常见异常类名映射到预期类别、9 种垃圾输入（含完整 URL、令牌形状的串）**一律落在闭集里且不原样返回**、每个类别都有非空且两两不同的中文描述、`normalize()` 只放行闭集、500 次随机 fuzz 不抛。
 - `LogRedactionTest`（**13 条，Gate 0.3**）：9 条**行为**测试（把带假令牌的地址真的喂进 `PhoneLink`，断言日志里只有主机名、令牌的**每 8 字符片段**都不出现、异常原文只变成固定类别、错误帧的 `message` 与未知帧的 `type` 都不记）+ 4 条**静态扫描**（源码里没有 `printStackTrace`/`stackTraceToString`；没有 `<异常变量>.message` 拼字符串；日志调用窗口里不出现 `${config.serverUrl}`/`${url}`/`${frame.*}`/`${raw}`；所有 `SocketFailure.classify(` 都只传 `javaClass.simpleName`）。
 
+V1.6.1 新增（后台保活与断线重连）：
+
+- `ServiceStartPolicyTest`（纯 JVM）：`ACTION_CONNECT` / `ACTION_DISCONNECT` / 系统重建的 null intent，
+  分别对应「连」「断」「按意图决定」；返回值只在用户希望连接时是 `START_STICKY`。
+- `LinkRestorePolicyTest`（纯 JVM）：打开应用恢复连接的四个条件，每个"不恢复"分支对应一种恢复反而更糟的场景。
+- `LinkDesiredPrefsTest`（Robolectric）：意图默认 false、跨实例（模拟进程重建）存活、不混进 `HubConfig`。
+- `ConnectionLifecycleOwnershipTest`（源码扫描）：连接只在 `PhoneLinkService` 里创建；`MainActivity` 不重写
+  `onPause/onStop/onDestroy`、不调用 connect/disconnect；`HubViewModel` 没有 `onCleared`；
+  服务里同时存在 `ServiceStartPolicy`、`onWatchdogTimeout`、意图落盘与 `START_STICKY`。
+- `PhoneLinkTest` / `PhoneLinkReliabilityTest` 扩展：`onLost` 立即关旧连接且重复回调不叠加、
+  网络恢复立刻重连并重置退避、看门狗只重连不停服（断言无 `USER_DISCONNECTED`）、用户断开只发一次事件、
+  401 发 `authentication_failed` 且不重连、心跳确认时间戳、事件序列 `connected → disconnected → reconnecting → connected`。
+- `LinkBusTest` 扩展：事件环形上限 50 与顺序、诊断时间戳/原因/重连计数、心跳确认忽略 0、清空事件不动连接状态。
+
 合计 **171** 条（Gate 0 是 90、Gate 0.1 是 132、Gate 0.2 是 135、Gate 0.3 是 157）。
 
-> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（Gate 2.5，`--rerun` 强制重跑）：**28 个测试类、347 条用例、0 failures、0 errors、0 skipped**（命令见本节开头）。
+> 上面这份逐条说明写于 Gate 1，之后新增的用例（Gate 1.5 的可靠性用例、Gate 2 的 `BatteryCapabilityTest` / `CapabilityDispatcherTest` / `CapabilitySwitchDefaultTest` 与“能力总开关默认关闭”那条防回归、Gate 2 的 UI 用例、Gate 2.5 的 `NetworkCapabilityTest` / `StorageCapabilityTest` / `BuiltInCapabilitiesTest`）没有逐条展开。**当前实测**（V1.6.1）：**759 条用例、0 失败、7 跳过**（命令见本节开头）。
 
 > **为什么日志脱敏要同时有"行为测试"和"静态扫描"**：行为测试只能覆盖它跑到的那条路径，**覆盖不了"以后新加的代码"**；静态扫描反过来，只认形状、不认语义。两者合起来才挡得住"下次顺手又写了一条不脱敏的日志"。
 >
@@ -456,7 +532,8 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 
 **没被自动化覆盖的部分**（写在 TEST_REPORT 的 NOT RUN 里）：`AndroidSecretCipher` 的 Keystore 代码路径、
 `PrefsSecretStorage` 的 `commit()` 真实落盘、`HubPrefs` 的明文迁移、前台服务的真实生命周期、
-以及 UI 的 Compose 组合。这些都需要真机（或 Robolectric，本工程没引）。
+以及 UI 的 Compose 组合。这些都需要真机（V1.6.1 只为 `SharedPreferences` 引入了 Robolectric，
+不覆盖服务与 WebSocket 的真实系统行为）。
 
 ---
 
@@ -483,7 +560,7 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 | 8 | 拔掉服务端网线（不关闭进程） | 约 2 个心跳周期后判定链路已死并自动重连 | 真实半开连接 |
 | 9 | 长按「最近一次 ping」的 `request_id` | 复制成功（提示 + 剪贴板内容一致） | 系统剪贴板与长按手势 |
 | 10 | 手机重启 | **不会**自动启动服务、不会自动连接 | 没有 `RECEIVE_BOOT_COMPLETED`，需要真机确认「确实没起来」 |
-| 11 | 从最近任务里划掉 App | 服务停止、通知消失，不会出现幽灵连接（服务返回 `START_NOT_STICKY`） | 进程优先级与系统回收策略 |
+| 11 | 从最近任务里划掉 App | **服务与连接继续**，通知仍在（`stopWithTask=false` + `START_STICKY`）；这是 V1.6.1 的预期，不是幽灵连接 | 进程优先级与系统回收策略 |
 | 12 | 深色模式切换 | 界面文字与状态色仍可读，启动不白屏 | 系统主题切换 |
 | 13 | 屏幕旋转 | 状态、日志、输入框内容不丢（`ViewModel` 持有） | 系统配置变更 |
 | 14 | 令牌是否泄露 | `adb logcat` 里搜不到令牌；`adb shell run-as com.androidmcphub.app cat shared_prefs/hub_settings.xml` 里**只有 `device_token_v1` 的密文**（`v1.…`），**没有** `device_token` 明文键 | 需要抓真实文件与日志确认 |
@@ -491,8 +568,12 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
 | 14c | 旧版明文迁移（R4） | 先用 Gate 0 的 APK 存一个令牌，再用本版覆盖安装：首次读取应自动迁移（明文键消失、出现密文键），连接照常可用 | 需要两个版本先后安装 |
 | 14d | 前台服务启动失败（R3） | 用 `adb shell am start-foreground-service` 之外的路径很难造；可测：先按 Home 回到桌面再通过 `adb` 拉起 `ACTION_CONNECT`，观察是否出现「系统不允许在后台启动前台服务」且**没有**建立任何 WebSocket | 后台启动限制只在真机生效 |
 | 14e | Keystore 密钥失效（R4） | 在系统设置里改锁屏密码/清除凭据后回来连接，应显示「设备令牌无法解密」并让用户重填，而不是崩溃或拿空令牌重试 | Keystore 失效只在真机发生 |
-| 15 | 会话看门狗 | 服务端静默 5 分钟以上 → 服务自动停止并显示「会话超时」 | 需要长时间运行 |
+| 15 | 会话看门狗 | 服务端静默超过阈值 → **服务不停止**，自动重建 WebSocket；诊断页事件里出现 `heartbeat_timeout` | 需要长时间运行 |
 | 16 | 明文联调（可选） | 若用 `ws://` 直连本地服务端，需要先改 `network_security_config.xml`，确认改动只影响本地 | 网络安全配置只在真机生效 |
+| **17** | **后台保活（V1.6.1 核心验收）** | 点「连接」→ 按 Home / 切到别的应用 / 锁屏 10 分钟以上 → 用 ChatGPT 调 `phone_ping`、`battery_get_status`、`device_get_status`，全部成功，不再返回 `phone_offline` | 需要真实设备、真实 OEM 省电策略与第三方客户端 |
+| **18** | **ColorOS 电池策略** | 默认设置下先测一轮；若出现后台被冻结，按诊断页提示把电池策略改为「无限制」后再测，记录差异 | 只在 ColorOS/Android 16 真机上存在 |
+| **19** | **进程被杀后的恢复** | `adb shell am kill com.androidmcphub.app`（模拟后台回收）→ 系统重建服务后应自动重连；用户主动「强行停止」后则必须靠重新打开 App 恢复 | 进程回收与 `START_STICKY` 重建只在真机发生 |
+| **20** | **断网/换网自动恢复** | 飞行模式 30 秒再关闭、Wi-Fi ↔ 蜂窝切换 → 事件序列出现 `network_changed` → `disconnected` → `reconnecting` → `connected`，最终在线 | 需要真实网络事件 |
 
 ---
 
@@ -503,4 +584,6 @@ ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest
   证据（含"故意注入故障 → `BUILD FAILED in 1m 12s` → 恢复 → `BUILD SUCCESSFUL`"两段原始输出）在 `../test-reports/lint-gate.log`。
   当前树上还剩 **30 条 warning**（本轮没有逐条处理）。Gate 2 从 29 变 30，多出来的那一条是 **`CustomSplashScreen`**：lint 建议用 `androidx.core:core-splashscreen`（SplashScreen API）实现启动页，而不是自己写一个 Activity。这里**接受**这条 warning、不引依赖：该 API 只能显示"纯色底 + 图标"，而本轮的启动页是一张满幅海报（`ContentScale.Crop`），两者不是同一件事；系统启动屏那部分该配的已经配了（`values-v31/themes.xml` 的 `windowSplashScreenBackground`，见 §5.2）。**残余风险**：本仓库没有任何会自动跑的 CI，那个手动 Actions 工作流也只构建 APK、不跑 lint —— 所以将来有人把 `abortOnError` 改回 `false`，**不会有东西自动变红**（`../TEST_REPORT.md` 的 K12）。Manifest 类名这一类问题仍由 §1.0 的第 ② 层硬门禁独立把守。
 - 界面只做了单屏，没有历史图表、没有多设备管理（按任务要求，不做工具管理与跨设备控制）。
-- 服务被系统杀掉的极端情况下，只有用户重新点「连接」才会恢复 —— 这是刻意的取舍，不做任何后台自启。
+- **V1.6.1 更新**：服务被系统回收后，`START_STICKY` 会在用户此前点过「连接」的前提下重建并自动恢复；
+  用户主动「强行停止」或厂商任务管理器「结束」后，Android 不接受任何自愈，只能重新打开 App（界面会恢复连接）。
+  仍**不做**开机自启、不做定时唤醒、不申请电池优化白名单。

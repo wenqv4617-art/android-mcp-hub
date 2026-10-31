@@ -7,6 +7,8 @@ import com.androidmcphub.app.capability.CapabilityMetadata
 import com.androidmcphub.app.capability.CapabilityPolicy
 import com.androidmcphub.app.capability.CapabilityResult
 import com.androidmcphub.app.core.HubConfig
+import com.androidmcphub.app.core.LinkEvent
+import com.androidmcphub.app.core.LinkEventKind
 import com.androidmcphub.app.core.LogLevel
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -49,6 +51,8 @@ class PhoneLinkTest {
         val logs = mutableListOf<Pair<LogLevel, String>>()
         val states = mutableListOf<LinkState>()
         val pings = mutableListOf<PingOutcome>()
+        val events = mutableListOf<LinkEvent>()
+        val heartbeatAcks = mutableListOf<Long>()
 
         val link = PhoneLink(
             config = config,
@@ -61,7 +65,11 @@ class PhoneLinkTest {
         init {
             link.onStateChanged = { states += it }
             link.onPing = { pings += it }
+            link.onEvent = { events += it }
+            link.onHeartbeatAck = { heartbeatAcks += it }
         }
+
+        fun kinds(): List<LinkEventKind> = events.map { it.kind }
 
         fun welcomeFrame(
             generation: Long = 3L,
@@ -625,6 +633,143 @@ class PhoneLinkTest {
 
         assertEquals(emptyList<LinkAction>(), h.link.onNetworkAvailable())
         assertEquals(LinkState.Connected(3L), h.link.state)
+    }
+
+    // ---- V1.6.1：网络断开 / 看门狗 -------------------------------------------------
+
+    @Test
+    fun `V161 默认网络断开时判死当前连接并进入退避`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.onNetworkLost()
+
+        assertEquals(listOf(LinkAction.Close, LinkAction.ScheduleReconnect(1_000L)), actions)
+        assertEquals(1, (h.link.state as LinkState.Reconnecting).attempt)
+        assertEquals(
+            "网络断开必须留下 NETWORK_CHANGED 与 RECONNECTING 两条证据",
+            listOf(LinkEventKind.NETWORK_CHANGED, LinkEventKind.RECONNECTING),
+            h.kinds().takeLast(2),
+        )
+    }
+
+    @Test
+    fun `V161 退避等待期间重复收到网络断开不会叠加重连`() {
+        val h = Harness()
+        h.connect()
+        h.link.onNetworkLost()
+        val scheduled = h.link.state
+
+        val again = h.link.onNetworkLost()
+
+        assertEquals("已经安排过重连时不得再排一个定时器", emptyList<LinkAction>(), again)
+        assertEquals(scheduled, h.link.state)
+    }
+
+    @Test
+    fun `V161 网络恢复后立即重连并归零退避`() {
+        val h = Harness()
+        h.connect()
+        h.link.onNetworkLost()
+
+        val actions = h.link.onNetworkAvailable()
+
+        assertEquals(listOf(LinkAction.Close, LinkAction.Open), actions)
+        assertEquals(LinkState.Connecting, h.link.state)
+        // 退避计数归零：下一次失败仍然是第 1 次、1000ms
+        h.link.onSocketFailure("没有网络", null)
+        assertEquals(1, (h.link.state as LinkState.Reconnecting).attempt)
+    }
+
+    @Test
+    fun `V161 看门狗只强制重连，不把连接当成用户断开`() {
+        val h = Harness()
+        h.connect()
+
+        val actions = h.link.onWatchdogTimeout(300_000L)
+
+        assertFalse("看门狗绝不能置用户断开标记", h.link.userStopped)
+        assertTrue("看门狗之后必须进入重连", h.link.state is LinkState.Reconnecting)
+        assertTrue(actions.any { it is LinkAction.ScheduleReconnect })
+        assertTrue("必须留下心跳超时证据", LinkEventKind.HEARTBEAT_TIMEOUT in h.kinds())
+        assertFalse("看门狗不是用户断开", LinkEventKind.USER_DISCONNECTED in h.kinds())
+        assertTrue("日志必须说明服务没有被停掉", h.logTexts().contains("不停止服务"))
+    }
+
+    @Test
+    fun `V161 退避等待期间看门狗不打断既有重连节奏`() {
+        val h = Harness()
+        h.link.start()
+        h.link.onSocketFailure("没有网络", null)
+        val scheduled = h.link.state
+
+        val actions = h.link.onWatchdogTimeout(600_000L)
+
+        assertEquals("没有 socket 也没有在飞尝试时，看门狗必须什么都不做", emptyList<LinkAction>(), actions)
+        assertEquals("既有的重连节奏不得被改写", scheduled, h.link.state)
+    }
+
+    @Test
+    fun `V161 用户断开或终态下看门狗不复活连接`() {
+        val stopped = Harness()
+        stopped.connect()
+        stopped.link.stop()
+
+        assertEquals(emptyList<LinkAction>(), stopped.link.onWatchdogTimeout(600_000L))
+        assertEquals(emptyList<LinkAction>(), stopped.link.onNetworkLost())
+        assertEquals(LinkState.Idle, stopped.link.state)
+
+        val failed = Harness()
+        failed.link.start()
+        failed.link.onSocketFailure("connection_refused", 401)
+
+        assertEquals(LinkState.AuthFailed("HTTP 401"), failed.link.state)
+        assertEquals(emptyList<LinkAction>(), failed.link.onWatchdogTimeout(600_000L))
+        assertEquals(LinkState.AuthFailed("HTTP 401"), failed.link.state)
+    }
+
+    // ---- V1.6.1：结构化连接事件 ----------------------------------------------------
+
+    @Test
+    fun `V161 连接事件区分成功、断开、重连与用户断开`() {
+        val h = Harness()
+        h.connect()
+        h.link.onSocketClosed(1006, "网络重置")
+        h.now += 1_000L
+        h.link.onReconnectTimerFired()
+        h.link.onSocketOpened(androidSdk = 35)
+        h.link.onTextFrame(h.welcomeFrame(generation = 4L))
+
+        assertEquals(
+            listOf(
+                LinkEventKind.CONNECTED,
+                LinkEventKind.DISCONNECTED,
+                LinkEventKind.RECONNECTING,
+                LinkEventKind.CONNECTED,
+            ),
+            h.kinds(),
+        )
+
+        h.link.stop()
+        assertEquals("用户主动断开必须单独成一类", LinkEventKind.USER_DISCONNECTED, h.kinds().last())
+        assertEquals("重复 stop 不得重复记录", 1, h.kinds().count { it == LinkEventKind.USER_DISCONNECTED })
+    }
+
+    @Test
+    fun `V161 认证失败事件与心跳成功回调`() {
+        val h = Harness()
+        h.link.start()
+        h.link.onSocketFailure("http_401", 401)
+
+        assertEquals(LinkEventKind.AUTHENTICATION_FAILED, h.kinds().last())
+        assertTrue("事件细节里应当带 HTTP 状态", h.events.last().detail.contains("401"))
+
+        val ack = Harness()
+        ack.connect()
+        ack.link.onTextFrame("""{"type":"heartbeat_ack","server_time":${ack.now}}""")
+
+        assertEquals(listOf(ack.now), ack.heartbeatAcks)
+        assertEquals(ack.now, ack.link.lastHeartbeatAckAtMs)
     }
 
     // ---- 用户主动断开 -----------------------------------------------------

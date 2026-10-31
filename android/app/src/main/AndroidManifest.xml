@@ -3,7 +3,11 @@
   权限清单：每一条都对应一个**真实存在**的能力，没有"先声明再说"的权限。
 
   仍然没有：存储 / 位置 / 通讯录 / 短信 / 电话 / QUERY_ALL_PACKAGES /
-  RECEIVE_BOOT_COMPLETED / WAKE_LOCK / REQUEST_IGNORE_BATTERY_OPTIMIZATIONS。
+  RECEIVE_BOOT_COMPLETED / REQUEST_IGNORE_BATTERY_OPTIMIZATIONS。
+
+  V1.6.1 新增 WAKE_LOCK：只在前台服务持有连接期间拿一把 **partial** 唤醒锁，
+  让 1 秒心跳调度在息屏后不被 CPU 休眠拖住（否则服务端 90 秒收不到心跳就判离线）。
+  它不是常驻的：断开、认证失败、服务销毁都会释放；也不做开机自启。
 
   本批次新增的权限全部是**按需授权**：安装后默认没有运行时权限，
   用户在使用对应工具时才会看到系统授权弹窗（或需要到设置里手动开）：
@@ -26,6 +30,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 前台服务类型 specialUse（诚实申报，见 README-ANDROID.md） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!--
+      连接期间的部分唤醒锁：息屏/后台时保持心跳调度。
+      普通权限，安装即授予；只在服务持有连接时获取，见 PhoneLinkService.acquireWakeLock。
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- 使用情况访问：特殊权限，不能弹窗申请，只能引导用户到系统设置 -->
     <uses-permission

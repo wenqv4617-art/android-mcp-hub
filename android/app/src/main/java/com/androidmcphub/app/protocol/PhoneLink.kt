@@ -3,6 +3,8 @@ package com.androidmcphub.app.protocol
 import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.capability.ToolDispatchOutcome
 import com.androidmcphub.app.core.HubConfig
+import com.androidmcphub.app.core.LinkEvent
+import com.androidmcphub.app.core.LinkEventKind
 import com.androidmcphub.app.core.LogLevel
 import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.backoffDelayMs
@@ -117,9 +119,26 @@ class PhoneLink(
     var connectionGeneration: Long = 0L
         private set
 
+    /** 最近一次收到 heartbeat_ack 的时刻；0 表示本次进程里还没收到过。 */
+    @Volatile
+    var lastHeartbeatAckAtMs: Long = 0L
+        private set
+
     var onStateChanged: ((LinkState) -> Unit)? = null
 
     var onPing: ((PingOutcome) -> Unit)? = null
+
+    /**
+     * 结构化的连接事件回调（诊断页消费）。
+     *
+     * 与 [onStateChanged] 的区别：状态只描述"现在是什么"，事件描述"刚刚发生了什么"。
+     * 例如心跳超时之后状态同样是 `Reconnecting`，但只有事件能把它和"服务端主动关闭"
+     * 区分开。回调在持有内部锁时同步触发，实现必须非阻塞且不得回头调用本类。
+     */
+    var onEvent: ((LinkEvent) -> Unit)? = null
+
+    /** 收到 heartbeat_ack 时回调（诊断页的"最近心跳成功"）。 */
+    var onHeartbeatAck: ((Long) -> Unit)? = null
 
     // ---- 内部计时 / 连接标志 ------------------------------------------------
 
@@ -159,6 +178,7 @@ class PhoneLink(
         socketOpen = false
         lastServerFrameAtMs = 0L
         lastHeartbeatSentAtMs = 0L
+        lastHeartbeatAckAtMs = 0L
         attemptStartedAtMs = clock()
         // Gate 0.3 审计发现项 1：**不记完整 URL**。用户填的地址可能带查询参数
         // （`wss://host/phone/ws?token=…`），那是令牌最容易泄漏的位置。只记主机名。
@@ -169,12 +189,15 @@ class PhoneLink(
 
     /** 用户点「断开」：置位 [userStopped]，之后任何意外断开都不会再触发重连。 */
     fun stop(reason: String = "用户主动断开"): List<LinkAction> = synchronized(lock) {
+        val wasStopped = userStopped
         userStopped = true
         reconnectScheduled = false
         attemptInFlight = false
         socketOpen = false
         consecutiveFailures = 0
         log(LogLevel.INFO, reason)
+        // 重复调用（例如服务销毁时再 stop 一次）不该在诊断里留下第二条"用户断开"。
+        if (!wasStopped) emit(LinkEventKind.USER_DISCONNECTED, reason)
         setState(LinkState.Idle)
         listOf(LinkAction.Close)
     }
@@ -219,9 +242,11 @@ class PhoneLink(
                 // 终态就得把**还挂着的**重连定时器一并作废，否则一个在认证失败之前
                 // 排下的定时器到点后会把连接重新拉起来，绕过"不自动重连"这条规则。
                 reconnectScheduled = false
+                emit(LinkEventKind.AUTHENTICATION_FAILED, "HTTP $httpStatus，不自动重连")
                 setState(LinkState.AuthFailed("HTTP $httpStatus"))
                 return@synchronized emptyList()
             }
+            emit(LinkEventKind.DISCONNECTED, "连接失败 category=$safeCategory")
             scheduleReconnect("连接失败（category=$safeCategory：$text）")
         }
 
@@ -257,6 +282,7 @@ class PhoneLink(
             return@synchronized emptyList()
         }
 
+        emit(LinkEventKind.DISCONNECTED, "服务端关闭 code=$code")
         scheduleReconnect("服务端关闭连接（code=$code, reason=$reason）")
     }
 
@@ -296,8 +322,48 @@ class PhoneLink(
         attemptInFlight = true
         attemptStartedAtMs = clock()
         log(LogLevel.INFO, "网络已恢复，立即发起重连（退避计数归零）")
+        emit(LinkEventKind.NETWORK_CHANGED, "网络恢复，立即重连")
         setState(LinkState.Connecting)
         listOf(LinkAction.Close, LinkAction.Open)
+    }
+
+    /**
+     * 默认网络断开（`ConnectivityManager.onLost`）。
+     *
+     * 不能只等心跳超时：信号丢失后 TCP 往往不会立刻报错，等 60 秒静默阈值再重连
+     * 会让"网络回来"这段时间白白浪费。这里把当前连接判死并进入退避；紧接着的
+     * [onNetworkAvailable] 会取消退避、立即重连。两个事件都在网络层的单线程调度器上
+     * 串行执行，不会产生两条并发连接。
+     */
+    fun onNetworkLost(): List<LinkAction> = synchronized(lock) {
+        if (userStopped) return@synchronized emptyList()
+        if (isTerminal(state)) return@synchronized emptyList()
+
+        emit(LinkEventKind.NETWORK_CHANGED, "默认网络已断开")
+        if (!socketOpen && !attemptInFlight) return@synchronized emptyList()
+
+        socketOpen = false
+        attemptInFlight = false
+        scheduleReconnect("默认网络已断开")
+    }
+
+    /**
+     * 前台服务看门狗：连接看起来还在，但已经很久没有收到任何服务端帧。
+     *
+     * 旧实现会在 5 分钟后把服务**永久停掉**，后台断网时用户再也没法自动恢复。
+     * 现在只做一次强制重连：已经有 [onTick] 的心跳超时在 60 秒级别兜底，
+     * 这里处理的是"调度线程被系统冻结、恢复后 tick 计时已经失真"的极端情况。
+     */
+    fun onWatchdogTimeout(silentMs: Long): List<LinkAction> = synchronized(lock) {
+        if (userStopped) return@synchronized emptyList()
+        if (isTerminal(state)) return@synchronized emptyList()
+        if (!socketOpen && !attemptInFlight) return@synchronized emptyList()
+
+        log(LogLevel.WARN, "看门狗：连续 ${silentMs / 1000} 秒没有服务端帧，强制重连（不停止服务）")
+        socketOpen = false
+        attemptInFlight = false
+        emit(LinkEventKind.HEARTBEAT_TIMEOUT, "看门狗判定 ${silentMs / 1000}s 无服务端帧")
+        scheduleReconnect("看门狗判定会话僵死（${silentMs}ms 无服务端帧）")
     }
 
     /**
@@ -331,6 +397,8 @@ class PhoneLink(
             is IncomingFrame.ToolRequestMalformed -> handleMalformedToolRequest(frame)
 
             is IncomingFrame.HeartbeatAck -> {
+                lastHeartbeatAckAtMs = now
+                onHeartbeatAck?.invoke(now)
                 log(LogLevel.INFO, "收到 heartbeat_ack（server_time=${frame.serverTime}）")
                 emptyList()
             }
@@ -377,6 +445,7 @@ class PhoneLink(
             if (attemptStartedAtMs > 0L && now - attemptStartedAtMs > HANDSHAKE_TIMEOUT_MS) {
                 val waited = now - attemptStartedAtMs
                 attemptInFlight = false
+                emit(LinkEventKind.DISCONNECTED, "握手超时（${waited}ms）")
                 return@synchronized scheduleReconnect("建连超时（${waited}ms 内未完成 WebSocket 握手）")
             }
             return@synchronized emptyList()
@@ -391,6 +460,7 @@ class PhoneLink(
             log(LogLevel.WARN, "${silent}ms 未收到服务端任何帧（阈值 ${timeoutMs}ms），判定链路已死")
             socketOpen = false
             attemptInFlight = false
+            emit(LinkEventKind.HEARTBEAT_TIMEOUT, "${silent}ms 无服务端帧")
             return@synchronized scheduleReconnect("心跳超时（${silent}ms 无任何服务端帧）")
         }
 
@@ -436,6 +506,7 @@ class PhoneLink(
                 "心跳=${heartbeatIntervalMs}ms 超时=${pingTimeoutMs}ms " +
                 "max_pending=${w.maxPendingRequests ?: config.maxPendingRequests}",
         )
+        emit(LinkEventKind.CONNECTED, "代次 ${w.connectionGeneration}")
         setState(LinkState.Connected(w.connectionGeneration))
         return emptyList()
     }
@@ -559,6 +630,7 @@ class PhoneLink(
         val humanAttempt = attemptIndex + 1
         val deadline = clock() + delay
         log(LogLevel.WARN, "$why；第 $humanAttempt 次重连将在 ${delay}ms 后")
+        emit(LinkEventKind.RECONNECTING, "第 $humanAttempt 次，${delay}ms 后")
         setState(LinkState.Reconnecting(attempt = humanAttempt, delayMs = delay, deadlineMs = deadline))
         return listOf(LinkAction.Close, LinkAction.ScheduleReconnect(delay))
     }
@@ -567,6 +639,15 @@ class PhoneLink(
         if (state == next) return
         state = next
         onStateChanged?.invoke(next)
+    }
+
+    /**
+     * 记录一条结构化事件。调用前必须已持有 [lock]。
+     *
+     * [detail] 由本类拼装，只含代次/次数/固定类别/耗时；回调实现必须非阻塞。
+     */
+    private fun emit(kind: LinkEventKind, detail: String) {
+        onEvent?.invoke(LinkEvent(kind = kind, atMs = clock(), detail = detail))
     }
 
     /**
@@ -590,6 +671,7 @@ class PhoneLink(
             "服务端撤销了本机凭据（$evidence）；**不自动重连**。" +
                 "请到「高级设置」更新设备令牌（或重新配对）后手动点「连接」",
         )
+        emit(LinkEventKind.AUTHENTICATION_FAILED, "凭据已被撤销（$evidence）")
         setState(LinkState.Revoked(REVOKED_DETAIL))
     }
 

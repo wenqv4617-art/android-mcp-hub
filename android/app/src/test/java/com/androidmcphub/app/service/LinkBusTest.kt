@@ -1,6 +1,9 @@
 package com.androidmcphub.app.service
 
+import com.androidmcphub.app.core.LinkEvent
+import com.androidmcphub.app.core.LinkEventKind
 import com.androidmcphub.app.core.LogLevel
+import com.androidmcphub.app.core.NetworkKind
 import com.androidmcphub.app.protocol.LinkState
 import com.androidmcphub.app.protocol.PingOutcome
 import org.junit.After
@@ -36,6 +39,7 @@ class LinkBusTest {
         LinkBus.log.clear()
         LinkBus.clearLastError()
         LinkBus.resetLink()
+        LinkBus.resetDiagnostics()
     }
 
     private fun outcome(requestId: String, rttMs: Long, frame: String? = """{"type":"phone_pong"}""") =
@@ -191,5 +195,63 @@ class LinkBusTest {
         LinkBus.log.clear()
 
         assertTrue(LinkBus.logs.value.isEmpty())
+    }
+
+    // ---- V1.6.1：结构化事件与诊断统计 --------------------------------------
+
+    @Test
+    fun `事件按时间倒序排列且封顶 50 条`() {
+        repeat(60) { i ->
+            LinkBus.recordEvent(LinkEventKind.NETWORK_CHANGED, detail = "第${i + 1}条", atMs = 1_000L + i)
+        }
+
+        val events = LinkBus.events.value
+        assertEquals(50, events.size)
+        assertEquals("第60条", events.first().detail)
+        assertFalse("最老的条目应该被挤出去", events.any { it.detail == "第10条" })
+    }
+
+    @Test
+    fun `连接成功与断开分别刷新诊断页的时间与原因`() {
+        LinkBus.recordEvent(LinkEventKind.CONNECTED, atMs = 10_000L)
+        LinkBus.recordEvent(LinkEventKind.DISCONNECTED, detail = "服务端关闭 code=1006", atMs = 20_000L)
+
+        val d = LinkBus.diagnostics.value
+        assertEquals(10_000L, d.lastConnectedAtMs)
+        assertEquals(20_000L, d.lastDisconnectAtMs)
+        assertEquals("服务端关闭 code=1006", d.lastDisconnectReason)
+    }
+
+    @Test
+    fun `重连次数只由 RECONNECTING 事件累加`() {
+        LinkBus.recordEvent(LinkEventKind.CONNECTED)
+        LinkBus.recordEvent(LinkEventKind.RECONNECTING, detail = "第 1 次")
+        LinkBus.recordEvent(LinkEventKind.RECONNECTING, detail = "第 2 次")
+
+        assertEquals(2, LinkBus.diagnostics.value.reconnectCount)
+    }
+
+    @Test
+    fun `心跳成功与网络类型会写进诊断页`() {
+        LinkBus.publishHeartbeatAck(0L)
+        assertNull("0 是「没有数据」，不能显示成 1970 年", LinkBus.diagnostics.value.lastHeartbeatAckAtMs)
+
+        LinkBus.publishHeartbeatAck(1_700_000_000_000L)
+        LinkBus.publishNetworkKind(NetworkKind.WIFI)
+
+        assertEquals(1_700_000_000_000L, LinkBus.diagnostics.value.lastHeartbeatAckAtMs)
+        assertEquals("Wi-Fi", LinkBus.diagnostics.value.networkLabel)
+    }
+
+    @Test
+    fun `清空事件不影响当前连接状态与统计`() {
+        LinkBus.publishState(LinkState.Connected(generation = 5))
+        LinkBus.recordEvent(LinkEventKind.CONNECTED, atMs = 10_000L)
+
+        LinkBus.clearEvents()
+
+        assertTrue(LinkBus.events.value.isEmpty())
+        assertEquals(LinkState.Connected(generation = 5), LinkBus.state.value)
+        assertEquals("统计是「发生过什么」，清列表不该把它抹掉", 10_000L, LinkBus.diagnostics.value.lastConnectedAtMs)
     }
 }

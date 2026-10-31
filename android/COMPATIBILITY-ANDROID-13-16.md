@@ -149,13 +149,22 @@ ConnectStartupSequence(
 
 ## 8. 系统结束应用进程后的状态恢复
 
-**这是刻意不做的**：`onStartCommand` 返回 `START_NOT_STICKY`，进程被杀后**不会**被系统自动重建服务。
+**V1.6.1 起改为按用户意图恢复**（此前的做法是恒 `START_NOT_STICKY`、绝不重建，代价正是本专项要修的问题）。
 
-理由：这个应用的第一原则是"用户手动开启、用户手动关闭"。如果系统在杀进程后又把它拉起来，就等于**用户没同意的情况下**重新建立了一条通往用户服务器的连接。任务书第六节要求"手动停止后禁止自动重连"，这条精神在"进程被杀"这个场景上同样适用。
+现在的规则（`service/ServiceStartPolicy.kt`）：
 
-代价（要诚实说）：进程被杀之后，**直到用户再次打开应用并点「连接」之前，这条链路是断的**；此时 ChatGPT 那边调 `phone_ping` 会拿到 `phone_offline`。这是设计选择，不是 bug。
+- 用户点过「连接」→ `link_desired = true` 落盘 → `onStartCommand` 返回 **`START_STICKY`**，
+  系统重建服务（null intent）时按意图重新建连；
+- 用户点过「断开」→ `link_desired = false` → 返回 `START_NOT_STICKY`，重建时安静退出，不会偷偷再连。
 
-`[官方规范]` 补充：目标 34+ 的应用从 `BOOT_COMPLETED` 广播里启动某些类型的前台服务也受限；我们**没有申请** `RECEIVE_BOOT_COMPLETED`，也**不注册**任何开机广播 —— 从源头上就没有"自启动"这条路。
+这与「用户手动开启、用户手动关闭」的第一原则不冲突：恢复的前提是**用户此前明确点过「连接」**，
+且用户随时可以点「断开」永久取消。没有开机自启，没有定时唤醒，没有 `RECEIVE_BOOT_COMPLETED`。
+
+仍然诚实说明边界：用户在系统设置里「强行停止」或在厂商任务管理器里「结束」应用后，
+Android 不允许任何应用自愈；此时 ChatGPT 调 `phone_ping` 仍会拿到 `phone_offline`，
+直到用户重新打开 App（`HubViewModel` 的 `LinkRestorePolicy` 会恢复连接）。这是系统限制，不是 bug。
+
+`[官方规范]` 补充：目标 34+ 的应用从 `BOOT_COMPLETED` 广播里启动某些类型的前台服务也受限；我们**没有申请** `RECEIVE_BOOT_COMPLETED`，也**不注册**任何开机广播 —— 从源头上就没有「开机自启动」这条路。
 
 ---
 

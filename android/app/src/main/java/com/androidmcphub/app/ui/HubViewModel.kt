@@ -1,11 +1,14 @@
 package com.androidmcphub.app.ui
 
 import android.app.Application
+import android.content.Context
+import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import com.androidmcphub.app.core.HubDraft
 import com.androidmcphub.app.core.HubPrefs
 import com.androidmcphub.app.core.TokenLoadResult
 import com.androidmcphub.app.service.LinkBus
+import com.androidmcphub.app.service.LinkRestorePolicy
 import com.androidmcphub.app.service.PhoneLinkService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -100,6 +103,27 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
      * 否则用户永远看不到连接为什么失败。
      */
     val lastError = LinkBus.lastError
+
+    /** 结构化连接事件（最新在前，最多 50 条）。 */
+    val events = LinkBus.events
+
+    /** 连接统计：最近成功/心跳/断线、重连次数、当前网络类型。 */
+    val diagnostics = LinkBus.diagnostics
+
+    private val _batteryUnrestricted = MutableStateFlow(isBatteryUnrestricted())
+
+    /**
+     * 本应用是否被系统排除在电池优化之外。
+     *
+     * 只用于**提示与跳转**：不申请 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`，
+     * 也不弹系统对话框逼用户改设置 —— 用户不开也能用，只是后台被省电策略
+     * 冻结的概率更高（诊断页会如实说明这一点）。
+     */
+    val batteryUnrestricted: StateFlow<Boolean> = _batteryUnrestricted.asStateFlow()
+
+    init {
+        restoreLinkIfDesired()
+    }
 
     fun updateDraft(transform: (HubDraft) -> HubDraft) {
         _draft.value = transform(_draft.value)
@@ -220,5 +244,47 @@ class HubViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearLogs() {
         LinkBus.log.clear()
+    }
+
+    /** 清空诊断页的连接事件（不动当前连接状态）。 */
+    fun clearEvents() {
+        LinkBus.clearEvents()
+    }
+
+    /** 诊断页回到前台时重新读一次系统设置（用户可能刚从设置页回来）。 */
+    fun refreshBatteryStatus() {
+        _batteryUnrestricted.value = isBatteryUnrestricted()
+    }
+
+    /**
+     * 打开应用时恢复"用户此前希望保持连接"的会话。
+     *
+     * 触发条件刻意收得很紧：
+     *  - 用户明确点过「连接」（[HubPrefs.linkDesired]），不是系统自己猜的；
+     *  - 前台服务当前**没有**在跑（已经在跑就不重复投递 CONNECT）；
+     *  - 服务器地址与令牌仍在且可用 —— 否则恢复只会立刻撞出同一个错误，
+     *    把用户上次失败的原因覆盖成一条更模糊的提示。
+     *
+     * 这是"进程被系统回收后重开应用"的最后一道恢复网；正常后台保活由
+     * `START_STICKY` + 前台服务自己完成，不依赖界面。
+     */
+    private fun restoreLinkIfDesired() {
+        val token = (prefs.loadTokenResult() as? TokenLoadResult.Present)?.token
+        val shouldRestore = LinkRestorePolicy.shouldRestore(
+            linkDesired = prefs.linkDesired(),
+            serviceRunning = LinkBus.serviceRunning.value,
+            configValid = prefs.load().validate() == null,
+            tokenPresent = !token.isNullOrBlank(),
+        )
+        if (!shouldRestore) return
+
+        LinkBus.log.info("检测到上次的连接意图，恢复前台连接")
+        PhoneLinkService.connect(getApplication())
+    }
+
+    private fun isBatteryUnrestricted(): Boolean {
+        val app = getApplication<Application>()
+        val pm = app.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+        return pm.isIgnoringBatteryOptimizations(app.packageName)
     }
 }

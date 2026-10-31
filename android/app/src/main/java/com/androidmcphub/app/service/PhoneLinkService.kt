@@ -1,6 +1,7 @@
 package com.androidmcphub.app.service
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,10 +13,12 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -28,8 +31,12 @@ import com.androidmcphub.app.capability.CapabilityDispatcher
 import com.androidmcphub.app.capability.CapabilityMetadata
 import com.androidmcphub.app.core.HubLog
 import com.androidmcphub.app.core.HubPrefs
+import com.androidmcphub.app.core.LinkEvent
+import com.androidmcphub.app.core.LinkEventKind
 import com.androidmcphub.app.core.LogEntry
 import com.androidmcphub.app.core.LogLevel
+import com.androidmcphub.app.core.NetworkKind
+import com.androidmcphub.app.core.networkKind
 import com.androidmcphub.app.mcp.McpStores
 import com.androidmcphub.app.core.SocketFailure
 import com.androidmcphub.app.core.hostOf
@@ -77,6 +84,13 @@ object LinkBus {
     private val _serviceRunning = MutableStateFlow(false)
     val serviceRunning: StateFlow<Boolean> = _serviceRunning.asStateFlow()
 
+    /** 结构化连接事件（最新在前，最多 [MAX_EVENTS] 条）。 */
+    private val _events = MutableStateFlow<List<LinkEvent>>(emptyList())
+    val events: StateFlow<List<LinkEvent>> = _events.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow(LinkDiagnostics())
+    val diagnostics: StateFlow<LinkDiagnostics> = _diagnostics.asStateFlow()
+
     init {
         log.setListener { entries -> _logs.value = entries }
     }
@@ -103,17 +117,82 @@ object LinkBus {
         _serviceRunning.value = running
     }
 
+    /** 收到 heartbeat_ack 时刷新"最近心跳成功"。 */
+    fun publishHeartbeatAck(atMs: Long) {
+        if (atMs <= 0L) return
+        _diagnostics.value = _diagnostics.value.copy(lastHeartbeatAckAtMs = atMs)
+    }
+
+    /** 当前默认网络类型（粗分类，不含 SSID/IP）。 */
+    fun publishNetworkKind(kind: NetworkKind) {
+        _diagnostics.value = _diagnostics.value.copy(networkLabel = kind.label)
+    }
+
+    fun recordEvent(event: LinkEvent) {
+        _events.value = (listOf(event) + _events.value).take(MAX_EVENTS)
+        _diagnostics.value = when (event.kind) {
+            LinkEventKind.CONNECTED -> _diagnostics.value.copy(lastConnectedAtMs = event.atMs)
+            LinkEventKind.DISCONNECTED,
+            LinkEventKind.HEARTBEAT_TIMEOUT,
+            LinkEventKind.AUTHENTICATION_FAILED,
+            LinkEventKind.USER_DISCONNECTED,
+            -> _diagnostics.value.copy(
+                lastDisconnectAtMs = event.atMs,
+                lastDisconnectReason = event.detail.ifBlank { event.kind.label },
+            )
+
+            LinkEventKind.RECONNECTING ->
+                _diagnostics.value.copy(reconnectCount = _diagnostics.value.reconnectCount + 1)
+
+            LinkEventKind.NETWORK_CHANGED,
+            LinkEventKind.SERVICE_RESTARTED,
+            -> _diagnostics.value
+        }
+    }
+
+    fun recordEvent(kind: LinkEventKind, detail: String = "", atMs: Long = System.currentTimeMillis()) {
+        recordEvent(LinkEvent(kind = kind, atMs = atMs, detail = detail))
+    }
+
     /** 用户主动清空「最近一次错误」（界面上的「清空日志」顺带做这件事）。 */
     fun clearLastError() {
         _lastError.value = null
     }
 
-    /** 服务停止后把「连接相关」的展示状态复位（日志与最近错误保留，方便用户回看刚才发生了什么）。 */
+    /** 服务停止后把「连接相关」的展示状态复位（日志、事件与最近错误保留，方便用户回看刚才发生了什么）。 */
     fun resetLink() {
         _state.value = LinkState.Idle
         _lastPing.value = null
     }
+
+    /** 测试/诊断页「清空事件」用：不影响当前连接状态。 */
+    fun clearEvents() {
+        _events.value = emptyList()
+    }
+
+    /** 测试用：把统计与事件一起复位。运行期没有调用点。 */
+    fun resetDiagnostics() {
+        _events.value = emptyList()
+        _diagnostics.value = LinkDiagnostics()
+    }
+
+    private const val MAX_EVENTS = 50
 }
+
+/**
+ * 诊断页展示的连接统计。
+ *
+ * 全是**内存态**：进程被杀后归零是预期行为，因为真实状态本来就只对当前进程有意义。
+ * 跨进程/重启的"用户是否希望连接"由 `HubPrefs.linkDesired()` 负责，两者不要混为一谈。
+ */
+data class LinkDiagnostics(
+    val lastConnectedAtMs: Long? = null,
+    val lastHeartbeatAckAtMs: Long? = null,
+    val lastDisconnectAtMs: Long? = null,
+    val lastDisconnectReason: String? = null,
+    val reconnectCount: Int = 0,
+    val networkLabel: String = NetworkKind.NONE.label,
+)
 
 /**
  * 前台服务：持有 WebSocket 长连接。
@@ -130,6 +209,19 @@ class PhoneLinkService : Service() {
     private var client: PhoneLinkClient? = null
     private var connectivity: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * 连接期间持有的一把**非引用计数**的部分唤醒锁。
+     *
+     * 为什么需要：后台/息屏后 CPU 会进入休眠，`ScheduledExecutorService` 的 1 秒 tick
+     * 与 30 秒心跳都依赖它。没有唤醒锁时，系统可能长时间不调度这个线程，
+     * 服务端 90 秒收不到心跳就判定手机离线 —— 表现正是"通知还在、ChatGPT 调不通"。
+     *
+     * 边界：部分唤醒锁只保证 CPU 不休眠，**不能**绕过 Doze/厂商省电策略的网络限制；
+     * 真要长时间稳定，还需要用户在系统里把本应用的电池优化设为"不限制"。
+     * 只在用户希望保持连接时持有，断开/终态/服务销毁都会释放。
+     */
+    private var wakeLock: PowerManager.WakeLock? = null
 
     /**
      * 能力元数据按工具名索引：授权策略需要知道"这一条是不是写入类"。
@@ -173,29 +265,53 @@ class PhoneLinkService : Service() {
         startedAtMs = System.currentTimeMillis()
         createNotificationChannel()
         registerNetworkCallback()
+        updateNetworkKind()
         LinkBus.publishServiceRunning(true)
         handler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         LinkBus.log.info("前台服务已创建")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_CONNECT -> handleConnect()
+        val desired = prefs.linkDesired()
+        when (ServiceStartPolicy.decide(intent?.action, desired)) {
+            ServiceStartDecision.CONNECT -> {
+                if (intent?.action == null) {
+                    // 系统在进程被杀后重建服务：这是用户看不见的恢复路径，必须有日志与事件。
+                    LinkBus.log.info("系统重建前台服务，按用户此前的连接意图恢复")
+                    LinkBus.recordEvent(LinkEventKind.SERVICE_RESTARTED, "系统重建服务")
+                    handleConnect(trigger = "系统恢复连接")
+                } else {
+                    handleConnect()
+                }
+            }
 
-            ACTION_DISCONNECT -> handleDisconnect()
+            ServiceStartDecision.DISCONNECT -> handleDisconnect()
 
-            else -> {
-                // 没有 action 说明是系统重投或异常调用，不建连
-                LinkBus.log.warn("收到没有 action 的启动请求，忽略")
+            ServiceStartDecision.IGNORE -> {
+                // 用户已断开或收到未知 action：不建连，也不让服务空转。
+                LinkBus.log.warn("收到无可执行意图的启动请求（action=${intent?.action ?: "null"}），停止服务")
+                stopForegroundService()
             }
         }
-        // 不粘性：进程被杀后系统不要偷偷把服务拉起来（本应用只允许用户前台触发连接）
-        return START_NOT_STICKY
+        // 只有"用户希望保持连接"时才粘性重建；用户主动断开后进程退出就是退出。
+        return if (ServiceStartPolicy.shouldReturnSticky(prefs.linkDesired())) {
+            START_STICKY
+        } else {
+            START_NOT_STICKY
+        }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // 从最近任务划掉不应断线：服务是 stopWithTask=false 的前台服务，
+        // 这里只留一条证据，方便诊断页解释"为什么划掉后还在跑"。
+        LinkBus.log.info("应用任务被移除，前台服务与连接继续")
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(watchdog)
         unregisterNetworkCallback()
+        releaseWakeLock()
         client?.shutdown()
         client = null
         // 在工作线程上的聚合命令会各自跑到自己的超时后退出；这里不等待它们，
@@ -210,12 +326,13 @@ class PhoneLinkService : Service() {
 
     // ---- 用户动作 ----------------------------------------------------------
 
-    private fun handleConnect() {
+    private fun handleConnect(trigger: String = "用户点击「连接」") {
         // ★ 审计 R3 的核心修复：用 ConnectStartupSequence 把「进入前台 → 是否建连」
         //   的顺序固定下来。旧实现直接调用 goForeground(...) 并忽略结果，失败之后
         //   代码继续往下走建了 WebSocket —— 那是系统已经拒绝的路径。
         //   顺序约束本身由 ConnectGateTest 在 JVM 上验证。
-        LinkBus.log.info("用户点击「连接」")
+        prefs.setLinkDesired(true)
+        LinkBus.log.info(trigger)
         ConnectStartupSequence(
             enterForeground = { goForeground(buildNotification(LinkState.Connecting)) },
             startLink = { startLink() },
@@ -225,6 +342,8 @@ class PhoneLinkService : Service() {
 
     /** 真正创建并启动连接。**只可能**由 [ConnectStartupSequence] 在进入前台成功后调用。 */
     private fun startLink() {
+        // 进入前台成功后立刻拿住 CPU：心跳/重连定时器都跑在本进程的调度线程上。
+        acquireWakeLock()
         val link = client ?: PhoneLinkClient(
             configProvider = { prefs.load() },
             credentialProvider = { prefs.loadTokenResult() },
@@ -233,8 +352,20 @@ class PhoneLinkService : Service() {
             onStateChanged = { state ->
                 LinkBus.publishState(state)
                 updateNotification(state)
+                // 终态下不会再自动重连，没必要继续占着唤醒锁；用户手动重连会重新获取。
+                when (state) {
+                    is LinkState.AuthFailed,
+                    is LinkState.Revoked,
+                    is LinkState.Error,
+                    is LinkState.Idle,
+                    -> releaseWakeLock()
+
+                    else -> acquireWakeLock()
+                }
             },
             onPing = { outcome -> if (!outcome.duplicate) LinkBus.publishPing(outcome) },
+            onEvent = { event -> LinkBus.recordEvent(event) },
+            onHeartbeatAck = { atMs -> LinkBus.publishHeartbeatAck(atMs) },
             // Gate 2 工作包 D/E、Gate 2.5：能力分发层。
             //   · 白名单在这里、也**只**在这里建立：能被执行的能力由
             //     `capability/BuiltInCapabilities.kt` 那份唯一注册清单派生
@@ -302,6 +433,10 @@ class PhoneLinkService : Service() {
      */
     private fun abortStartup(category: String) {
         LinkBus.log.error("前台服务启动失败，已取消连接（errorCode=$category）")
+        // 系统的拒绝不会因为重试而改变：清掉连接意图，避免下次打开应用/系统重建
+        // 服务时又静默地走同一条失败路径。恢复路径仍是用户在前台再点一次「连接」。
+        prefs.setLinkDesired(false)
+        releaseWakeLock()
         client?.shutdown()
         client = null
         LinkBus.publishState(LinkState.Error(getString(ForegroundFailure.userMessageRes(category))))
@@ -311,14 +446,50 @@ class PhoneLinkService : Service() {
 
     private fun handleDisconnect() {
         LinkBus.log.info("用户点击「断开」，停止自动重连")
+        // 先落盘"用户不要连接了"：即使下一行关闭立刻失败，系统重建服务也不会偷偷再连。
+        prefs.setLinkDesired(false)
         client?.stop()
         client = null
+        releaseWakeLock()
         stopForegroundService()
     }
 
     private fun stopForegroundService() {
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    // ---- 唤醒锁 ------------------------------------------------------------
+
+    /**
+     * 取锁时不带超时，是**有意的**：这把锁的生命周期与"连接"绑定，而不是与某一次
+     * 具体工作绑定。连接可能持续几小时，任何固定超时都会在用户仍然希望保持在线时
+     * 悄悄失效；而锁的释放点已经被三种明确事件覆盖（用户断开、终态、服务销毁），
+     * 不存在"忘了释放"的路径。lint 的 WakelockTimeout 针对的是后台干活式的用法，
+     * 这里是用户可见的前台服务，故显式抑制并写明理由。
+     */
+    @SuppressLint("WakelockTimeout")
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+            setReferenceCounted(false)
+        }
+        runCatching { lock.acquire() }
+            .onSuccess {
+                wakeLock = lock
+                LinkBus.log.info("已获取部分唤醒锁（保持心跳调度）")
+            }
+            .onFailure {
+                LinkBus.log.warn("获取唤醒锁失败 category=${SocketFailure.classify(it.javaClass.simpleName)}")
+            }
+    }
+
+    private fun releaseWakeLock() {
+        val lock = wakeLock ?: return
+        wakeLock = null
+        runCatching { if (lock.isHeld) lock.release() }
+        LinkBus.log.info("已释放部分唤醒锁")
     }
 
     // ---- 网络回调 ----------------------------------------------------------
@@ -328,8 +499,21 @@ class PhoneLinkService : Service() {
         connectivity = cm
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                updateNetworkKind()
                 LinkBus.log.info("默认网络可用")
+                LinkBus.recordEvent(LinkEventKind.NETWORK_CHANGED, "网络可用")
                 client?.onNetworkAvailable()
+            }
+
+            override fun onLost(network: Network) {
+                LinkBus.publishNetworkKind(NetworkKind.NONE)
+                LinkBus.log.warn("默认网络已断开")
+                LinkBus.recordEvent(LinkEventKind.NETWORK_CHANGED, "网络断开")
+                client?.onNetworkLost()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                LinkBus.publishNetworkKind(kindOf(capabilities))
             }
         }
         networkCallback = callback
@@ -341,6 +525,23 @@ class PhoneLinkService : Service() {
             }
     }
 
+    /** 把当前默认网络收敛成诊断页的粗分类；没有网络时显示"无网络"。 */
+    private fun updateNetworkKind() {
+        val cm = connectivity ?: return
+        val capabilities = cm.getNetworkCapabilities(cm.activeNetwork)
+        LinkBus.publishNetworkKind(if (capabilities == null) NetworkKind.NONE else kindOf(capabilities))
+    }
+
+    private fun kindOf(capabilities: NetworkCapabilities): NetworkKind = networkKind(
+        wifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+        cellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+        ethernet = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+        vpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+        other = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) ||
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_USB) ||
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_LOWPAN),
+    )
+
     private fun unregisterNetworkCallback() {
         val cm = connectivity ?: return
         val callback = networkCallback ?: return
@@ -351,9 +552,16 @@ class PhoneLinkService : Service() {
     // ---- 会话看门狗 --------------------------------------------------------
 
     /**
-     * 如果连接期间连续 [STALE_SESSION_TIMEOUT_MS] 没收到服务端**任何**帧，
-     * 说明这条会话实质上已经僵死（心跳超时逻辑还会自己重连，但用户可能早就走了），
-     * 就写一条日志并停掉自己，避免无意义地占着前台服务。
+     * 服务层兜底看门狗：连接期间连续 [STALE_SESSION_TIMEOUT_MS] 没收到服务端**任何**帧，
+     * 就把当前 socket 判死并走一次正常重连。
+     *
+     * V1.6.1 之前这里会 `stop()` + `stopForegroundService()`，把服务永久停掉：
+     * 后台断网超过 5 分钟时，用户回来看到的是"通知没了、连接也没了"，
+     * 这与"意外断线后自动恢复"正好相反。现在**不停止服务**，只强制重连；
+     * 真正的终态（认证失败/被撤销）仍由 [PhoneLink] 自己判定。
+     *
+     * 幂等性：`PhoneLink.onWatchdogTimeout` 在没有 socket 也没有在飞的建连尝试时
+     * 返回空动作列表，所以重连退避期间这个看门狗不会把退避节奏打乱。
      */
     private fun checkStaleSession() {
         val link = client ?: return
@@ -361,11 +569,8 @@ class PhoneLinkService : Service() {
         val silent = System.currentTimeMillis() - last
         if (silent < STALE_SESSION_TIMEOUT_MS) return
 
-        LinkBus.log.warn("连续 ${silent / 1000} 秒没有服务端帧，判定会话已僵死，主动停止前台服务")
-        LinkBus.publishState(LinkState.Error(getString(R.string.link_error_stale_session)))
-        client?.stop()
-        client = null
-        stopForegroundService()
+        LinkBus.log.warn("连续 ${silent / 1000} 秒没有服务端帧，强制重连（服务保持运行）")
+        link.onWatchdogTimeout(silent)
     }
 
     // ---- 通知 --------------------------------------------------------------
@@ -491,6 +696,13 @@ class PhoneLinkService : Service() {
         private const val WATCHDOG_INTERVAL_MS = 60 * 1000L
 
         /**
+         * 部分唤醒锁的标签（`<包名>::<用途>`）。
+         *
+         * 只用于系统 `dumpsys power` 里辨认持有者；不承载任何用户数据。
+         */
+        private const val WAKE_LOCK_TAG = "AndroidMcpHub::PhoneLink"
+
+        /**
          * 聚合命令的并发线程数。
          *
          * 2 个足够：协议上服务端一次只会等一条 `tool_request` 的结果，多开的线程
@@ -501,20 +713,48 @@ class PhoneLinkService : Service() {
         const val ACTION_CONNECT = "com.androidmcphub.app.action.CONNECT"
         const val ACTION_DISCONNECT = "com.androidmcphub.app.action.DISCONNECT"
 
-        /** 由界面调用：进入前台服务并开始连接。 */
+        /**
+         * 由界面调用：进入前台服务并开始连接。
+         *
+         * **先落盘用户意图再启动服务**：进程可能在 `onStartCommand` 之前就被系统回收，
+         * 那时服务内的 `setLinkDesired(true)` 根本来不及执行，而 `START_STICKY` 重建
+         * 又依赖这个值。启动抛异常时回滚，避免留下"想连但永远没连"的脏意图。
+         */
         fun connect(context: Context) {
+            val app = context.applicationContext
+            HubPrefs(app).setLinkDesired(true)
             val intent = Intent(context, PhoneLinkService::class.java).setAction(ACTION_CONNECT)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }.onFailure {
+                HubPrefs(app).setLinkDesired(false)
+                LinkBus.log.warn(
+                    "启动前台服务失败 category=${SocketFailure.classify(it.javaClass.simpleName)}",
+                )
             }
         }
 
-        /** 由界面调用：用户主动断开。 */
+        /**
+         * 由界面调用：用户主动断开。
+         *
+         * 同样先落盘 "false"：即使断开指令投递失败，系统重建服务也不会偷偷再连。
+         * 投递失败时直接 `stopService` 兜底，别让前台通知与连接一起挂着。
+         */
         fun disconnect(context: Context) {
+            val app = context.applicationContext
+            HubPrefs(app).setLinkDesired(false)
             val intent = Intent(context, PhoneLinkService::class.java).setAction(ACTION_DISCONNECT)
             runCatching { context.startService(intent) }
+                .onFailure {
+                    runCatching { context.stopService(Intent(context, PhoneLinkService::class.java)) }
+                    LinkBus.log.warn(
+                        "投递断开指令失败 category=${SocketFailure.classify(it.javaClass.simpleName)}",
+                    )
+                }
         }
     }
 }

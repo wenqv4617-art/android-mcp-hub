@@ -130,6 +130,23 @@ class HubPrefs(context: Context) {
     }
 
     /**
+     * 用户**希望**保持连接吗？
+     *
+     * 这是"用户意图"，不是"当前是否已经连上"：
+     *  - 用户点「连接」→ true；点「断开」→ false；
+     *  - 进程/前台服务被系统杀掉后，这个值仍然保留，服务和界面据此恢复连接；
+     *  - 它**不代表**会话一定健康 —— 真实状态只来自 [com.androidmcphub.app.service.LinkBus]。
+     *
+     * 用 `commit()` 落盘：用户点完连接后进程可能马上被系统回收，
+     * 这时 "意图" 必须先于建连动作真正写进磁盘，不能依赖异步的 `apply()`。
+     */
+    fun linkDesired(): Boolean = prefs.getBoolean(KEY_LINK_DESIRED, false)
+
+    fun setLinkDesired(desired: Boolean) {
+        prefs.edit().putBoolean(KEY_LINK_DESIRED, desired).commit()
+    }
+
+    /**
      * 读设备令牌。
      *
      * 返回三态而不是 `String`：**"没设过"和"设过但解不开"必须可区分**。
@@ -227,6 +244,13 @@ class HubPrefs(context: Context) {
         const val KEY_ENABLED_WRITE_CAPABILITIES = "enabled_write_capabilities"
 
         /**
+         * 用户是否希望保持连接（布尔），见 [linkDesired]。
+         *
+         * 与能力开关一样，它不是 [HubConfig] 的一部分，不能混进配置 map。
+         */
+        const val KEY_LINK_DESIRED = "link_desired"
+
+        /**
          * 总开关的**安全默认**：首次安装（键不存在）时为 `false`，即"未授权"。
          *
          * 集中审计问题 5：这里单独提成一个常量，是为了让"默认值"可被单测直接钉住
@@ -248,6 +272,7 @@ class HubPrefs(context: Context) {
                 KEY_WRITE_CAPABILITIES_ENABLED,
                 KEY_DISABLED_CAPABILITIES,
                 KEY_ENABLED_WRITE_CAPABILITIES,
+                KEY_LINK_DESIRED,
             )
     }
 }
