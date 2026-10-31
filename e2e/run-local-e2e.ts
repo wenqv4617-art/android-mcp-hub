@@ -518,9 +518,39 @@ async function main(): Promise<void> {
       "hub_list_tools",
       "hub_get_tool_schema",
       "hub_call_tool",
+      // Phase 3：Android 本机能力，全部是独立的一等工具。
+      "alarm_create",
+      "alarm_open_list",
+      "calendar_create_event",
+      "calendar_delete_event",
+      "calendar_list_calendars",
+      "calendar_list_events",
+      "calendar_update_event",
+      "device_get_status",
+      "device_get_usage_stats",
+      "device_open_app",
+      "device_open_settings",
+      "device_post_notification",
+      "device_set_flashlight",
+      "device_set_volume",
+      "memo_create",
+      "memo_delete",
+      "memo_get",
+      "memo_list",
+      "memo_update",
+      "reminder_complete",
+      "reminder_create",
+      "reminder_delete",
+      "reminder_list",
+      "reminder_update",
+      "todo_complete",
+      "todo_create",
+      "todo_delete",
+      "todo_list",
+      "todo_update",
     ];
     check(
-      "工具列表恰好是四个本机能力 + 三个聚合入口（显式白名单，一个不多）",
+      "工具列表恰好是四个基础本机能力 + 三个聚合入口 + 二十九个 Phase 3 能力（显式白名单，一个不多）",
       names.length === EXPECTED_TOOLS.length && EXPECTED_TOOLS.every((n) => names.includes(n)),
       `tools=[${names.join(", ")}]`,
     );
@@ -631,7 +661,10 @@ async function main(): Promise<void> {
     // ---- 8. 会话与协议头 -------------------------------------------------
     out("⑧ 会话与协议头");
     const afterClose = await client.listTools();
-    check("同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）", afterClose.tools.length === 7);
+    check(
+      "同一个 SDK 客户端第二次请求仍然有效（会话被正确复用）",
+      afterClose.tools.length === EXPECTED_TOOLS.length,
+    );
     out("");
 
     // ---- ⑨ 异常手机场景矩阵（A2–A8）--------------------------------------
