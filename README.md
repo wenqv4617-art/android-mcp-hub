@@ -1,271 +1,218 @@
-> **通用网关 V1（本分支）**：新增 Worker 端远程 MCP 中转，默认关闭；支持 Streamable HTTP / 旧版 SSE、DO 持久化、逐工具授权和管理面板。见 [开发、权限与接入说明](docs/GATEWAY_V1.md)。以下 Gate 历史说明保留作基线，不代表本分支新功能状态。
-
 # Android MCP Hub
 
-让 **ChatGPT 官方客户端**通过 MCP 直接指挥一台 **Android 手机**。
+把一台 Android 手机变成标准 MCP（Model Context Protocol）客户端可以访问的工具服务器，
+同时把第三方 MCP 服务汇总到同一个入口。
 
-> **状态：Gate 1（OAuth 接入已实现；真实 Cloudflare 部署与 ChatGPT 验收尚未执行 —— 见 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md)）**
-> 本仓库目前**没有**部署到任何 Cloudflare 账户，也**没有**创建任何云端资源。
-> Gate 0 的目标只有一个：证明 `ChatGPT → Cloudflare Worker → Durable Object → 手机上的 App` 这条链路的每一环都真的能通、而且不会说谎。
->
-> **Gate 0.1** 在此基础上做了三件事：①修掉审计提出的重连竞态（R1）、日志安全（R2）、前台服务启动失败（R3）、设备令牌保护（R4）；②把 Home 界面补成可用的配置/状态/日志面板；③交付一个可安装的 Debug APK 并逐条核对 Android 13–16 的官方规范。
->
-> **Gate 0.2** 修掉的是 Gate 0.1 交付件里一个**真实存在、用户已经踩到**的问题：APK 装上后**点图标立刻闪退**。
-> 根因是 `HubApplication.kt` 的 `package` 声明与 `AndroidManifest.xml` 里的 `android:name` 对不上 —— 编译期全绿、当时 132 个单测也全绿，却导致系统建进程时 `ClassNotFoundException`。
-> 除了修这一行，还补了**两层**自动化检查防它再来：一层进 JVM 单测，一层解析**真实 APK** 里的二进制 Manifest 与 dex 的 class_defs 表（`:app:verifyManifestClasses`）。详见 [TEST_REPORT.md](TEST_REPORT.md) §6.6。
->
-> **Gate 0.3** 按独立审计的三项发现做**最小修复**，不回退 Gate 0.2 的启动修复与 Manifest 类名校验：
-> ①**Android 日志脱敏** —— 手机端日志不再出现完整 URL / 令牌 / 敏感查询参数 / 未处理的异常消息，只留主机名（`hostOf()`）与 `SocketFailure` 闭集里的**固定错误类别**（`SocketFailure.kt`）；服务端错误帧的 `message` 与未知帧的 `type` 原文一概不记（只记 `ServerErrorCode.normalize()` 的结果与 `typeLen`）。
-> ②**Lint 门禁** —— `android/app/build.gradle.kts` 的 `abortOnError` 从 `false` 改回 `true`，并修掉被它抓出来的 `MissingPermission`；**没有**加任何 `disable` / baseline / `@SuppressLint`。证据（含"故意注入故障 → 门禁变红 → 恢复 → 放行"的原始输出）在 [test-reports/lint-gate.log](test-reports/lint-gate.log)。
-> ③**DO 结算路径加固** —— `PhoneSession` 的 `settlePending()` 原来在三行裸 `await`（落盘 / 指标 / alarm）之后才 resolve，任一抛错就是**请求永久挂起**；现在记账失败被 `bestEffort()` 兜住并计数（`settleStorageFailures` / `settleMetricFailures` / `settleAlarmFailures`），`handlePingRequest` 也把定时器提到落盘之前。故障注入测试在 `worker/test/phone-session.test.ts` 的 `describe("12. 结算路径的故障注入")` 6 条。
->
-> **Gate 1** 做的是任务书第四节的核心任务：**把 `/mcp` 从"共享一个静态 Bearer"升级成完整的 OAuth 2.1 授权服务器** —— 新增第三个 Durable Object `OAuthStore`（单实例，只存 `sha256` 摘要），实现 RFC 9728 资源元数据、RFC 8414 授权服务器元数据、RFC 7591 动态客户端注册、**强制 PKCE S256**、RFC 8707 受众绑定、RFC 9207 `iss`、刷新令牌轮换，以及一个零脚本、CSP `default-src 'none'` 的**运维同意页**。同时把 Gate 0.3 审计遗留的三项（结算路径、重复 `request_id`、DO 重建遗留 pending）修到有故障注入测试。安全决策与已知问题见 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md)。
->
-> **没做的（不许当成已通过）**：真实 `wrangler deploy`、真实 workerd 验证、真机验证、ChatGPT 官方客户端的真实授权与调用 —— 这些在 [TEST_REPORT.md](TEST_REPORT.md) 与 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md) 里明确标着 **NOT RUN / BLOCKED**。Gate 1 的最终验收标准是"ChatGPT 真的 ping 到这台手机"，**这条链目前还没有真的跑过**。
+- **标准远程 MCP**：`/mcp` 提供 Streamable HTTP，支持 URL + Bearer Token 与 OAuth 2.1 + PKCE。
+- **通用网关**：把多个第三方 MCP 服务（Streamable HTTP / 旧版 HTTP+SSE）映射成 `ext_*` 工具，
+  逐工具授权，客户端看不到未授权的上游。
+- **Android 原生能力**：36 个 MCP 工具，覆盖备忘录、待办、日历、提醒、闹钟、使用统计、
+  设备状态与常用控制。
+- **按最小权限运行**：每个客户端独立令牌、独立授权、可单独撤销；scope 只能收窄授权。
+
+> **产品定位**：你在**自己的** Cloudflare 账户里部署**自己的** Worker，绑定**自己的**手机。
+> 本仓库维护者部署的 Worker 不是面向他人的公共中转服务，也不应被当成公共网关。
 
 ---
 
-## 1. 这条链路长什么样
+## 1. 链路
 
 ```
-ChatGPT 官方客户端
-        │  ① OAuth：发现元数据 → 动态注册 → 运维在同意页批准 → 换访问令牌
-        │  ② HTTPS / MCP (Streamable HTTP)，Authorization 头带访问令牌
+MCP 客户端（ChatGPT / Claude Desktop / Codex / 微光机 / 任何标准客户端）
+        │  HTTPS · MCP Streamable HTTP · Authorization: Bearer <令牌>
         ▼
-Cloudflare Worker          worker/src/index.ts
-        │  ── OAuth 状态 ──► Durable Object   worker/src/oauth/store-do.ts  ← 类名 OAuthStore
-        │  Durable Object Binding
+Cloudflare Worker                        worker/src/index.ts
+        │  ── 会话 ──────► Durable Object  McpSession
+        │  ── OAuth ─────► Durable Object  OAuthStore（只存 SHA-256 摘要）
+        │  ── 网关状态 ──► Durable Object  GatewayStore（服务 / 授权 / 令牌元数据）
+        │
+        │  WebSocket · phone-link-v1（设备令牌）
         ▼
-Durable Object             worker/src/phone/phone-session.ts   ← 类名 PhoneSession
-        │  WebSocket / WSS（自定义内部协议 phone-link-v1）
+Durable Object                           PhoneSession（连接代次、超时、请求配对）
+        │
         ▼
-Android MCP Hub（独立 APK） android/                          ← Kotlin + Compose + OkHttp
-        │  localhost HTTP
+Android App（本仓库 android/）           前台服务 + Kotlin/Compose
+        │  进程内调用
         ▼
-本地 MCP 应用               ⛔ Gate 0 尚未接入
+本机能力（Calendar Provider / AlarmClock / UsageStats / 本地 SQLite 风格存储）
 ```
 
-Gate 0 只做**一件事**：暴露一个工具 `phone_ping`，它必须一路走到真实的手机上、拿到真实手机回的真实 `phone_pong`、在**服务端**量出 RTT，再把结果返回给 ChatGPT。**Gate 1 只增加了"怎么安全地让 ChatGPT 进来"这一层（OAuth），工具集合没有变化 —— 仍然只有 `phone_ping`。**
-
-**Worker 里没有、也不允许有任何"直接伪造 pong"的代码路径。** 这条不变量有测试守着，见 `worker/test/tools.test.ts` 的「转发证明」一节。
+一个请求只经过一次 Worker 和一次手机转发；Worker 不缓存工具结果，也不会在手机离线时伪造成功。
 
 ---
 
-## 2. 为什么值得做一个 Durable Object
+## 2. 当前状态（2026-10-31）
 
-因为"会话"和"这台手机"都必须**恰好有一个归属**：
+| 项 | 结果 |
+| --- | --- |
+| Worker `npx tsc --noEmit` | 通过 |
+| Worker 测试 | **469 项 / 21 个文件全部通过**（`npx vitest run`） |
+| Android JVM 测试 | **720 项 / 0 失败 / 7 跳过**（`:app:testDebugUnitTest`） |
+| Android Lint | 通过（`abortOnError = true`） |
+| Debug APK | `dist/Android-MCP-Hub-v1.6-debug.apk`（14 MB，SHA-256 `77c6751d…2af57c`） |
+| 真实 Cloudflare 部署 | 本轮**未执行**；历史部署地址为 `https://android-mcp-hub.causticrry.workers.dev` |
+| 真机 / 真实客户端验收 | **未执行**（需要设备权限与第三方账号，见文末清单） |
 
-- MCP 用 `Mcp-Session-Id` 串起一串请求，而 Worker 的 isolate 随时会换机器、随时会被回收 —— 会话状态放内存里会随机失踪，所以放进 `McpSession`（一个会话一个对象）。
-- 一台手机同一时刻只应该有一个受信任连接，重连必须**顶掉**旧连接而不是并存 —— 这个"唯一性"放进 `PhoneSession`，用**连接代次（generation）**仲裁。
-- OAuth 的"授权码只能用一次""刷新令牌只能用一次"是**原子读—判—写**，而 KV 是最终一致 —— 所以放进 `OAuthStore`（**单实例** `idFromName("oauth-global")`），靠 DO 的单线程串行把这三步变成一个事务。
-
-详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
-
----
-
-## 3. 目录结构
-
-```
-android-mcp-hub/
-├── worker/                        Cloudflare Worker + Durable Object
-│   ├── wrangler.jsonc             ⚠ 仅供人工审核，**没有部署过**
-│   ├── .dev.vars.example          占位符；真实 .dev.vars 被 .gitignore 挡住
-│   └── src/
-│       ├── index.ts               入口：/healthz、/、/mcp、/phone/ws、/.well-known/*、/oauth/*
-│       ├── env.ts                 绑定类型（**刻意只有三个 DO 绑定**，没有 D1/KV/R2/Queue 字段）
-│       ├── config.ts              参数与设备凭据装载、device_id 解析、OAuth 参数
-│       ├── oauth/                 ★ Gate 1 新增
-│       │   ├── store-do.ts        OAuthStore DO（单实例；客户端/码/令牌/同意记录，只存 sha256）
-│       │   ├── endpoints.ts       发现元数据、DCR、authorize、token、revoke、访问令牌校验
-│       │   └── pages.ts           同意页与错误页（零脚本、CSP default-src 'none'）
-│       ├── phone/
-│       │   ├── PhoneSession DO    连接代次、pending 请求、超时、断线
-│       │   └── messages.ts        内部协议帧的解析与编码
-│       ├── mcp/
-│       │   ├── http.ts            MCP Streamable HTTP 入口（initialize/tools/*）
-│       │   ├── jsonrpc.ts         JSON-RPC 2.0 与错误码
-│       │   ├── session-do.ts      McpSession DO（会话生命周期）
-│       │   └── tools.ts           phone_ping 的定义、参数校验、结果映射
-│       └── util/                  ids / crypto / http / log（白名单式安全日志）
-├── worker/test/                   223 个自动化测试 + Workers 运行时 shim
-│   ├── harness/                   Node 端 Workers 运行时替身（含故障注入，见 TEST_REPORT.md）
-│   └── *.test.ts                  8 个测试文件
-├── tools/mock-phone/              模拟手机 WebSocket 客户端（可命令行、可被引用）
-├── tools/check-device-credential.ts  部署前检查：设备令牌 → DEVICE_TOKENS 记录（令牌只走 stdin）
-├── tools/gate1-smoke.mjs           ★ 部署后自检：B1–B4 的 24 条期望写成可执行断言（只读、不需要秘密）
-├── tools/gate1-smoke-selftest.mjs  ★ 上面那个脚本的自检：先证明会红，再证明会绿
-├── e2e/run-local-e2e.ts           端到端：真 HTTP + 真 WebSocket + 官方 MCP SDK
-├── android/                       Kotlin + Compose + OkHttp 手机端 App
-│   ├── README-ANDROID.md          前台服务类型选择理由、人工验证清单
-│   └── COMPATIBILITY-ANDROID-13-16.md  Android 13–16 逐项官方规范核对
-├── docs/
-│   ├── PROTOCOL.md                内部 WSS 协议规范（规则 R1–R13）
-│   ├── OAUTH-DESIGN.md            OAuth 方案设计（Gate 1 已按它实现，实际实现见 worker/src/oauth/）
-│   ├── GATE1_DEPLOYMENT.md        ★ 部署方案：资源清单、费用风险、命令、回滚、资源删除（待批准）
-│   ├── GATE1_CHATGPT_SETUP.md     ★ ChatGPT 接入说明：怎么在客户端加这个 MCP server、授权、验收、排障（NOT RUN）
-│   ├── GATE1_ACCEPTANCE.md        ★ 验收报告：阶段 A PASS / 阶段 B、C BLOCKED
-│   └── GATE1_SECURITY.md          ★ Gate 1 安全说明：OAuth 决策、威胁 T13–T26、已知问题 G1-K1…K6
-├── .github/workflows/             两个**手动触发**的工作流：Debug APK 构建、Worker 测试（都无部署、无密钥）
-├── test-reports/                  各项测试的**原始输出**（本报告的证据来源）
-├── SECURITY.md                    威胁模型与安全边界
-├── ARCHITECTURE.md                架构与关键设计决策
-└── TEST_REPORT.md                 测试报告（含 NOT RUN 项）
-```
+详细历史见 [TEST_REPORT.md](TEST_REPORT.md)、[docs/GATEWAY_V1.md](docs/GATEWAY_V1.md)、
+[docs/ANDROID_GATEWAY_V15.md](docs/ANDROID_GATEWAY_V15.md)。
 
 ---
 
-## 4. 快速开始（本地）
+## 3. 本地验证
 
-前置：Node ≥ 20。本仓库锁定了 `package-lock.json`。
+前置：Node ≥ 20、JDK 17、Android SDK（仅 Android 构建需要）。
 
 ```bash
 npm install
-```
 
-### 4.1 类型检查 + 单元测试 + 端到端
+# Worker：类型检查 + 单元/集成测试
+npm run typecheck
+npm run test
 
-```bash
-npm run gate0        # = typecheck && test && e2e
-```
+# 可选：真 HTTP + 真 WebSocket + 官方 MCP SDK 的本地端到端
+npm run e2e
 
-或者分开跑：
-
-```bash
-npm run typecheck    # tsc --noEmit
-npm run test         # 223 个用例（8 个测试文件）
-npm run e2e          # 21 项端到端检查（真 HTTP + 真 WebSocket + 官方 MCP SDK）
-```
-
-部署前还想自查两件事（都**不上传、不创建任何云端资源**）：
-
-```bash
-# 1) 部署配置能不能打包（三个 DO 绑定都会在这里被解析一遍）
-npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc --dry-run
-
-# 2) 设备令牌 → DEVICE_TOKENS 记录（令牌只从 stdin 读，输出只有摘要）
-printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-android-phone
-```
-
-### 4.2 手动起一个"手机"和一个网关
-
-> ⚠ **`npm run dev` 在本容器里跑不起来** —— `wrangler dev --local` 需要 workerd，而 workerd 在这个 Android 容器里因虚拟地址空间布局限制直接 abort。原因与证据见 [TEST_REPORT.md](TEST_REPORT.md) 的「NOT RUN」一节。
-
-用模拟手机直连一个**本地网关**（由 shim 驱动）时，请用 `npm run e2e`；它会把整条链路真跑一遍并打印每一步。
-
-单独跑模拟手机客户端（连接一个已经在跑的网关）：
-
-```bash
-# 令牌从环境变量读，不要写进任何文件、也不要粘到聊天里
-export MCP_DEVICE_TOKEN='<本地测试令牌>'
-
-npm run mock:phone -- \
-  --url ws://127.0.0.1:8787/phone/ws \
-  --device test-phone-1 \
-  --token "$MCP_DEVICE_TOKEN" \
-  --scenario normal        # normal | no-response | wrong-request-id | duplicate-pong
-                           # | late | drop-after-ping | noisy | binary | hello-mismatch
-```
-
-`--scenario` 存在的意义是把 Gate 0 要求覆盖的那些**恶劣情况**变成一条命令，而不是靠人手去拔网线。
-
-### 4.3 Android
-
-```bash
+# Android
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:testDebugUnitTest   # 171 个 JVM 单测
-npm run smoke:selftest                                                       # 部署后自检脚本的自检（离线）
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:verifyManifestClasses # Manifest 类名 ↔ 真实 dex
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:lintDebug            # Lint 门禁（abortOnError = true）
-ANDROID_HOME=/opt/android-sdk ./gradlew --no-daemon :app:assembleDebug        # 产出 Debug APK
+./gradlew :app:testDebugUnitTest :app:lintDebug
+./gradlew :app:assembleDebug
 ```
 
-产物：`android/app/build/outputs/apk/debug/app-debug.apk`（`versionName 0.1.4-gate1`，`applicationId com.androidmcphub.app`，`minSdk 26 / targetSdk 35`）。
-现成的交付件在 `dist/Android-MCP-Hub-Gate1-debug.apk`（SHA-256 见 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md) §3）。
-手机端配置（网关地址、设备 ID、令牌）在 App 界面上填，**不写在源码里**；设备令牌用 Android Keystore 里的密钥加密后存本机私有存储（**不留明文**）。
+产物：`android/app/build/outputs/apk/debug/app-debug.apk`；
+交付副本见 `dist/Android-MCP-Hub-v1.6-debug.apk`，校验值在 `dist/SHA256SUMS.txt`。
 
-> 想拿到一个现成的 APK，也可以用手动触发的 GitHub Actions 工作流：`.github/workflows/android-debug-apk.yml`（**只用 `workflow_dispatch`**，不部署、不读任何密钥）。⚠ 它在本仓库里**从未被执行过**。
->
-> **在 Android/Termux 上开发时**：`npm ci` 会去装 workerd 的原生二进制，而它**不支持 android-arm64** ——
-> 依赖装不上，`tsc` / `vitest` / `e2e` 都跑不起来。这不是代码的问题，是宿主架构的问题。
-> 为此新增了 `.github/workflows/worker-gate1-check.yml`：同样**只用 `workflow_dispatch`**、`permissions: contents: read`，
-> 在 `ubuntu-latest` + Node 24 上跑 `npm ci` → `typecheck` → `test` → `e2e`，**不登录任何云账号、不配置任何 Secret**，
-> 失败时把三个日志的尾部打出来并上传 artifact。⚠ 它同样**还没在 GitHub 上真实执行过** —— 需要手动点一次（见 `TEST_REPORT.md` §12.16）。
+> **不要**把令牌写进命令行参数、文件或聊天记录。需要生成 `DEVICE_TOKENS` 记录时，
+> 令牌只走 stdin：`printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id my-phone`。
 
 ---
 
-## 5. 配置项
+## 4. 自己部署
 
-全部通过 Worker 的 `vars` / secrets 注入，代码里没有默认令牌。见 `worker/wrangler.jsonc` 与 `worker/.dev.vars.example`。
+完整步骤见 **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**，包括：
 
-| 名字 | 默认 | 说明 |
+- Cloudflare 账户、Worker、四个 Durable Object 与迁移；
+- `DEVICE_TOKENS`、`OAUTH_OWNER_SECRET`、`GATEWAY_ADMIN_TOKEN`、
+  `GATEWAY_ANDROID_PAIRING_CODE`、`GATEWAY_UPSTREAM_SECRETS` 的生成与注入；
+- 上游允许清单 `GATEWAY_ALLOWED_URLS` 的填写原则；
+- 部署后自检、Android 配对、回滚与资源删除。
+
+一句话版本（**先读完部署文档再执行**）：
+
+```bash
+npx wrangler@4.149.0 login
+npx wrangler@4.149.0 secret put DEVICE_TOKENS --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put OAUTH_OWNER_SECRET --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put GATEWAY_ADMIN_TOKEN --config worker/wrangler.jsonc
+npx wrangler@4.149.0 secret put GATEWAY_ANDROID_PAIRING_CODE --config worker/wrangler.jsonc
+npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc
+```
+
+开发者的线上 Worker **不会**替你的部署提供服务；每个部署都有自己的地址、凭据与数据。
+
+---
+
+## 5. 客户端接入
+
+MCP 地址固定为：
+
+```
+https://<your-worker>.workers.dev/mcp
+```
+
+两种鉴权方式：
+
+1. **URL + Bearer Token**（推荐给支持自定义 Header 的客户端）
+   - 在 Android「服务 → 云端网关 → 访问令牌」或操作台 `/gateway` 签发；
+   - 明文只显示一次；
+   - 令牌只放在 `Authorization` 头，**不要**拼进 URL、查询参数或截图。
+2. **OAuth 2.1 + PKCE**
+   - 客户端走 RFC 9728 / 8414 发现、动态注册、同意页；
+   - 需要配置 `OAUTH_OWNER_SECRET` 作为运维口令。
+
+各客户端的实际配置方式、兼容性与限制见 **[docs/CLIENT_SETUP.md](docs/CLIENT_SETUP.md)**。
+**不要**把「连上 Hub」理解成「自动获得所有上游工具」：每个 `ext_*` 工具仍需逐项授权。
+
+---
+
+## 6. Android 原生能力
+
+29 个原生工具 + 7 个 Hub/设备基础工具，统一命名、独立 Schema、稳定错误码：
+
+- `memo_*`、`todo_*`、`reminder_*`：本机持久化，不依赖第三方 App；
+- `calendar_*`：Calendar Provider，按系统权限读写；
+- `alarm_create` / `alarm_open_list`：系统 AlarmClock Intent；
+- `device_get_usage_stats`：UsageStatsManager，需要「使用情况访问」；
+- `device_get_status`、`device_set_volume`、`device_set_flashlight`、
+  `device_open_app`、`device_open_settings`、`device_post_notification` 等设备能力。
+
+授权是三层结构：只读总开关 → 写入总开关（默认关）→ 逐条工具开关（写入类默认关）。
+删除类工具还要求调用方显式传 `confirm=true`。完整清单、权限与人工验收步骤见
+**[docs/NATIVE_TOOLS.md](docs/NATIVE_TOOLS.md)**。
+
+---
+
+## 7. 配置项
+
+敏感值一律通过 `wrangler secret put` 注入，不进 `wrangler.jsonc`、不进仓库。
+
+| 名字 | 类型 | 说明 |
 | --- | --- | --- |
-| `PHONE_PING_TIMEOUT_MS` | `10000` | 一次 `phone_ping` 等 pong 的上限。**服务端**计时 |
-| `HEARTBEAT_INTERVAL_MS` | `30000` | 心跳间隔 |
-| `MAX_PENDING_REQUESTS` | `16` | 单台手机同时在飞的请求上限，超了立刻失败而不是排队 |
-| `MAX_PHONE_MESSAGE_BYTES` | `65536` | 单帧上限，超了拒绝 |
-| `SUPPORTED_MCP_PROTOCOL_VERSIONS` | `2025-06-18,2025-03-26,2024-11-05` | 协商用 |
-| `DEFAULT_DEVICE_ID` | 空 | 只配了一台手机时可以省掉 `device_id` |
-| `MCP_ACCESS_TOKEN` | 无 | **secret，可选**。静态 Bearer，只给本机 `curl` / e2e 用；**真实部署时不要设置它**，ChatGPT 走 OAuth |
-| `DEVICE_TOKENS` | 无 | **secret**。`[{deviceId, tokenSha256, label, createdAt, revokedAt}]`，只存 sha256 |
-| `OAUTH_OWNER_SECRET` | 无 | **secret**。同意页口令；**同时是 OAuth 的开关** —— 不设置时整个 OAuth 面回 404 |
-| `OAUTH_SCOPE` | `mcp:tools` | 签发的访问令牌带的 scope |
-| `OAUTH_ACCESS_TOKEN_TTL_MS` | `3600000` | 访问令牌有效期（夹紧 [60s, 24h]） |
-| `OAUTH_REFRESH_TOKEN_TTL_MS` | `2592000000` | 刷新令牌有效期（夹紧 [60s, 365d]） |
-| `OAUTH_CODE_TTL_MS` | `300000` | 授权码有效期（夹紧 [10s, 10min]） |
-| `OAUTH_CONSENT_TTL_MS` | `600000` | 同意请求有效期（夹紧 [10s, 1h]） |
-| `OAUTH_REDIRECT_ALLOWLIST` | `chatgpt.com` | 允许的重定向主机；只有显式含 `localhost` 时才放行 http 回环 |
+| `DEVICE_TOKENS` | secret | 手机设备令牌表，只存 SHA-256 摘要；轮换时追加新记录并给旧的填 `revokedAt` |
+| `OAUTH_OWNER_SECRET` | secret | 同意页口令；**未设置时整个 OAuth 面回 404** |
+| `GATEWAY_ADMIN_TOKEN` | secret | 操作台 `/gateway` 与全局管理 API；不下发给任何客户端 |
+| `GATEWAY_ANDROID_PAIRING_CODE` | secret | Android 配对码；未设置时 `/gateway/pair` 回 404 |
+| `GATEWAY_UPSTREAM_SECRETS` | secret | 上游 Authorization 值，键为 `ownerId/secretRef`；服务只保存引用 |
+| `GATEWAY_ENABLED` | var | `"true"` 才启用网关与操作台 |
+| `GATEWAY_ALLOWED_URLS` | var | 上游**精确 URL** 允许清单（逗号分隔，无 query/hash） |
+| `PHONE_PING_TIMEOUT_MS` | var | 手机响应超时，默认 `10000` |
+| `MAX_PENDING_REQUESTS` | var | 单台手机在飞请求上限，默认 `16` |
+| `MAX_PHONE_MESSAGE_BYTES` | var | 单帧上限，默认 `65536` |
+| `OAUTH_REDIRECT_ALLOWLIST` | var | OAuth 允许的回调主机，默认 `chatgpt.com` |
 
-OAuth 相关的安全设计与已知问题见 [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md)。
-
-任务书要求"这些参数必须可配置"。每个值都有上下限夹紧（`worker/src/config.ts`）：夹紧的意义是挡 `0`/负数/荒谬大值，而**不是**替运维决定"多快算快"——所以下限刻意放得很低（`PHONE_PING_TIMEOUT_MS` 最低 50ms），这样本地回环上的测试可以真的测到超时路径。
+所有数值都有上下限夹紧（`worker/src/config.ts`）；夹紧用于挡 `0`、负数与荒谬大值，
+不替运维决定业务阈值。
 
 ---
 
-## 6. Gate 0 / 0.1 / 0.2 / 0.3 / 1 明确**没有**做的事
+## 8. 文档索引
 
-- ❌ 没有 `wrangler deploy`，没有创建任何 Cloudflare 资源，没有 D1/KV/R2/Queue。
-- ❌ **没有在真实 Cloudflare 上跑过 OAuth**（Gate 1 实现的是代码 + 本地替身证据；真实授权流程 NOT RUN）。
-- ❌ **没有让 ChatGPT 官方客户端真的调过一次 `phone_ping`**（任务书把这条列为 Gate 1 的唯一验收标准，目前 BLOCKED）。
-- ❌ 没有接入任何本地 MCP 应用（不是 `phone_ping` 之外的工具都没有，是**一个都没有**）。
-- ❌ 没有自动部署流水线（`.github/workflows` 里那两个都只在手动点击时才跑：一个构建 APK、一个跑 Worker 测试；都不部署、不读密钥），没有把任何真实凭据提交进仓库。
-- ❌ 没有测量真实手机上的 Android 运行时行为（App 编得过、单测跑得过、APK 出得来、Lint 门禁过得了，但**从未在真机上运行过**，手工验证清单一条都没跑）。
-- ❌ 没有在真实 workerd 上跑过任何测试（容器跑不起 workerd，原因见 TEST_REPORT.md）。
-- ❌ 没有验证 Android Keystore 的真实加解密路径（JVM 测不到，工程没引 Robolectric）。
-
-完整清单与逐条证据在 [TEST_REPORT.md](TEST_REPORT.md) 与 [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md)。
-
----
-
-## 7. 文档索引
-
-| 文件 | 内容 |
+| 文档 | 内容 |
 | --- | --- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 架构、连接代次、超时与重连、DO 为什么这么切分 |
-| [SECURITY.md](SECURITY.md) | 威胁模型、凭据模型、安全边界与残余风险 |
-| [TEST_REPORT.md](TEST_REPORT.md) | 实际执行的命令与结果、**NOT RUN 项**、已知风险 |
-| [docs/GATE1_DEPLOYMENT.md](docs/GATE1_DEPLOYMENT.md) | **待批准**的部署方案：资源清单、费用风险、命令、验证、回滚、资源删除 |
-| [docs/GATE1_CHATGPT_SETUP.md](docs/GATE1_CHATGPT_SETUP.md) | **ChatGPT 接入说明**：三个 URL 别填错、官方接入流程、为什么只能选 OAuth、同意页与六项验收、症状→原因排障表 |
-| [docs/GATE1_ACCEPTANCE.md](docs/GATE1_ACCEPTANCE.md) | Gate 1 验收：阶段 A 的 PASS 明细 + 阶段 B/C 的 BLOCKED 清单 |
-| [docs/GATE1_SECURITY.md](docs/GATE1_SECURITY.md) | Gate 1 安全：OAuth 决策、威胁 T13–T26、已知问题 G1-K1…G1-K6 |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | 内部 WSS 协议 v1（规则 R1–R13、失败码、心跳） |
-| [docs/OAUTH-DESIGN.md](docs/OAUTH-DESIGN.md) | OAuth 2.1 + PKCE 方案设计（Gate 1 已实现，实现见 `worker/src/oauth/`） |
-| [android/README-ANDROID.md](android/README-ANDROID.md) | 前台服务类型选择理由、人工验证清单 |
-| [android/COMPATIBILITY-ANDROID-13-16.md](android/COMPATIBILITY-ANDROID-13-16.md) | Android 13–16 逐项官方规范核对、`specialUse` 的合规论证与替代方案对比 |
+| [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) | **自己部署**：前置条件、Secret、部署、自检、回滚、删除 |
+| [docs/CLIENT_SETUP.md](docs/CLIENT_SETUP.md) | **客户端接入**：令牌 vs OAuth、ChatGPT / Claude Desktop / Codex / 微光机兼容性与排障 |
+| [docs/NATIVE_TOOLS.md](docs/NATIVE_TOOLS.md) | 36 个工具的权限、确认语义、数据位置与人工验收步骤 |
+| [docs/OPEN_SOURCE_AUDIT.md](docs/OPEN_SOURCE_AUDIT.md) | 开源前密钥扫描、依赖许可证清单与发布建议 |
+| [docs/GATEWAY_V1.md](docs/GATEWAY_V1.md) | 通用网关 V1 的设计边界、安全模型与管理 API |
+| [docs/ANDROID_GATEWAY_V15.md](docs/ANDROID_GATEWAY_V15.md) | Android 侧网关客户端与配对 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Durable Object 切分、连接代次、超时与重连 |
+| [SECURITY.md](SECURITY.md) | 威胁模型、凭据模型与残余风险 |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | 内部 WSS 协议 v1 |
+| [docs/OAUTH-DESIGN.md](docs/OAUTH-DESIGN.md) | OAuth 2.1 + PKCE 设计 |
+| [android/README-ANDROID.md](android/README-ANDROID.md) | 前台服务类型与人工验证清单 |
+| [TEST_REPORT.md](TEST_REPORT.md) | 历史测试证据与 NOT RUN 项 |
 
 ---
 
-## 8. 下一步（**等用户批准，不要自己往下走**）
+## 9. 已知限制
 
-**Gate 1 的代码与本地验证已经做完，现在停在"部署前"这一步。**
+- **未做真机验收**：本轮的 Android 测试全部是 JVM 测试，`UsageStatsManager`、Calendar Provider、
+  AlarmClock Intent、通知权限等路径需要真机手工验证（步骤见 [docs/NATIVE_TOOLS.md](docs/NATIVE_TOOLS.md)）。
+- **未做真实客户端验收**：ChatGPT、Claude Desktop、Codex、微光机均未使用真实账号连接本部署。
+- **未部署本轮代码**：线上历史地址运行的是更早版本；升级前请按 [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)
+  走 dry-run 与迁移核对。
+- **上游 OAuth 不自动续期**：上游服务需要运维在 `GATEWAY_UPSTREAM_SECRETS` 里提供 Authorization 值。
+- **不允许任意 URL**：上游必须逐个加入 `GATEWAY_ALLOWED_URLS`，这是安全边界而非缺陷。
+- **没有 LICENSE 文件**：仓库尚未附开源许可证，对外发布前需由仓库所有者选定；
+  第三方依赖的许可证情况见 [docs/OPEN_SOURCE_AUDIT.md](docs/OPEN_SOURCE_AUDIT.md)。
 
-用户在可信环境完成下面 4 件事之后，才能进入阶段 B / 阶段 C：
+---
 
-1. `npx wrangler@4.149.0 login`（用 **Android MCP Hub 专属账号**，与既有生产项目完全独立）；
-2. `npx wrangler@4.149.0 secret put DEVICE_TOKENS --config worker/wrangler.jsonc`；
-3. `npx wrangler@4.149.0 secret put OAUTH_OWNER_SECRET --config worker/wrangler.jsonc`；
-4. `npx wrangler@4.149.0 deploy --config worker/wrangler.jsonc`。
+## 10. 真实设备验收清单（需要你操作）
 
-完整命令、验证步骤、回滚与资源删除在 [docs/GATE1_DEPLOYMENT.md](docs/GATE1_DEPLOYMENT.md)。
-**没有用户明确确认，不做任何云端操作、不创建任何收费资源、不改账号配置。**
-
-阶段 B/C 通过之后，才谈第三件事：接入本地 MCP 应用（仍未开始设计）。
+1. 安装 `app-debug.apk`，授予通知权限；
+2. 在 App 填入网关地址、设备 ID、设备令牌并保存；
+3. 在服务页切到「云端网关」，填入配对码完成配对；
+4. 在客户端用 URL + Token 或 OAuth 连接 `/mcp`，确认只看到已授权工具；
+5. 依次验证：`phone_ping`、备忘录 CRUD、待办完成、日历读写、提醒、闹钟 Intent、
+   使用统计（需在系统设置里授予「使用情况访问」）；
+6. 撤销一枚令牌，确认该客户端立即被拒绝；撤销前已完成的调用不会被追溯取消。

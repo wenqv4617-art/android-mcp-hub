@@ -63,6 +63,7 @@ e2e/.tmp/
 # 所以只能放进仓库里；用户与审计员要能直接下载，而不是只能相信 SHA-256）。
 # 这两个例外必须写在 *.apk / dist/* 之后 —— gitignore 是"最后一条匹配的规则生效"。
 !dist/Android-MCP-Hub-Gate1-debug.apk
+!dist/Android-MCP-Hub-v1.6-debug.apk
 !dist/SHA256SUMS.txt
 
 # 例外：Lint 门禁的实测证据（Gate 0.3 新增 —— 里面既有"门禁会红"的原始输出，

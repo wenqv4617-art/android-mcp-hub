@@ -7,8 +7,8 @@
 #    2) 把下面两个值换成你自己临时生成的测试值
 #    3) worker/.dev.vars 已被 .gitignore 忽略，**永远不会**进入仓库
 #
-#  生成设备凭据的推荐姿势（不要把明文 token 打进命令行历史）：
-#    npm run token:hash -- test-phone-1            # 交互式读入 token 并打印 JSON
+#  生成设备凭据的推荐姿势（令牌只走 stdin，不进入命令行历史）：
+#    printf '%s' "$DEVICE_TOKEN" | npm run check:credential -- --device-id test-phone-1 --label "local mock phone"
 #
 #  ⚠ 这里的东西只用于本地 `wrangler dev --local`。
 #     真实部署时必须用 `wrangler secret put MCP_ACCESS_TOKEN` 等命令注入，
