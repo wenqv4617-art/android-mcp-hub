@@ -1623,3 +1623,102 @@ npm run e2e
    「服务停止原因 = 系统停止前台服务」且「连接意图 = 是」；
 4. 服务被停后重新打开 App，不点任何按钮，应在 2 秒内自动回到「已连接」；
 5. ColorOS「电池 → 应用 → 允许后台运行/无限制」前后各测一轮并记录差异。
+
+## 15. V1.6.3：双端连接诊断与云端日志回传（2026-10-31）
+
+### 15.1 目标与边界
+
+V1.6.2 已修复"服务销毁误报用户断开"和自动恢复，但真机仍反复出现
+`server_close code=4001` → 重连 → `network:connection_reset`。这一轮的目标不是
+继续叠加保活手段，而是**让证据可见**：手机侧事件结构化、云端保存自己的连接观测、
+App 内直接查看两端合并时间线。
+
+### 15.2 云端（Worker / DO）
+
+- 每设备一个有界诊断缓冲区：**200 条 / 24 小时**，超出按最旧丢弃并累计 `dropped`；
+  存储损坏时退化为空缓冲区，而不是让 DO 起不来。
+- 服务端主动关闭在调用 `close()` **之前**登记关闭意图。手机上报 `server_close` 时
+  用 `generation` 交叉验证：能对上才写 `server_initiated: true` 与真实调用来源；
+  对不上写 `null`（无法确定），**不编造**。
+- 关闭码语义（`4000` liveness_timeout / `4001` replaced_by_newer_connection /
+  `4002` device_credential_revoked）只由服务端 `close_codes` 返回。
+- `GET /phone/diagnostics`：与 `/phone/ws` 同一套设备鉴权
+  （`X-Device-Id` + `Authorization: Bearer`），只读、`Cache-Control: no-store`，
+  只返回已鉴权设备自己的事件；没有公开 `/logs`。
+- `diag_event` 的所有字段再过一次逐字段白名单：事件名/类别/网络/屏幕/关闭来源是闭集，
+  `exception_class` 只接受标识符形状（最长 64），自由文本、令牌形状的值丢弃。
+
+### 15.3 Android
+
+- `LinkEvent` / `DiagReport` 增加结构化字段：关闭码、连接代次、失败类别、
+  **异常类名（不采集 message）**、网络/屏幕/VPN、PID/进程存活时长、心跳静默时长、
+  本地关闭来源。应用层心跳与 OkHttp 协议层 ping 在诊断页分开说明。
+- `DiagReportQueue`：断网期间排队，**50 条 / 15 分钟**上限，先丢最旧、过期不补发，
+  发送失败放回队首；单测覆盖容量、过期、失败重排与 8 线程并发入队。
+- `CloudDiagnosticsClient`：独立 OkHttpClient（8 秒连接/读写、12 秒整次调用、
+  不重定向、不重试），只发 GET；云端查询失败只更新诊断页状态，不影响主 WebSocket。
+- 诊断页：来源「本机 / 云端 / 合并」、按类型筛选、手动刷新、复制、脱敏导出；
+  云端事件先按 `server_time - fetched_at` 校正到本机时间轴再排序，行内同时显示
+  服务端与校正后本机时间；「可能相关」必须同时满足 ±15 秒与代次不冲突。
+
+### 15.4 测试结果
+
+| 项 | 结果 |
+| --- | --- |
+| Worker 类型检查 | 通过 |
+| Worker 测试 | **500 通过 / 22 个文件**（`npm run test`） |
+| 本地端到端 | **114 通过 / 0 失败**（`npm run e2e`） |
+| Android JVM 测试 | **835 通过 / 0 失败 / 7 跳过**（`./gradlew :app:testDebugUnitTest -Pandroid.aapt2FromMavenOverride=`） |
+| Android Lint | `BUILD SUCCESSFUL`（`abortOnError = true`） |
+
+诊断相关关键用例：未认证 401、设备 A 的令牌打不开设备 B、未知设备不会被查询创建成 DO、
+缓冲区有界与过期清理、自由文本/令牌形状字段不落库、异常类名形状校验、
+主动关闭与异常断连的关闭码不编造、查询后主连接仍能 ping、`/logs` 不存在、
+合并时间线按校正时间排序、代次冲突不标相关、导出不含令牌/地址。
+
+### 15.5 Worker 部署与公网验证
+
+- 工作流：[41201688844](https://github.com/wenqv4617-art/android-mcp-hub/actions/runs/41201688844)，
+  commit `59fc1e8`，`gate0`
+- 部署结果：成功，`https://android-mcp-hub.causticrry.workers.dev`，
+  Current Version ID `8eadbdf7-58b5-4884-9927-9cd1a4f70e31`
+- 部署工作流内置的在线验收（真实部署）PASS
+- 公网探针（2026-10-31）：
+  - `GET /phone/diagnostics`（无凭据）→ **401**
+  - `GET /phone/diagnostics`（伪造设备 + 伪造令牌）→ **401**
+  - `GET /logs` → **404**
+- **未验证**：使用真实生产设备令牌的授权查询路径。本机没有生产设备凭据，
+  且凭据不得输出；授权路径由 Worker 测试中的真实令牌夹具覆盖（含设备 A/B 隔离）。
+
+### 15.6 本机 Wrangler 权限边界（重要）
+
+本机 `npx wrangler whoami` **未登录**，`wrangler tail` 不可用。因此：
+
+- 本轮**没有读取** Cloudflare 的实时/历史日志；
+- 不能据此推断"旧事件没有发生过"—— 只是本机没有读取权限；
+- 部署通过 GitHub Actions 完成，部署结果与公网探针如上，均在权限范围内。
+
+### 15.7 现场问题能回答到什么程度
+
+- **4001 是什么**：代码语义明确 —— 同一设备来了**更新的连接**，服务端用 4001
+  关闭旧连接（`replaced_by_newer_connection`）。它不是"设备离线"或"心跳超时"。
+- **为什么会反复重置**：没有真实设备与云端历史日志，**不能给出已证实的根因**。
+  V1.6.3 的作用是把下一次发生时的证据固定下来：谁先观察、代次、关闭意图、
+  是否有两条连接竞争、当时网络/VPN/屏幕状态。
+- **是否有重复连接**：`replaced` 事件会记录 `replaced_generation` / 新代次与调用来源；
+  若手机侧同时存在两条连接，合并时间线会显示 4001 与本地 `connected` 的先后关系，
+  但"是否重复连接"要以实际抓到的 `replaced` 事件为准，当前不能预先断言。
+- **是否与 VPN/网络切换有关**：每条事件都带 `network`/`vpn`，并可对照 `network_changed`；
+  在拿到真机事件前不下结论。
+
+### 15.8 ⛔ NOT RUN：真机验收
+
+本环境无 adb 设备、无生产设备令牌、无法读取 Cloudflare 实时日志。以下必须由用户执行，
+**完成之前不得宣称 V1.6.3 真机验收通过**：
+
+1. 安装新版 Release APK，连接后打开诊断页 →「刷新云端」，确认能看到云端事件与本机事件；
+2. 出现 4001 / `connection_reset` 时，切到「合并」，记录：
+   两端时间、代次、`server_initiated`、`caller`、`network`/`vpn`、以及是否标了「可能相关」；
+3. 飞行模式或主动断开主连接后，仍能刷新云端诊断（HTTPS 可达即可），且刷新失败不会重连主连接；
+4. 用另一台设备/另一枚令牌确认读不到本设备的日志；
+5. 把导出文本（已脱敏）回传，用于确认根因。
