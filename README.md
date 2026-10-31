@@ -184,6 +184,7 @@ https://<your-worker>.workers.dev/mcp
 | [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) | **自己部署**：前置条件、Secret、部署、自检、回滚、删除 |
 | [docs/CLIENT_SETUP.md](docs/CLIENT_SETUP.md) | **客户端接入**：令牌 vs OAuth、ChatGPT / Claude Desktop / Codex / 微光机兼容性与排障 |
 | [docs/NATIVE_TOOLS.md](docs/NATIVE_TOOLS.md) | 36 个工具的权限、确认语义、数据位置与人工验收步骤 |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | **性能与错误语义**：可复现的本地采样、缓存状态、历史 3.4–6.1 秒现象的结构性解释 |
 | [docs/OPEN_SOURCE_AUDIT.md](docs/OPEN_SOURCE_AUDIT.md) | 开源前密钥扫描、依赖许可证清单与发布建议 |
 | [docs/GATEWAY_V1.md](docs/GATEWAY_V1.md) | 通用网关 V1 的设计边界、安全模型与管理 API |
 | [docs/ANDROID_GATEWAY_V15.md](docs/ANDROID_GATEWAY_V15.md) | Android 侧网关客户端与配对 |
