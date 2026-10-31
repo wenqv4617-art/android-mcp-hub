@@ -139,6 +139,27 @@ class McpHubCatalogPerformanceTest {
     }
 
     @Test
+    fun `A4b servers_only 的 refresh 绕过可用性 TTL，但仍然不等待`() {
+        val transport = ProbeTransport("srv_a", tools = listOf(tool("t1")))
+        val h = harness(servers = listOf(config("srv_a")), transports = mapOf("srv_a" to transport))
+
+        h.serversOnly()
+        awaitTrue { transport.connects.get() >= 1 }
+        assertEquals(1, transport.connects.get())
+
+        // 可用性仍然新鲜：普通 servers_only 不再探测。
+        h.serversOnly()
+        assertEquals(1, transport.connects.get())
+
+        // 手动刷新：发起一次后台探活（结果下一次请求可见），本次响应照样立即返回。
+        val elapsed = timeMs { h.serversOnly(refresh = true) }
+        assertTrue("servers_only 的 refresh 不应该等待探测，实测 ${elapsed}ms", elapsed < 500)
+        awaitTrue { transport.connects.get() >= 2 }
+        assertEquals(2, transport.connects.get())
+        h.close()
+    }
+
+    @Test
     fun `A5 服务器数超过上限时如实标记 skipped`() {
         val h = harness(
             servers = listOf(config("srv_a"), config("srv_b"), config("srv_c")),
@@ -237,6 +258,76 @@ class McpHubCatalogPerformanceTest {
         h.now += h.limits.catalogTtlMs + 1
         val refreshed = h.list()
         assertEquals(HubCatalog.SOURCE_REFRESH, refreshed.getString("catalog_source"))
+        assertEquals(2, transport.connects.get())
+        h.close()
+    }
+
+    @Test
+    fun `B4b 手动 refresh 绕过新鲜缓存并只产生一次连接`() {
+        val transport = ProbeTransport("srv_a", tools = listOf(tool("t1")))
+        val h = harness(servers = listOf(config("srv_a")), transports = mapOf("srv_a" to transport))
+        h.grantAll("srv_a", transport.tools)
+
+        h.list()
+        assertEquals(1, transport.connects.get())
+
+        // 缓存仍然新鲜，普通请求命中缓存。
+        assertEquals(HubCatalog.SOURCE_CACHE, h.list().getString("catalog_source"))
+        assertEquals(1, transport.connects.get())
+
+        // 手动刷新：跳过 TTL，真的重新连一次。
+        val refreshed = h.list(refresh = true)
+        assertEquals(2, transport.connects.get())
+        assertEquals(HubCatalog.SOURCE_REFRESH, refreshed.getString("catalog_source"))
+        assertEquals(1, refreshed.getJSONArray("tools").length())
+        h.close()
+    }
+
+    @Test
+    fun `B4c 手动 refresh 绕过失败退避，失败仍然如实返回`() {
+        val flaky = ProbeTransport("srv_a", tools = listOf(tool("t1")), failing = true)
+        val h = harness(servers = listOf(config("srv_a")), transports = mapOf("srv_a" to flaky))
+        h.grantAll("srv_a", flaky.tools)
+
+        assertEquals(0, h.list().getJSONArray("tools").length())
+        val firstConnects = flaky.connects.get()
+        assertEquals(1, firstConnects)
+
+        // 退避窗口内的普通请求不重连。
+        h.list()
+        assertEquals(firstConnects, flaky.connects.get())
+
+        // 手动刷新绕过了退避 —— 用户点「刷新」就应该看到这次尝试的结果。
+        val forced = h.list(refresh = true)
+        assertEquals(firstConnects + 1, flaky.connects.get())
+        assertEquals(0, forced.getJSONArray("tools").length())
+        assertEquals(HubStates.AVAILABILITY_OFFLINE, forced.server(0).getString("availability"))
+        h.close()
+    }
+
+    @Test
+    fun `B4d 并发的 refresh 请求仍然合并成一次刷新`() {
+        val transport = ProbeTransport("srv_a", tools = listOf(tool("t1")), connectDelayMs = 800)
+        val h = harness(servers = listOf(config("srv_a")), transports = mapOf("srv_a" to transport))
+        h.grantAll("srv_a", transport.tools)
+        h.list()  // 预热
+        assertEquals(1, transport.connects.get())
+
+        val threads = 4
+        val barrier = CyclicBarrier(threads)
+        val done = CountDownLatch(threads)
+        repeat(threads) {
+            Thread {
+                try {
+                    barrier.await(2, TimeUnit.SECONDS)
+                    h.list(refresh = true)
+                } finally {
+                    done.countDown()
+                }
+            }.apply { isDaemon = true }.start()
+        }
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        // 单飞不受 refresh 影响：4 个并发刷新仍只连一次。
         assertEquals(2, transport.connects.get())
         h.close()
     }
@@ -523,16 +614,19 @@ class McpHubCatalogPerformanceTest {
             servers.forEach(serverStore::upsert)
         }
 
-        fun list(offset: Int? = null, limit: Int? = null): JSONObject {
+        fun list(offset: Int? = null, limit: Int? = null, refresh: Boolean? = null): JSONObject {
             val args = JSONObject()
             if (offset != null) args.put("offset", offset)
             if (limit != null) args.put("limit", limit)
+            if (refresh != null) args.put("refresh", refresh)
             return payload(router.route(HubCommands.LIST_TOOLS, args))
         }
 
-        fun serversOnly(): JSONObject = payload(
-            router.route(HubCommands.LIST_TOOLS, JSONObject().put("servers_only", true)),
-        )
+        fun serversOnly(refresh: Boolean? = null): JSONObject {
+            val args = JSONObject().put("servers_only", true)
+            if (refresh != null) args.put("refresh", refresh)
+            return payload(router.route(HubCommands.LIST_TOOLS, args))
+        }
 
         fun grantAll(serverId: String, tools: List<McpRemoteTool>) {
             val config = serverStore.find(serverId) ?: error("没有这台服务器：$serverId")

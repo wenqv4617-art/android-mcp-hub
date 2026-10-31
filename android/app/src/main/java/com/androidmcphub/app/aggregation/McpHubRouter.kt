@@ -173,6 +173,9 @@ class McpHubRouter(
         val limit = readInt(arguments, "limit", hubLimits.maxToolsPerPage, 1, hubLimits.maxPageSize)
         val includeSchema = readBoolean(arguments, "include_schema", false)
         val serversOnly = readBoolean(arguments, "servers_only", false)
+        // 显式手动刷新：绕过 TTL 与失败退避，立刻重新连一次。
+        // 单飞仍然生效 —— 同一个 request_id / 并发的两次刷新只会产生一次网络往返。
+        val refresh = readBoolean(arguments, "refresh", false)
 
         val configured = serverStore.list().filter { it.enabled }.sortedBy { it.id }
         trace.stage("config_read", detail = "servers=${configured.size}")
@@ -190,9 +193,9 @@ class McpHubRouter(
         //  · 完整目录走"缓存优先 + 有界并发刷新"（5.2/5.3）。
         // 它们共用同一份缓存，所以"先查服务器、再列工具"不会让第二次请求重新连一遍。
         val collected = if (serversOnly) {
-            collectAvailability(selected, trace)
+            collectAvailability(selected, trace, refresh)
         } else {
-            collectCatalog(selected, trace)
+            collectCatalog(selected, trace, refresh)
         }
         val servers = collected.servers
         val tools = collected.tools
@@ -287,7 +290,11 @@ class McpHubRouter(
      * 下一次请求可见。这样"某台服务器慢/离线"在结构上就不可能拖慢这次响应 ——
      * 实测里那 13.6 秒的绝大部分正是串行等待一台离线服务器。
      */
-    private fun collectAvailability(selected: List<McpServerConfig>, trace: HubTrace): Collected {
+    private fun collectAvailability(
+        selected: List<McpServerConfig>,
+        trace: HubTrace,
+        forceRefresh: Boolean = false,
+    ): Collected {
         val now = clock()
         // 顺序是刻意的：**先取状态，再发起探测**。
         // 这样这份响应只反映"请求开始时已知的状态"，探测结果只对下一次请求可见 ——
@@ -308,9 +315,10 @@ class McpHubRouter(
         }
         var pending = false
         for (config in selected.take(hubLimits.maxServers)) {
-            if (cache.isAvailabilityFresh(config, hubLimits.availabilityTtlMs)) continue
+            if (!forceRefresh && cache.isAvailabilityFresh(config, hubLimits.availabilityTtlMs)) continue
             // 单飞 + 失败退避都在 [startRefresh] 里：重复请求不会变成重连风暴。
-            if (startRefresh(config, enumerate = false, trace = null) != null) pending = true
+            // forceRefresh 只绕过 TTL 与退避，**不**绕过单飞 —— 双击"刷新"不会打两次。
+            if (startRefresh(config, enumerate = false, trace = null, force = forceRefresh) != null) pending = true
         }
         trace.stage("servers_only", detail = "pending=$pending")
         return Collected(
@@ -335,13 +343,17 @@ class McpHubRouter(
      * 失败退避（[HubLimits.serverFailureBackoffMs]）保证一台挂掉的服务器不会在
      * 每次请求里都被重连一次；单飞（[refreshes]）保证并发请求共用同一次刷新。
      */
-    private fun collectCatalog(selected: List<McpServerConfig>, trace: HubTrace): Collected {
+    private fun collectCatalog(
+        selected: List<McpServerConfig>,
+        trace: HubTrace,
+        forceRefresh: Boolean = false,
+    ): Collected {
         val now = clock()
         val deadlineAt = monotonic() + hubLimits.catalogDeadlineMs
         val triggered = LinkedHashMap<String, CompletableFuture<Boolean>>()
         for (config in selected.take(hubLimits.maxServers)) {
-            if (cache.isFresh(config, hubLimits.catalogTtlMs)) continue
-            val future = startRefresh(config, enumerate = true, trace = trace) ?: continue
+            if (!forceRefresh && cache.isFresh(config, hubLimits.catalogTtlMs)) continue
+            val future = startRefresh(config, enumerate = true, trace = trace, force = forceRefresh) ?: continue
             triggered[config.id] = future
         }
         trace.stage("refresh_start", detail = "servers=${triggered.size}")
@@ -468,6 +480,7 @@ class McpHubRouter(
         config: McpServerConfig,
         enumerate: Boolean,
         trace: HubTrace?,
+        force: Boolean = false,
     ): CompletableFuture<Boolean>? {
         if (closed) return null
         // 只在锁内读 [refreshes]：它是普通 HashMap，锁外读会与另一个线程的写入竞争
@@ -475,7 +488,7 @@ class McpHubRouter(
         synchronized(refreshLock) {
             refreshes[config.id]?.let { return it }
             val failedAgo = cache.failedAgoMs(config)
-            if (failedAgo != null && failedAgo in 0..hubLimits.serverFailureBackoffMs) return null
+            if (!force && failedAgo != null && failedAgo in 0..hubLimits.serverFailureBackoffMs) return null
 
             val future = CompletableFuture<Boolean>()
             refreshes[config.id] = future
@@ -962,7 +975,8 @@ class McpHubRouter(
 
         val THREAD_IDS = AtomicInteger()
 
-        val ALLOWED_CATALOG_KEYS = setOf("server_id", "offset", "limit", "include_schema", "servers_only")
+        val ALLOWED_CATALOG_KEYS =
+            setOf("server_id", "offset", "limit", "include_schema", "servers_only", "refresh")
         val ALLOWED_SCHEMA_KEYS = setOf("server_id", "tool_name")
         val ALLOWED_CALL_KEYS = setOf("server_id", "tool_name", "arguments")
 

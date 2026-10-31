@@ -119,6 +119,30 @@ describe("Gate 3 / 聚合入口：参数校验", () => {
     );
   });
 
+  it("hub_list_tools：refresh 只接受布尔值，并进入转发参数", async () => {
+    expect(parseToolArguments(HUB_LIST_TOOLS_TOOL, { refresh: true }).hubRefresh).toBe(true);
+    expect(parseToolArguments(HUB_LIST_TOOLS_TOOL, { refresh: false }).hubRefresh).toBe(false);
+    for (const bad of ["true", 1, null]) {
+      expect(() => parseToolArguments(HUB_LIST_TOOLS_TOOL, { refresh: bad })).toThrow(/refresh 必须是布尔值/);
+    }
+
+    const rig = await makeRig();
+    const seen: Array<Record<string, unknown>> = [];
+    await dispatchToolCall(
+      loadConfig(rig.env),
+      "hub_list_tools",
+      { device_id: TEST_DEVICE_ID, refresh: true, servers_only: false },
+      async () => {
+        throw new Error("聚合工具不该走 ping 通道");
+      },
+      async (_deviceId, _toolName, args) => {
+        seen.push(args);
+        return phoneSuccess(HUB_PHONE_LIST_COMMAND, { servers: [], tools: [] });
+      },
+    );
+    expect(seen).toEqual([{ servers_only: false, refresh: true }]);
+  });
+
   it("hub_call_tool：server_id 与 tool_name 必填，格式严格", () => {
     expect(() => parseToolArguments(HUB_CALL_TOOL_TOOL, {})).toThrow(/server_id 必填/);
     expect(() => parseToolArguments(HUB_CALL_TOOL_TOOL, { server_id: "srv_alpha" })).toThrow(ToolArgumentError);
